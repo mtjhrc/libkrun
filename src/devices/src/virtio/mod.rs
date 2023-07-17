@@ -25,6 +25,7 @@ mod queue;
 #[cfg(not(feature = "tee"))]
 pub mod rng;
 pub mod vsock;
+pub mod net;
 
 #[cfg(not(feature = "tee"))]
 pub use self::balloon::*;
