@@ -15,21 +15,19 @@ use rate_limiter::persist::RateLimiterState;
 use rate_limiter::RateLimiter;
 use snapshot::Persist;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
-use utils::vm_memory::GuestMemoryMmap;
+use vm_memory::GuestMemoryMmap;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
 use super::device::Net;
 use super::{NET_NUM_QUEUES, NET_QUEUE_SIZE};
-use crate::devices::virtio::persist::{PersistError as VirtioStateError, VirtioDeviceState};
+//use crate::devices::virtio::persist::{PersistError as VirtioStateError, VirtioDeviceState};
 use crate::devices::virtio::{DeviceState, TYPE_NET};
 
-#[derive(Debug, Default, Clone, Versionize)]
+#[derive(Debug, Default, Clone)]
 // NOTICE: Any changes to this structure require a snapshot version bump.
 pub struct NetConfigSpaceState {
-    #[version(end = 2, default_fn = "def_guest_mac_old")]
     guest_mac: [u8; MAC_ADDR_LEN],
-    #[version(start = 2, de_fn = "de_guest_mac_v2", ser_fn = "ser_guest_mac_v2")]
     guest_mac_v2: Option<MacAddr>,
 }
 
@@ -164,6 +162,7 @@ mod tests {
     use crate::devices::virtio::device::VirtioDevice;
     use crate::devices::virtio::net::test_utils::{default_net, default_net_no_mmds};
     use crate::devices::virtio::test_utils::default_mem;
+    use crate::virtio::net::test_utils::default_net;
 
     fn validate_save_and_restore(net: Net, mmds_ds: Option<Arc<Mutex<Mmds>>>) {
         let guest_mem = default_mem();

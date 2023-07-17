@@ -16,11 +16,14 @@ libc = ">=0.2.39"
 log = "0.4.0"
 nix = "0.24.1"
 rand = "0.8.5"
-vm-memory = { version = "0.8.0", features = ["backend-mmap"] }
+vm-memory = { version = "0.8.0", features = ["backend-mmap", "backend-bitmap"] }
 
 arch = { path = "../arch" }
 utils = { path = "../utils" }
 polly = { path = "../polly" }
+dumbo = {path = "../dumbo"} # TODO: cond compile iff net feture
+mmds = {path = "../mmds"} # TODO: cond compile iff mmds
+
 virtio-bindings = "0.2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]

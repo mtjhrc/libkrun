@@ -4,6 +4,7 @@
 use crate::time;
 
 /// Generates pseudo random u32 numbers based on the current timestamp.
+/// NOTE: firecracker name for this function is xor_pseudo_rng_u32()
 pub fn xor_rng_u32() -> u32 {
     let mut t: u32 = time::timestamp_cycles() as u32;
     // Taken from https://en.wikipedia.org/wiki/Xorshift.

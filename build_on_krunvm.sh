@@ -8,7 +8,7 @@ if [ -z "$KRUNVM" ]; then
 	echo "Couldn't find krunvm binary"
 	exit -1
 fi
-
+use pollys
 SCRIPTPATH=`realpath $0`
 WORKDIR=`dirname $SCRIPTPATH`
 krunvm create fedora --name libkrun-builder -v $WORKDIR:/work -w /work

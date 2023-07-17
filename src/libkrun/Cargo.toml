@@ -19,6 +19,7 @@ devices = { path = "../devices" }
 polly = { path = "../polly" }
 utils = { path = "../utils" }
 vmm = { path = "../vmm" }
+rate_limiter = { path = "../rate_limiter" }
 
 [lib]
 name = "krun"

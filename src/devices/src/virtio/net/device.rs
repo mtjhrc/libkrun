@@ -15,20 +15,20 @@ use dumbo::pdu::arp::ETH_IPV4_FRAME_LEN;
 use dumbo::pdu::ethernet::{EthernetFrame, PAYLOAD_OFFSET};
 use libc::EAGAIN;
 use log::{error, warn};
-use vm_memory::ByteValued;
-use logger::{IncMetric, METRICS};
 use mmds::data_store::Mmds;
 use mmds::ns::MmdsNetworkStack;
-use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
 use utils::eventfd::EventFd;
 use utils::net::mac::MacAddr;
-use utils::vm_memory::{ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap};
-use virtio_gen::virtio_net::{
-    virtio_net_hdr_v1, VIRTIO_F_VERSION_1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
+use vm_memory::{ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap};
+const VIRTIO_F_VERSION_1: u32 = 32;
+use virtio_bindings::virtio_net::{
+    virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
     VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO,
     VIRTIO_NET_F_MAC,
 };
-use virtio_gen::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+
+
+use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 
 const FRAME_HEADER_MAX_LEN: usize = PAYLOAD_OFFSET + ETH_IPV4_FRAME_LEN;
 
@@ -40,7 +40,9 @@ use crate::devices::virtio::net::{
 use crate::devices::virtio::{
     ActivateError, DescriptorChain, DeviceState, IrqTrigger, IrqType, Queue, VirtioDevice, TYPE_NET,
 };
-use crate::devices::{report_net_event_fail, DeviceError};
+use crate::{report_net_event_fail, DeviceError};
+use crate::virtio::{ActivateError, DeviceState};
+use crate::virtio::net::{NetError, NetQueue, RX_INDEX, Tap, TX_INDEX};
 
 #[derive(Debug)]
 enum FrontendError {
@@ -248,7 +250,7 @@ impl Net {
     pub fn tx_rate_limiter(&self) -> &RateLimiter {
         &self.tx_rate_limiter
     }
-b
+
     fn signal_used_queue(&mut self, queue_type: NetQueue) -> Result<(), DeviceError> {
         // This is safe since we checked in the event handler that the device is activated.
         let mem = self.device_state.mem().unwrap();
@@ -656,20 +658,20 @@ b
     pub fn process_tap_rx_event(&mut self) {
         // This is safe since we checked in the event handler that the device is activated.
         let mem = self.device_state.mem().unwrap();
-        METRICS.net.rx_tap_event_count.inc();
+        //METRICS.net.rx_tap_event_count.inc();
 
         // While there are no available RX queue buffers and there's a deferred_frame
         // don't process any more incoming. Otherwise start processing a frame. In the
         // process the deferred_frame flag will be set in order to avoid freezing the
         // RX queue.
         if self.queues[RX_INDEX].is_empty(mem) && self.rx_deferred_frame {
-            METRICS.net.no_rx_avail_buffer.inc();
+            //METRICS.net.no_rx_avail_buffer.inc();
             return;
         }
 
         // While limiter is blocked, don't process any more incoming.
         if self.rx_rate_limiter.is_blocked() {
-            METRICS.net.rx_rate_limiter_throttled.inc();
+            //METRICS.net.rx_rate_limiter_throttled.inc();
             return;
         }
 
@@ -710,13 +712,13 @@ b
             }
             Err(err) => {
                 error!("Failed to get rx rate-limiter event: {:?}", err);
-                METRICS.net.event_fails.inc();
+                //METRICS.net.event_fails.inc();
             }
         }
     }
 
     pub fn process_tx_rate_limiter_event(&mut self) {
-        METRICS.net.tx_rate_limiter_event_count.inc();
+        //METRICS.net.tx_rate_limiter_event_count.inc();
         // Upon rate limiter event, call the rate limiter handler
         // and restart processing the queue.
         match self.tx_rate_limiter.event_handler() {
@@ -726,7 +728,7 @@ b
             }
             Err(err) => {
                 error!("Failed to get tx rate-limiter event: {:?}", err);
-                METRICS.net.event_fails.inc();
+                //METRICS.net.event_fails.inc();
             }
         }
     }
@@ -780,7 +782,7 @@ impl VirtioDevice for Net {
         let config_len = config_space_bytes.len() as u64;
         if offset >= config_len {
             error!("Failed to read config space");
-            METRICS.net.cfg_fails.inc();
+            //METRICS.net.cfg_fails.inc();
             return;
         }
         if let Some(end) = offset.checked_add(data.len() as u64) {
@@ -844,7 +846,6 @@ pub mod tests {
     use logger::{IncMetric, METRICS};
     use rate_limiter::{RateLimiter, TokenBucket, TokenType};
     use utils::net::mac::MAC_ADDR_LEN;
-    use utils::vm_memory::{Address, GuestMemory};
     use virtio_gen::virtio_net::{
         virtio_net_hdr_v1, VIRTIO_F_VERSION_1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
         VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4,
@@ -865,6 +866,7 @@ pub mod tests {
     use crate::devices::virtio::{
         Net, VirtioDevice, MAX_BUFFER_SIZE, RX_INDEX, TX_INDEX, TYPE_NET, VIRTQ_DESC_F_WRITE,
     };
+    use crate::virtio::net::test_utils::WriteTapMock;
 
     impl Net {
         pub(crate) fn read_tap(&mut self) -> io::Result<usize> {

@@ -5,6 +5,8 @@ use std::fmt;
 
 /// Constant to convert seconds to nanoseconds.
 pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
+/// Constant to convert milliseconds to nanoseconds.
+pub const NANOS_PER_MILLISECOND: u64 = 1_000_000;
 
 /// Wrapper over `libc::clockid_t` to specify Linux Kernel clock source.
 pub enum ClockType {
@@ -143,6 +145,7 @@ pub fn timestamp_cycles() -> u64 {
 /// # Arguments
 ///
 /// * `clock_type` - Identifier of the Linux Kernel clock on which to act.
+/// NOTE: this function is now named get_time_ns in Firecracker
 pub fn get_time(clock_type: ClockType) -> u64 {
     let mut time_struct = libc::timespec {
         tv_sec: 0,
@@ -151,6 +154,16 @@ pub fn get_time(clock_type: ClockType) -> u64 {
     // Safe because the parameters are valid.
     unsafe { libc::clock_gettime(clock_type.into(), &mut time_struct) };
     seconds_to_nanoseconds(time_struct.tv_sec).unwrap() as u64 + (time_struct.tv_nsec as u64)
+}
+
+
+/// Returns a timestamp in milliseconds based on the provided clock type.
+///
+/// # Arguments
+///
+/// * `clock_type` - Identifier of the Linux Kernel clock on which to act.
+pub fn get_time_ms(clock_type: ClockType) -> u64 {
+    get_time(clock_type) / NANOS_PER_MILLISECOND
 }
 
 /// Converts a timestamp in seconds to an equivalent one in nanoseconds.
