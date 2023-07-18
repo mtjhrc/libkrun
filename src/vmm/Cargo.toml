@@ -6,7 +6,7 @@ edition = "2021"
 
 [features]
 tee = []
-amd-sev = [ "tee", "codicon", "kbs-types", "procfs", "serde", "serde_json", "sev", "curl" ]
+amd-sev = [ "tee", "codicon", "kbs-types", "procfs", "sev", "curl" ] # "serde", "serde_json"
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -20,13 +20,14 @@ devices = { path = "../devices" }
 kernel = { path = "../kernel" }
 utils = { path = "../utils"}
 polly = { path = "../polly" }
+rate_limiter = { path = "../rate_limiter" } # TODO: compily iff net
 
 # Dependencies for amd-sev
 codicon = { version = "3.0.0", optional = true }
 kbs-types = { version = "0.2.0", features = ["tee-sev", "tee-snp"], optional = true }
 procfs = { version = "0.12", optional = true }
-serde = { version = "1.0.125", optional = true }
-serde_json = { version = "1.0.64", optional = true }
+serde = { version = "1.0.125" } # TODO: compily iff net or sev
+serde_json = { version = "1.0.64"}  # TODO: compily iff net or sev
 sev = { version = "1.0.0", features = ["openssl"], optional = true }
 curl = { version = "0.4", optional = true }
 

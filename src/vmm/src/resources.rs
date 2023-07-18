@@ -25,6 +25,7 @@ use crate::vmm_config::fs::*;
 use crate::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle, QbootBundleError};
 use crate::vmm_config::kernel_bundle::{KernelBundle, KernelBundleError};
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
+use crate::vmm_config::net::NetBuilder;
 use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
 
@@ -101,7 +102,8 @@ pub struct VmResources {
     /// The virtio-blk device.
     #[cfg(feature = "tee")]
     pub block: BlockBuilder,
-
+    /// The network devices builder.
+    pub net_builder: NetBuilder,
     /// TEE configuration
     #[cfg(feature = "tee")]
     pub tee_config: TeeConfig,
