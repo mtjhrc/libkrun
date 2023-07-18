@@ -21,8 +21,15 @@ vm-memory = { version = "0.8.0", features = ["backend-mmap", "backend-bitmap"] }
 arch = { path = "../arch" }
 utils = { path = "../utils" }
 polly = { path = "../polly" }
-dumbo = {path = "../dumbo"} # TODO: cond compile iff net feture
-mmds = {path = "../mmds"} # TODO: cond compile iff mmds
+
+# virtio net specific dependecies:
+# TODO: cond compile iff virtio net
+dumbo = { path = "../dumbo" }
+mmds = { path = "../mmds" }
+rate_limiter = { path = "../rate_limiter"}
+snapshot = {path = "../snapshot"}
+net_gen = { path = "../net_gen" }
+
 
 virtio-bindings = "0.2.0"
 

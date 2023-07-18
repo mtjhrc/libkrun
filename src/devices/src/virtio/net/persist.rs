@@ -16,13 +16,11 @@ use rate_limiter::RateLimiter;
 use snapshot::Persist;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
 use vm_memory::GuestMemoryMmap;
-use versionize::{VersionMap, Versionize, VersionizeResult};
-use versionize_derive::Versionize;
 
 use super::device::Net;
 use super::{NET_NUM_QUEUES, NET_QUEUE_SIZE};
 //use crate::devices::virtio::persist::{PersistError as VirtioStateError, VirtioDeviceState};
-use crate::devices::virtio::{DeviceState, TYPE_NET};
+use crate::virtio::{DeviceState, TYPE_NET};
 
 #[derive(Debug, Default, Clone)]
 // NOTICE: Any changes to this structure require a snapshot version bump.
@@ -57,7 +55,7 @@ impl NetConfigSpaceState {
     }
 }
 
-#[derive(Debug, Clone, Versionize)]
+#[derive(Debug, Clone)]
 // NOTICE: Any changes to this structure require a snapshot version bump.
 pub struct NetState {
     id: String,
@@ -75,7 +73,7 @@ pub struct NetConstructorArgs {
     pub mmds: Option<Arc<Mutex<Mmds>>>,
 }
 
-#[derive(Debug, derive_more::From)]
+#[derive(Debug)]
 pub enum NetPersistError {
     CreateNet(super::NetError),
     CreateRateLimiter(io::Error),

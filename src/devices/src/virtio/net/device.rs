@@ -5,7 +5,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
@@ -29,20 +29,15 @@ use virtio_bindings::virtio_net::{
 
 
 use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
 
 const FRAME_HEADER_MAX_LEN: usize = PAYLOAD_OFFSET + ETH_IPV4_FRAME_LEN;
 
-use crate::devices::virtio::iovec::IoVecBuffer;
-use crate::devices::virtio::net::tap::Tap;
-use crate::devices::virtio::net::{
-    NetError, NetQueue, MAX_BUFFER_SIZE, NET_QUEUE_SIZES, RX_INDEX, TX_INDEX,
-};
-use crate::devices::virtio::{
-    ActivateError, DescriptorChain, DeviceState, IrqTrigger, IrqType, Queue, VirtioDevice, TYPE_NET,
-};
-use crate::{report_net_event_fail, DeviceError};
-use crate::virtio::{ActivateError, DeviceState};
-use crate::virtio::net::{NetError, NetQueue, RX_INDEX, Tap, TX_INDEX};
+use crate::virtio::iovec::IoVecBuffer;
+use crate::virtio::net::{NetError, NetQueue, MAX_BUFFER_SIZE, NET_QUEUE_SIZES, RX_INDEX, TX_INDEX, Tap};
+use crate::virtio::{ActivateError, DescriptorChain, DeviceState, IrqTrigger, IrqType, Queue, VirtioDevice, TYPE_NET, report_net_event_fail};
+
+use crate::Error as DeviceError;
 
 #[derive(Debug)]
 enum FrontendError {
@@ -264,7 +259,7 @@ impl Net {
             self.irq_trigger
                 .trigger_irq(IrqType::Vring)
                 .map_err(|err| {
-                    METRICS.net.event_fails.inc();
+                    //METRICS.net.event_fails.inc();
                     DeviceError::FailedSignalingIrq(err)
                 })?;
         }
@@ -297,7 +292,7 @@ impl Net {
     // Returns true on successful frame delivery.
     fn rate_limited_rx_single_frame(&mut self) -> bool {
         if !Self::rate_limiter_consume_op(&mut self.rx_rate_limiter, self.rx_bytes_read as u64) {
-            METRICS.net.rx_rate_limiter_throttled.inc();
+            //METRICS.net.rx_rate_limiter_throttled.inc();
             return false;
         }
 
@@ -335,13 +330,13 @@ impl Net {
             let len = std::cmp::min(chunk.len(), descriptor.len as usize);
             match mem.write_slice(&chunk[..len], descriptor.addr) {
                 Ok(()) => {
-                    METRICS.net.rx_count.inc();
+                    //METRICS.net.rx_count.inc();
                     chunk = &chunk[len..];
                 }
                 Err(err) => {
                     error!("Failed to write slice: {:?}", err);
                     if let GuestMemoryError::PartialBuffer { .. } = err {
-                        METRICS.net.rx_partial_writes.inc();
+                        //METRICS.net.rx_partial_writes.inc();
                     }
                     return Err(FrontendError::GuestMemory(err));
                 }
@@ -349,8 +344,8 @@ impl Net {
 
             // If chunk is empty we are done here.
             if chunk.is_empty() {
-                METRICS.net.rx_bytes_count.add(data.len());
-                METRICS.net.rx_packets_count.inc();
+                //METRICS.net.rx_bytes_count.add(data.len());
+                //METRICS.net.rx_packets_count.inc();
                 return Ok(());
             }
 
@@ -368,7 +363,7 @@ impl Net {
 
         let queue = &mut self.queues[RX_INDEX];
         let head_descriptor = queue.pop_or_enable_notification(mem).ok_or_else(|| {
-            METRICS.net.no_rx_avail_buffer.inc();
+            //METRICS.net.no_rx_avail_buffer.inc();
             FrontendError::EmptyQueue
         })?;
         let head_index = head_descriptor.index;
@@ -380,7 +375,7 @@ impl Net {
         );
         // Mark the descriptor chain as used. If an error occurred, skip the descriptor chain.
         let used_len = if result.is_err() {
-            METRICS.net.rx_fails.inc();
+            //METRICS.net.rx_fails.inc();
             0
         } else {
             self.rx_bytes_read as u32
@@ -428,13 +423,13 @@ impl Net {
         // if the frame_iovec is empty.
         let header_len = frame_iovec.read_at(headers, 0).ok_or_else(|| {
             error!("Received empty TX buffer");
-            METRICS.net.tx_malformed_frames.inc();
+            //METRICS.net.tx_malformed_frames.inc();
             NetError::VnetHeaderMissing
         })?;
 
         let headers = frame_bytes_from_buf(&headers[..header_len]).map_err(|e| {
             error!("VNET headers missing in TX frame");
-            METRICS.net.tx_malformed_frames.inc();
+            //METRICS.net.tx_malformed_frames.inc();
             e
         })?;
 
@@ -445,7 +440,7 @@ impl Net {
                 // of the `IoVecBuffer` minus the VNET headers.
                 frame_iovec.read_at(&mut frame, vnet_hdr_len()).unwrap();
                 let _ = ns.detour_frame(&frame);
-                METRICS.mmds.rx_accepted.inc();
+                //METRICS.mmds.rx_accepted.inc();
 
                 // MMDS frames are not accounted by the rate limiter.
                 Self::rate_limiter_replenish_op(rate_limiter, frame_iovec.len() as u64);
@@ -461,20 +456,20 @@ impl Net {
         if let Some(guest_mac) = guest_mac {
             let _ = EthernetFrame::from_bytes(headers).map(|eth_frame| {
                 if guest_mac != eth_frame.src_mac() {
-                    METRICS.net.tx_spoofed_mac_count.inc();
+                    //METRICS.net.tx_spoofed_mac_count.inc();
                 }
             });
         }
 
         match Self::write_tap(tap, frame_iovec) {
             Ok(_) => {
-                METRICS.net.tx_bytes_count.add(frame_iovec.len());
-                METRICS.net.tx_packets_count.inc();
-                METRICS.net.tx_count.inc();
+                //METRICS.net.tx_bytes_count.add(frame_iovec.len());
+                //METRICS.net.tx_packets_count.inc();
+                //METRICS.net.tx_count.inc();
             }
             Err(err) => {
                 error!("Failed to write to tap: {:?}", err);
-                METRICS.net.tap_write_fails.inc();
+                //METRICS.net.tap_write_fails.inc();
             }
         };
         Ok(false)
@@ -487,8 +482,8 @@ impl Net {
                 ns.write_next_frame(frame_bytes_from_buf_mut(&mut self.rx_frame_buf)?)
             {
                 let len = len.get();
-                METRICS.mmds.tx_frames.inc();
-                METRICS.mmds.tx_bytes.add(len);
+                //METRICS.mmds.tx_frames.inc();
+                //METRICS.mmds.tx_bytes.add(len);
                 init_vnet_hdr(&mut self.rx_frame_buf);
                 return Ok(vnet_hdr_len() + len);
             }
@@ -503,7 +498,7 @@ impl Net {
             match self.read_from_mmds_or_tap() {
                 Ok(count) => {
                     self.rx_bytes_read = count;
-                    METRICS.net.rx_count.inc();
+                    //METRICS.net.rx_count.inc();
                     if !self.rate_limited_rx_single_frame() {
                         self.rx_deferred_frame = true;
                         break;
@@ -516,7 +511,7 @@ impl Net {
                         Some(err) if err == EAGAIN => (),
                         _ => {
                             error!("Failed to read tap: {:?}", err);
-                            METRICS.net.tap_read_fails.inc();
+                            //METRICS.net.tap_read_fails.inc();
                             return Err(DeviceError::FailedReadTap);
                         }
                     };
@@ -571,7 +566,7 @@ impl Net {
             let buffer = match IoVecBuffer::from_descriptor_chain(mem, head) {
                 Ok(buffer) => buffer,
                 Err(_) => {
-                    METRICS.net.tx_fails.inc();
+                    //METRICS.net.tx_fails.inc();
                     tx_queue
                         .add_used(mem, head_index, 0)
                         .map_err(DeviceError::QueueError)?;
@@ -580,7 +575,7 @@ impl Net {
             };
             if !Self::rate_limiter_consume_op(&mut self.tx_rate_limiter, buffer.len() as u64) {
                 tx_queue.undo_pop();
-                METRICS.net.tx_rate_limiter_throttled.inc();
+                //METRICS.net.tx_rate_limiter_throttled.inc();
                 break;
             }
 
@@ -605,7 +600,7 @@ impl Net {
         }
 
         if !used_any {
-            METRICS.net.no_tx_avail_buffer.inc();
+            //METRICS.net.no_tx_avail_buffer.inc();
         }
 
         self.signal_used_queue(NetQueue::Tx)?;
@@ -641,14 +636,14 @@ impl Net {
     }
 
     pub fn process_rx_queue_event(&mut self) {
-        METRICS.net.rx_queue_event_count.inc();
+        //METRICS.net.rx_queue_event_count.inc();
 
         if let Err(err) = self.queue_evts[RX_INDEX].read() {
             // rate limiters present but with _very high_ allowed rate
             error!("Failed to get rx queue event: {:?}", err);
-            METRICS.net.event_fails.inc();
+            //METRICS.net.event_fails.inc();
         } else if self.rx_rate_limiter.is_blocked() {
-            METRICS.net.rx_rate_limiter_throttled.inc();
+            //METRICS.net.rx_rate_limiter_throttled.inc();
         } else {
             // If the limiter is not blocked, resume the receiving of bytes.
             self.resume_rx().unwrap_or_else(report_net_event_fail);
@@ -687,21 +682,21 @@ impl Net {
     }
 
     pub fn process_tx_queue_event(&mut self) {
-        METRICS.net.tx_queue_event_count.inc();
+        //METRICS.net.tx_queue_event_count.inc();
         if let Err(err) = self.queue_evts[TX_INDEX].read() {
             error!("Failed to get tx queue event: {:?}", err);
-            METRICS.net.event_fails.inc();
+            //METRICS.net.event_fails.inc();
         } else if !self.tx_rate_limiter.is_blocked()
         // If the limiter is not blocked, continue transmitting bytes.
         {
             self.process_tx().unwrap_or_else(report_net_event_fail);
         } else {
-            METRICS.net.tx_rate_limiter_throttled.inc();
+            //METRICS.net.tx_rate_limiter_throttled.inc();
         }
     }
 
     pub fn process_rx_rate_limiter_event(&mut self) {
-        METRICS.net.rx_event_rate_limiter_count.inc();
+        //METRICS.net.rx_event_rate_limiter_count.inc();
         // Upon rate limiter event, call the rate limiter handler
         // and restart processing the queue.
 
@@ -803,13 +798,13 @@ impl VirtioDevice for Net {
             .and_then(|(start, end)| config_space_bytes.get_mut(start..end)) else
         {
             error!("Failed to write config space");
-            METRICS.net.cfg_fails.inc();
+            //METRICS.net.cfg_fails.inc();
             return;
         };
 
         dst.copy_from_slice(data);
         self.guest_mac = Some(self.config_space.guest_mac);
-        METRICS.net.mac_address_updates.inc();
+        //METRICS.net.mac_address_updates.inc();
     }
 
     fn activate(&mut self, mem: GuestMemoryMmap) -> Result<(), ActivateError> {

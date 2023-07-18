@@ -17,14 +17,12 @@ use mmds::data_store::Mmds;
 use mmds::ns::MmdsNetworkStack;
 use rate_limiter::RateLimiter;
 use utils::net::mac::MacAddr;
-use utils::vm_memory::{GuestAddress, GuestMemoryMmap};
+use vm_memory::{GuestAddress, GuestMemoryMmap};
 
 #[cfg(test)]
 use crate::virtio::net::device::vnet_hdr_len;
 use crate::virtio::net::tap::{IfReqBuilder, Tap};
-use crate::virtio::queue::tests::VirtQueue;
-use crate::virtio::{Net, Queue, QueueError};
-use crate::virtio::net::Net;
+use crate::virtio::{net::Net, Queue};
 
 
 static NEXT_INDEX: AtomicUsize = AtomicUsize::new(1);

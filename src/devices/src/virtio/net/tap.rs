@@ -15,16 +15,16 @@ use net_gen::ifreq;
 use utils::ioctl::{ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val};
 use utils::{ioctl_ioc_nr, ioctl_iow_nr};
 
-use crate::devices::virtio::iovec::IoVecBuffer;
+use crate::virtio::iovec::IoVecBuffer;
 #[cfg(test)]
-use crate::devices::virtio::net::test_utils::Mocks;
+use crate::virtio::net::test_utils::Mocks;
 
 // As defined in the Linux UAPI:
 // https://elixir.bootlin.com/linux/v4.17/source/include/uapi/linux/if.h#L33
 const IFACE_NAME_MAX_LEN: usize = 16;
 
 /// List of errors the tap implementation can throw.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum TapError {
     /// Couldn't open /dev/net/tun
     //#[error("Couldn't open /dev/net/tun: {0}")]

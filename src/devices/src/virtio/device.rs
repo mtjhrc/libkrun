@@ -6,9 +6,10 @@
 // found in the THIRD-PARTY file.
 
 use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::atomic::Ordering;
 
 use super::{ActivateResult, Queue};
-use crate::virtio::AsAny;
+use crate::virtio::{AsAny, VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING};
 use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
@@ -18,6 +19,62 @@ pub enum DeviceState {
     Inactive,
     Activated(GuestMemoryMmap),
 }
+
+impl DeviceState {
+    /// Checks if the device is activated.
+    pub fn is_activated(&self) -> bool {
+        match self {
+            DeviceState::Inactive => false,
+            DeviceState::Activated(_) => true,
+        }
+    }
+
+    /// Gets the memory attached to the device if it is activated.
+    pub fn mem(&self) -> Option<&GuestMemoryMmap> {
+        match self {
+            DeviceState::Activated(ref mem) => Some(mem),
+            DeviceState::Inactive => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum IrqType {
+    Config,
+    Vring,
+}
+
+/// Helper struct that is responsible for triggering guest IRQs
+#[derive(Debug)]
+pub struct IrqTrigger {
+    pub(crate) irq_status: Arc<AtomicUsize>,
+    pub(crate) irq_evt: EventFd,
+}
+
+impl IrqTrigger {
+    pub fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            irq_status: Arc::new(AtomicUsize::new(0)),
+            irq_evt: EventFd::new(libc::EFD_NONBLOCK)?,
+        })
+    }
+
+    pub fn trigger_irq(&self, irq_type: IrqType) -> Result<(), std::io::Error> {
+        let irq = match irq_type {
+            IrqType::Config => VIRTIO_MMIO_INT_CONFIG,
+            IrqType::Vring => VIRTIO_MMIO_INT_VRING,
+        };
+        self.irq_status.fetch_or(irq as usize, Ordering::SeqCst);
+
+        self.irq_evt.write(1).map_err(|err| {
+            log::error!("Failed to send irq to the guest: {:?}", err);
+            err
+        })?;
+
+        Ok(())
+    }
+}
+
 
 #[derive(Clone)]
 pub struct VirtioShmRegion {

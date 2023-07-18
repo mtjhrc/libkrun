@@ -1,17 +1,19 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::Sub;
 use std::os::unix::io::AsRawFd;
 
-use event_manager::{EventOps, Events, MutEventSubscriber};
 use log::{error, warn};
-use logger::{IncMetric, METRICS};
-use utils::epoll::EventSet;
+use polly::event_manager::Subscriber;
+use utils::epoll::{EpollEvent, EventSet};
 
-use crate::devices::virtio::net::device::Net;
-use crate::devices::virtio::{VirtioDevice, RX_INDEX, TX_INDEX};
+use crate::virtio::net::device::Net;
+use crate::virtio::{VirtioDevice};
+use crate::virtio::net::{RX_INDEX, TX_INDEX};
 
 impl Net {
+    /*
     fn register_runtime_events(&self, ops: &mut EventOps) {
         if let Err(err) = ops.add(Events::new(&self.queue_evts[RX_INDEX], EventSet::IN)) {
             error!("Failed to register rx queue event: {}", err);
@@ -38,20 +40,23 @@ impl Net {
             error!("Failed to register activate event: {}", err);
         }
     }
-
+     */
     fn process_activate_event(&self, ops: &mut EventOps) {
         log::debug!("net: activate event");
         if let Err(err) = self.activate_evt.read() {
             error!("Failed to consume net activate event: {:?}", err);
         }
+
+        //TODO: me
+        /*
         self.register_runtime_events(ops);
         if let Err(err) = ops.remove(Events::new(&self.activate_evt, EventSet::IN)) {
             error!("Failed to un-register activate event: {}", err);
-        }
+        }*/
     }
 }
 
-impl MutEventSubscriber for Net {
+impl Subscriber for Net {
     fn process(&mut self, event: Events, ops: &mut EventOps) {
         let source = event.fd();
         let event_set = event.event_set();
@@ -85,7 +90,7 @@ impl MutEventSubscriber for Net {
                 _ if activate_fd == source => self.process_activate_event(ops),
                 _ => {
                     warn!("Net: Spurious event received: {:?}", source);
-                    METRICS.net.event_fails.inc();
+                    //METRICS.net.event_fails.inc();
                 }
             }
         } else {
@@ -95,7 +100,7 @@ impl MutEventSubscriber for Net {
             );
         }
     }
-
+    /*
     fn init(&mut self, ops: &mut EventOps) {
         // This function can be called during different points in the device lifetime:
         //  - shortly after device creation,
@@ -106,6 +111,10 @@ impl MutEventSubscriber for Net {
         } else {
             self.register_activate_event(ops);
         }
+    }*/
+
+    fn interest_list(&self) -> Vec<EpollEvent> {
+        todo!() // ME TODO
     }
 }
 
@@ -114,6 +123,8 @@ pub mod tests {
     use crate::devices::virtio::net::test_utils::test::TestHelper;
     use crate::devices::virtio::net::test_utils::NetQueue;
     use crate::devices::virtio::net::TX_INDEX;
+    use crate::virtio::net::{NetQueue, TX_INDEX};
+    use crate::virtio::net::test_utils::test::TestHelper;
 
     #[test]
     fn test_event_handler() {
