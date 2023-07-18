@@ -35,7 +35,7 @@ const FRAME_HEADER_MAX_LEN: usize = PAYLOAD_OFFSET + ETH_IPV4_FRAME_LEN;
 
 use crate::virtio::iovec::IoVecBuffer;
 use crate::virtio::net::{NetError, NetQueue, MAX_BUFFER_SIZE, NET_QUEUE_SIZES, RX_INDEX, TX_INDEX, Tap};
-use crate::virtio::{ActivateError, DescriptorChain, DeviceState, IrqTrigger, IrqType, Queue, VirtioDevice, TYPE_NET, report_net_event_fail};
+use crate::virtio::{ActivateError, DescriptorChain, DeviceState, IrqTrigger, IrqType, Queue, VirtioDevice, TYPE_NET, report_net_event_fail, ActivateResult};
 
 use crate::Error as DeviceError;
 
@@ -772,21 +772,67 @@ impl VirtioDevice for Net {
         self.irq_trigger.irq_status.clone()
     }
 
+    fn set_irq_line(&mut self, irq: u32) {
+        todo!()
+    }
+
+    fn read_config(&self, offset: u64, data: &mut [u8]) {
+        todo!()
+    }
+
+    fn write_config(&mut self, offset: u64, data: &[u8]) {
+        todo!()
+    }
+
+    fn activate(&mut self, mem: GuestMemoryMmap) -> ActivateResult {
+        todo!()
+    }
+
+    fn is_activated(&self) -> bool {
+        todo!()
+    }
+}
+
+/*
+impl VirtioDevice for Net {
+    fn avail_features(&self) -> u64 {
+
+    }
+
+    fn acked_features(&self) -> u64 {
+
+    }
+
+    fn set_acked_features(&mut self, acked_features: u64) {
+
+    }
+
+    fn device_type(&self) -> u32 {
+
+    }
+
+    fn queues(&self) -> &[Queue] {
+
+    }
+
+    fn queues_mut(&mut self) -> &mut [Queue] {
+
+    }
+
+    fn queue_events(&self) -> &[EventFd] {
+
+    }
+
+    fn interrupt_evt(&self) -> &EventFd {
+
+    }
+
+    fn interrupt_status(&self) -> Arc<AtomicUsize> {
+
+    }
+
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
-        let config_space_bytes = self.config_space.as_slice();
-        let config_len = config_space_bytes.len() as u64;
-        if offset >= config_len {
-            error!("Failed to read config space");
-            //METRICS.net.cfg_fails.inc();
-            return;
-        }
-        if let Some(end) = offset.checked_add(data.len() as u64) {
-            // This write can't fail, offset and end are checked against config_len.
-            data.write_all(
-                &config_space_bytes[offset as usize..cmp::min(end, config_len) as usize],
-            )
-            .unwrap();
-        }
+
     }
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
@@ -826,7 +872,7 @@ impl VirtioDevice for Net {
     fn is_activated(&self) -> bool {
         self.device_state.is_activated()
     }
-}
+}*/
 
 #[cfg(test)]
 #[macro_use]

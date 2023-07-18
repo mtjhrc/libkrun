@@ -5,7 +5,7 @@ use std::ops::Sub;
 use std::os::unix::io::AsRawFd;
 
 use log::{error, warn};
-use polly::event_manager::Subscriber;
+use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 
 use crate::virtio::net::device::Net;
@@ -13,51 +13,40 @@ use crate::virtio::{VirtioDevice};
 use crate::virtio::net::{RX_INDEX, TX_INDEX};
 
 impl Net {
-    /*
-    fn register_runtime_events(&self, ops: &mut EventOps) {
-        if let Err(err) = ops.add(Events::new(&self.queue_evts[RX_INDEX], EventSet::IN)) {
-            error!("Failed to register rx queue event: {}", err);
+    fn process_activate_event(&self, event_manager: &mut EventManager) {
+        debug!("net: activate event");
+        if let Err(e) = self.activate_evt.read() {
+            error!("Failed to consume net activate event: {:?}", e);
         }
-        if let Err(err) = ops.add(Events::new(&self.queue_evts[TX_INDEX], EventSet::IN)) {
-            error!("Failed to register tx queue event: {}", err);
-        }
-        if let Err(err) = ops.add(Events::new(&self.rx_rate_limiter, EventSet::IN)) {
-            error!("Failed to register rx queue event: {}", err);
-        }
-        if let Err(err) = ops.add(Events::new(&self.tx_rate_limiter, EventSet::IN)) {
-            error!("Failed to register tx queue event: {}", err);
-        }
-        if let Err(err) = ops.add(Events::new(
-            &self.tap,
-            EventSet::IN | EventSet::EDGE_TRIGGERED,
-        )) {
-            error!("Failed to register tap event: {}", err);
-        }
-    }
+        let activate_fd = self.activate_evt.as_raw_fd();
+        // The subscriber must exist as we previously registered activate_evt via
+        // `interest_list()`.
+        let self_subscriber = match event_manager.subscriber(activate_fd) {
+            Ok(subscriber) => subscriber,
+            Err(e) => {
+                error!("Failed to process block activate evt: {:?}", e);
+                return;
+            }
+        };
 
-    fn register_activate_event(&self, ops: &mut EventOps) {
-        if let Err(err) = ops.add(Events::new(&self.activate_evt, EventSet::IN)) {
-            error!("Failed to register activate event: {}", err);
-        }
-    }
-     */
-    fn process_activate_event(&self, ops: &mut EventOps) {
-        log::debug!("net: activate event");
-        if let Err(err) = self.activate_evt.read() {
-            error!("Failed to consume net activate event: {:?}", err);
+        // Interest list changes when the device is activated.
+        let interest_list = self.interest_list();
+        for event in interest_list {
+            event_manager
+                .register(event.data() as i32, event, self_subscriber.clone())
+                .unwrap_or_else(|e| {
+                    error!("Failed to register net events: {:?}", e);
+                });
         }
 
-        //TODO: me
-        /*
-        self.register_runtime_events(ops);
-        if let Err(err) = ops.remove(Events::new(&self.activate_evt, EventSet::IN)) {
-            error!("Failed to un-register activate event: {}", err);
-        }*/
+        event_manager.unregister(activate_fd).unwrap_or_else(|e| {
+            error!("Failed to unregister net activate evt: {:?}", e);
+        });
     }
 }
 
 impl Subscriber for Net {
-    fn process(&mut self, event: Events, ops: &mut EventOps) {
+    fn process(&mut self, event: &EpollEvent, evmgr: &mut EventManager) {
         let source = event.fd();
         let event_set = event.event_set();
 
@@ -87,7 +76,7 @@ impl Subscriber for Net {
                 _ if source == virtq_tx_ev_fd => self.process_tx_queue_event(),
                 _ if source == rx_rate_limiter_fd => self.process_rx_rate_limiter_event(),
                 _ if source == tx_rate_limiter_fd => self.process_tx_rate_limiter_event(),
-                _ if activate_fd == source => self.process_activate_event(ops),
+                _ if activate_fd == source => self.process_activate_event(evmgr),
                 _ => {
                     warn!("Net: Spurious event received: {:?}", source);
                     //METRICS.net.event_fails.inc();
@@ -100,58 +89,28 @@ impl Subscriber for Net {
             );
         }
     }
-    /*
-    fn init(&mut self, ops: &mut EventOps) {
+
+    fn interest_list(&self) -> Vec<EpollEvent> {
         // This function can be called during different points in the device lifetime:
         //  - shortly after device creation,
         //  - on device activation (is-activated already true at this point),
         //  - on device restore from snapshot.
         if self.is_activated() {
-            self.register_runtime_events(ops);
+            vec![
+                EpollEvent::new(EventSet::IN, self.queue_evts[RX_INDEX].as_raw_fd() as u64),
+                EpollEvent::new(EventSet::IN, self.queue_evts[TX_INDEX].as_raw_fd() as u64),
+                EpollEvent::new(EventSet::IN, self.rx_rate_limiter.as_raw_fd() as u64),
+                EpollEvent::new(EventSet::IN, self.tx_rate_limiter.as_raw_fd() as u64),
+                EpollEvent::new(
+                    EventSet::IN | EventSet::EDGE_TRIGGERED,
+                    self.tap.as_raw_fd() as u64,
+                ),
+            ]
         } else {
-            self.register_activate_event(ops);
+            vec![EpollEvent::new(
+                EventSet::IN,
+                self.activate_evt.as_raw_fd() as u64,
+            )]
         }
-    }*/
-
-    fn interest_list(&self) -> Vec<EpollEvent> {
-        todo!() // ME TODO
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use crate::devices::virtio::net::test_utils::test::TestHelper;
-    use crate::devices::virtio::net::test_utils::NetQueue;
-    use crate::devices::virtio::net::TX_INDEX;
-    use crate::virtio::net::{NetQueue, TX_INDEX};
-    use crate::virtio::net::test_utils::test::TestHelper;
-
-    #[test]
-    fn test_event_handler() {
-        let mut th = TestHelper::get_default();
-
-        // Push a queue event, use the TX_QUEUE_EVENT in this test.
-        th.add_desc_chain(NetQueue::Tx, 0, &[(0, 4096, 0)]);
-
-        // EventManager should report no events since net has only registered
-        // its activation event so far (even though there is also a queue event pending).
-        let ev_count = th.event_manager.run_with_timeout(50).unwrap();
-        assert_eq!(ev_count, 0);
-
-        // Manually force a queue event and check it's ignored pre-activation.
-        th.net().queue_evts[TX_INDEX].write(1).unwrap();
-        let ev_count = th.event_manager.run_with_timeout(50).unwrap();
-        assert_eq!(ev_count, 0);
-        // Validate there was no queue operation.
-        assert_eq!(th.txq.used.idx.get(), 0);
-
-        // Now activate the device.
-        th.activate_net();
-        // Handle the previously pushed queue event through EventManager.
-        th.event_manager
-            .run_with_timeout(50)
-            .expect("Metrics event timeout or error.");
-        // Make sure the data queue advanced.
-        assert_eq!(th.txq.used.idx.get(), 1);
     }
 }

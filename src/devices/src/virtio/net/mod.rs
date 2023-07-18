@@ -15,7 +15,7 @@ pub const TX_INDEX: usize = 1;
 
 pub mod device;
 mod event_handler;
-pub mod persist;
+//pub mod persist;
 mod tap;
 pub mod test_utils;
 
