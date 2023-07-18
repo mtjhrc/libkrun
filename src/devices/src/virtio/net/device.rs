@@ -583,7 +583,7 @@ impl Net {
     }
 
     //TODO(mhrica)
-    //#[cfg(not(test))]
+    #[cfg(not(test))]
     fn read_tap(&mut self) -> std::io::Result<usize> {
         self.tap.read(&mut self.rx_frame_buf)
     }
@@ -778,7 +778,7 @@ impl VirtioDevice for Net {
         todo!()
     }
 }
-/*
+
 #[cfg(test)]
 #[macro_use]
 pub mod tests {
@@ -1800,4 +1800,3 @@ pub mod tests {
         check_used_queue_signal(&net, 0);
     }
 }
-*/
