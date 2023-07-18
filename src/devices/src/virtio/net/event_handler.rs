@@ -1,10 +1,9 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ops::Sub;
 use std::os::unix::io::AsRawFd;
 
-use log::{error, warn};
+use log::{debug, error, warn};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 
@@ -114,3 +113,48 @@ impl Subscriber for Net {
         }
     }
 }
+
+/*
+#[cfg(test)]
+pub mod tests {
+    use crate::check_metric_after_block;
+    use crate::virtio::net::test_utils::test::TestHelper;
+    use crate::virtio::net::test_utils::{NetEvent, NetQueue};
+//    use logger::{Metric, METRICS};
+
+    #[test]
+    fn test_event_handler() {
+        let mut th = TestHelper::default();
+
+        // Push a queue event, use the TX_QUEUE_EVENT in this test.
+        th.add_desc_chain(NetQueue::Tx, 0, &[(0, 4096, 0)]);
+
+        // EventManager should report no events since net has only registered
+        // its activation event so far (even though there is also a queue event pending).
+        let ev_count = th.event_manager.run_with_timeout(50).unwrap();
+        assert_eq!(ev_count, 0);
+
+        // Manually force a queue event and check it's ignored pre-activation.
+        th.simulate_event(NetEvent::TxQueue);
+        // Validate there was no queue operation.
+        assert_eq!(th.txq.used.idx.get(), 0);
+
+        // Now activate the device.
+        th.activate_net();
+
+        // Handle the previously pushed queue event through EventManager.
+        th.event_manager
+            .run_with_timeout(100)
+            .expect("Metrics event timeout or error.");
+        // Make sure the data queue advanced.
+        assert_eq!(th.txq.used.idx.get(), 1);
+
+        // Inject invalid event.
+        check_metric_after_block!(
+            &METRICS.net.event_fails,
+            1,
+            th.simulate_event(NetEvent::Custom(1000))
+        );
+    }
+}
+*/

@@ -5,7 +5,6 @@ use std::marker::PhantomData;
 
 use libc::{c_void, iovec, size_t};
 use vm_memory::{bitmap::Bitmap, GuestMemory, GuestMemoryMmap};
-use vm_memory::guest_memory::Error;
 
 use crate::virtio::DescriptorChain;
 
@@ -320,12 +319,12 @@ impl IoVecBufferMut {
 #[cfg(test)]
 mod tests {
     use libc::{c_void, iovec};
-    use utils::vm_memory::test_utils::create_anon_guest_memory;
-    use utils::vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+    use vm_memory::test_utils::create_anon_guest_memory;
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
     use super::{IoVecBuffer, IoVecBufferMut};
-    use crate::devices::virtio::queue::{Queue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
-    use crate::devices::virtio::test_utils::VirtQueue;
+    use crate::virtio::queue::{Queue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+    use crate::virtio::test_utils::VirtQueue;
 
     impl<'a> From<&'a [u8]> for IoVecBuffer {
         fn from(buf: &'a [u8]) -> Self {

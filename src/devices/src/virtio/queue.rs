@@ -407,35 +407,10 @@ impl Queue {
         let addr = self.avail_ring.unchecked_add(2);
         Wrapping(mem.read_obj::<u16>(addr).unwrap())
     }
-
-    /// Check if we need to kick the guest.
-    ///
-    /// Please note this method has side effects: once it returns `true`, it considers the
-    /// driver will actually be notified, and won't return `true` again until the driver
-    /// updates `used_event` and/or the notification conditions hold once more.
-    ///
-    /// This is similar to the `vring_need_event()` method implemented by the Linux kernel.
-    pub fn prepare_kick(&mut self, mem: &GuestMemoryMmap) -> bool {
-        // If the device doesn't use notification suppression, always return true
-        if !self.uses_notif_suppression {
-            return true;
-        }
-
-        // We need to expose used array entries before checking the used_event.
-        fence(Ordering::SeqCst);
-
-        let new = self.next_used;
-        let old = self.next_used - self.num_added;
-        let used_event = self.used_event(mem);
-
-        self.num_added = Wrapping(0);
-
-        new - used_event - Wrapping(1) < new - old
-    }
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use std::marker::PhantomData;
     use std::mem;
 
@@ -504,6 +479,8 @@ pub(crate) mod tests {
     }
 
     impl<'a> VirtqDesc<'a> {
+        pub const ALIGNMENT: u64 = 16;
+
         fn new(start: GuestAddress, mem: &'a GuestMemoryMmap) -> Self {
             assert_eq!(start.0 & 0xf, 0);
 
@@ -533,6 +510,16 @@ pub(crate) mod tests {
             self.len.set(len);
             self.flags.set(flags);
             self.next.set(next);
+        }
+
+        pub fn check_data(&self, expected_data: &[u8]) {
+            assert!(self.len.get() as usize >= expected_data.len());
+            let mem = self.addr.mem;
+            let mut buf = vec![0; expected_data.len() as usize];
+            assert!(mem
+                .read_slice(&mut buf, GuestAddress::new(self.addr.get()))
+                .is_ok());
+            assert_eq!(buf.as_slice(), expected_data);
         }
     }
 
@@ -669,8 +656,18 @@ pub(crate) mod tests {
             q
         }
 
+        pub fn start(&self) -> GuestAddress {
+            self.dtable_start()
+        }
+
         pub fn end(&self) -> GuestAddress {
             self.used.end()
+        }
+
+        pub fn check_used_elem(&self, used_index: u16, expected_id: u16, expected_len: u32) {
+            let used_elem = self.used.ring[used_index as usize].get();
+            assert_eq!(used_elem.id, expected_id as u32);
+            assert_eq!(used_elem.len, expected_len);
         }
     }
 

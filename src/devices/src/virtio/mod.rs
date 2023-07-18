@@ -26,7 +26,6 @@ pub mod queue;
 pub mod rng;
 pub mod vsock;
 pub mod net;
-pub mod iovec;
 
 #[cfg(not(feature = "tee"))]
 pub use self::balloon::*;
@@ -41,6 +40,7 @@ pub use self::queue::*;
 #[cfg(not(feature = "tee"))]
 pub use self::rng::*;
 pub use self::vsock::*;
+pub use self::net::*;
 use crate::Error as DeviceError;
 
 // Function used for reporting error in terms of logging
@@ -103,4 +103,12 @@ impl<T: Any> AsAny for T {
     fn as_mut_any(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+//TODO(mhrica): this should be implemented along with METRICS
+#[macro_export]
+macro_rules! check_metric_after_block{
+    ($($args:expr),+) => {
+        log::warn!("check_metric_after_block used, but it is not implemented");
+    };
 }
