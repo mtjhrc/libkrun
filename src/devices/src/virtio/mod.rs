@@ -21,7 +21,7 @@ pub mod fs;
 #[cfg(target_os = "macos")]
 pub mod linux_errno;
 mod mmio;
-mod queue;
+pub mod queue;
 #[cfg(not(feature = "tee"))]
 pub mod rng;
 pub mod vsock;

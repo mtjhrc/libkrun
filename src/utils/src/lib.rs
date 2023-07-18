@@ -16,7 +16,7 @@ pub mod macos;
 pub use macos::epoll;
 #[cfg(target_os = "macos")]
 pub use macos::eventfd;
-pub mod rand;
+pub use vmm_sys_util::rand as rand;
 #[cfg(target_os = "linux")]
 pub mod signal;
 pub mod sm;

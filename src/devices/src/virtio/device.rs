@@ -15,6 +15,7 @@ use vm_memory::GuestMemoryMmap;
 
 /// Enum that indicates if a VirtioDevice is inactive or has been activated
 /// and memory attached to it.
+#[derive(Debug)]
 pub enum DeviceState {
     Inactive,
     Activated(GuestMemoryMmap),

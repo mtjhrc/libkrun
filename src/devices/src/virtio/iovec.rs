@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 
 use libc::{c_void, iovec, size_t};
 use vm_memory::{bitmap::Bitmap, GuestMemory, GuestMemoryMmap};
+use vm_memory::guest_memory::Error;
 
 use crate::virtio::DescriptorChain;
 
@@ -19,6 +20,12 @@ pub enum IoVecError {
     /// An error happened with guest memory handling
     //#[error("Guest memory error: {0}")]
     GuestMemory(/*#[from]*/ vm_memory::GuestMemoryError),
+}
+
+impl From<vm_memory::GuestMemoryError> for IoVecError {
+    fn from(error: vm_memory::GuestMemoryError) -> Self {
+        Self::GuestMemory(error)
+    }
 }
 
 // Describes a sub-region of a buffer described as a slice of `iovec` structs.

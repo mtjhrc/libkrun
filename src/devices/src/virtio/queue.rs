@@ -407,6 +407,31 @@ impl Queue {
         let addr = self.avail_ring.unchecked_add(2);
         Wrapping(mem.read_obj::<u16>(addr).unwrap())
     }
+
+    /// Check if we need to kick the guest.
+    ///
+    /// Please note this method has side effects: once it returns `true`, it considers the
+    /// driver will actually be notified, and won't return `true` again until the driver
+    /// updates `used_event` and/or the notification conditions hold once more.
+    ///
+    /// This is similar to the `vring_need_event()` method implemented by the Linux kernel.
+    pub fn prepare_kick(&mut self, mem: &GuestMemoryMmap) -> bool {
+        // If the device doesn't use notification suppression, always return true
+        if !self.uses_notif_suppression {
+            return true;
+        }
+
+        // We need to expose used array entries before checking the used_event.
+        fence(Ordering::SeqCst);
+
+        let new = self.next_used;
+        let old = self.next_used - self.num_added;
+        let used_event = self.used_event(mem);
+
+        self.num_added = Wrapping(0);
+
+        new - used_event - Wrapping(1) < new - old
+    }
 }
 
 #[cfg(test)]

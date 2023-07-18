@@ -1,10 +1,10 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-
+/*
 #![doc(hidden)]
 
 use std::fs::File;
-use std::mem;
+use std::{io, mem};
 use std::os::raw::c_ulong;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -12,6 +12,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use libc::ioctl;
 
 use mmds::data_store::Mmds;
 use mmds::ns::MmdsNetworkStack;
@@ -23,6 +24,10 @@ use vm_memory::{GuestAddress, GuestMemoryMmap};
 use crate::virtio::net::device::vnet_hdr_len;
 use crate::virtio::net::tap::{IfReqBuilder, Tap};
 use crate::virtio::{net::Net, Queue};
+use crate::Error as DeviceError;
+use crate::Error::IoError;
+use crate::virtio::queue::tests::VirtQueue;
+//use crate::virtio::queue::tests::VirtQueue;
 
 
 static NEXT_INDEX: AtomicUsize = AtomicUsize::new(1);
@@ -305,10 +310,15 @@ pub fn write_element_in_queue(net: &Net, idx: usize, val: u64) -> Result<(), Dev
 
 pub fn get_element_from_queue(net: &Net, idx: usize) -> Result<u64, DeviceError> {
     if idx > net.queue_evts.len() {
+        return Err(DeviceError::FailedReadingQueue {
+            event_type: "Index out of bounds",
+            underlying: io::Error::new(io::ErrorKind::InvalidInput);
+        });
         return Err(DeviceError::QueueError(QueueError::DescIndexOutOfBounds(
             idx as u16,
         )));
     }
+
     Ok(u64::try_from(net.queue_evts[idx].as_raw_fd()).unwrap())
 }
 
@@ -544,4 +554,4 @@ pub mod test {
             frame
         }
     }
-}
+}*/
