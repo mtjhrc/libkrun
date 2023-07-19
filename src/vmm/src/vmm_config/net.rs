@@ -13,6 +13,7 @@ use utils::net::mac::MacAddr;
 
 use serde::Deserialize;
 use crate::vmm_config::rate_limiter::RateLimiterConfig;
+use std::str::FromStr;
 
 /// This struct represents the strongly typed equivalent of the json body from net iface
 /// related requests.
@@ -255,7 +256,7 @@ mod tests {
         NetworkInterfaceConfig {
             iface_id: String::from(id),
             host_dev_name: String::from(name),
-            guest_mac: Some(MacAddr::parse_str(mac).unwrap()),
+            guest_mac: Some(MacAddr::from_str(mac).unwrap()),
             rx_rate_limiter: Some(RateLimiterConfig::default()),
             tx_rate_limiter: Some(RateLimiterConfig::default()),
             allow_mmds_requests: false,
@@ -399,7 +400,7 @@ mod tests {
         let net_if = create_netif(net_id, host_dev_name, guest_mac);
         assert_eq!(
             net_if.guest_mac.unwrap(),
-            MacAddr::parse_str(guest_mac).unwrap()
+            MacAddr::from_str(guest_mac).unwrap()
         );
         assert_eq!(net_if.allow_mmds_requests, false);
     }

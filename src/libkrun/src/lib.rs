@@ -32,6 +32,7 @@ use vmm::vmm_config::kernel_bundle::KernelBundle;
 #[cfg(feature = "tee")]
 use vmm::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle};
 use vmm::vmm_config::machine_config::VmConfig;
+use vmm::vmm_config::net::NetworkInterfaceConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 // Minimum krunfw version we require.
@@ -757,6 +758,18 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         host_port_map: ctx_cfg.get_port_map(),
     };
     ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
+
+
+    let network_interface_config = NetworkInterfaceConfig {
+        iface_id: "testnet".to_string(),
+        host_dev_name: "testnet".to_string(),
+        guest_mac: None,
+        rx_rate_limiter: None,
+        tx_rate_limiter: None,
+        allow_mmds_requests: false,
+    };
+    ctx_cfg.vmr.add_network_interface(network_interface_config)
+        .expect("Failed to create network interface");  //TODO: process the error and inform the caller
 
     let _vmm = match vmm::builder::build_microvm(&ctx_cfg.vmr, &mut event_manager) {
         Ok(vmm) => vmm,
