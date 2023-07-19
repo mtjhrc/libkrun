@@ -19,7 +19,7 @@ use devices::legacy::Gic;
 use devices::legacy::Serial;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::VirtioShmRegion;
-use devices::virtio::{MmioTransport, Vsock};
+use devices::virtio::{MmioTransport, Net, VirtioDevice, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -46,7 +46,7 @@ use arch::ArchMemoryInfo;
 use arch::InitrdConfig;
 #[cfg(feature = "tee")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
-use polly::event_manager::{Error as EventManagerError, EventManager};
+use polly::event_manager::{Error as EventManagerError, EventManager, Subscriber};
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
 use utils::time::TimestampUs;
@@ -580,6 +580,13 @@ pub fn build_microvm(
         shm_region,
         intc.clone(),
     )?;
+
+    attach_net_devices(
+        &mut vmm,
+        vm_resources.net_builder.iter(),
+        event_manager,
+    )?;
+
     #[cfg(feature = "tee")]
     attach_block_devices(&mut vmm, &vm_resources.block, event_manager, intc.clone())?;
     if let Some(vsock) = vm_resources.vsock.get() {
@@ -1110,6 +1117,25 @@ fn attach_console_devices(
     )
     .map_err(RegisterFsDevice)?;
 
+    Ok(())
+}
+
+fn attach_net_devices<'a>(
+    vmm: &mut Vmm,
+    net_devices: impl Iterator<Item = &'a Arc<Mutex<Net>>>,
+    event_manager: &mut EventManager,
+) -> std::result::Result<(), StartMicrovmError> {
+    for net_device in net_devices {
+        // The device mutex mustn't be locked here otherwise it will deadlock.
+        let id = net_device.lock().expect("Poisoned lock").id().clone();
+        event_manager
+            .add_subscriber(net_device.clone())
+            .map_err(StartMicrovmError::RegisterEvent)?;
+
+        println!("[ME] attaching network device:");
+        attach_mmio_device(vmm,id,MmioTransport::new(vmm.guest_memory.clone(), net_device.clone()))
+            .map_err(StartMicrovmError::RegisterNetDevice)?;
+    }
     Ok(())
 }
 
