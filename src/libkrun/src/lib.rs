@@ -13,6 +13,7 @@ use std::path::Path;
 #[cfg(feature = "tee")]
 use std::path::PathBuf;
 use std::slice;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
@@ -22,6 +23,7 @@ use env_logger::Env;
 use libc::{c_char, size_t};
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
+use utils::net::mac::MacAddr;
 use vmm::resources::VmResources;
 #[cfg(feature = "tee")]
 use vmm::vmm_config::block::BlockDeviceConfig;
@@ -763,7 +765,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     let network_interface_config = NetworkInterfaceConfig {
         iface_id: "testnet".to_string(),
         host_dev_name: "testnet".to_string(),
-        guest_mac: None,
+        guest_mac: Some(MacAddr::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
         rx_rate_limiter: None,
         tx_rate_limiter: None,
         allow_mmds_requests: false,
