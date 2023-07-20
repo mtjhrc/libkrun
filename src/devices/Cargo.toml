@@ -25,7 +25,6 @@ polly = { path = "../polly" }
 # virtio net specific dependecies:
 # TODO: cond compile iff virtio net
 dumbo = { path = "../dumbo" }
-mmds = { path = "../mmds" }
 rate_limiter = { path = "../rate_limiter"}
 snapshot = {path = "../snapshot"}
 net_gen = { path = "../net_gen" }

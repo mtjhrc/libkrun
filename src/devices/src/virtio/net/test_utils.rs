@@ -45,7 +45,6 @@ mod test_utils_internal {
             Some(&guest_mac),
             RateLimiter::default(),
             RateLimiter::default(),
-            true,
         )
             .unwrap();
         enable(&net.tap);

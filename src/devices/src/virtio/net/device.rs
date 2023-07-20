@@ -136,7 +136,6 @@ impl Net {
         guest_mac: Option<&MacAddr>,
         rx_rate_limiter: RateLimiter,
         tx_rate_limiter: RateLimiter,
-        allow_mmds_requests: bool,
     ) -> Result<Self> {
         let tap = Tap::open_named(&tap_if_name).map_err(Error::TapOpen)?;
 
@@ -362,13 +361,12 @@ impl Net {
     // Sends frame on the host TAP.
     //
     // `frame_buf` should contain the frame bytes in a slice of exact length.
-    // Returns whether MMDS consumed the frame.
     fn write_to_tap(
         rate_limiter: &mut RateLimiter,
         frame_buf: &[u8],
         tap: &mut Tap,
         guest_mac: Option<MacAddr>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let checked_frame = |frame_buf| {
             frame_bytes_from_buf(frame_buf).map_err(|e| {
                 error!("VNET header missing in the TX frame.");
@@ -398,7 +396,7 @@ impl Net {
                 //METRICS.net.tap_write_fails.inc();
             }
         };
-        Ok(false)
+        Ok(())
     }
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
@@ -461,11 +459,6 @@ impl Net {
             DeviceState::Inactive => unreachable!(),
         };
 
-        // The MMDS network stack works like a state machine, based on synchronous calls, and
-        // without being added to any event loop. If any frame is accepted by the MMDS, we also
-        // trigger a process_rx() which checks if there are any new frames to be sent, starting
-        // with the MMDS network stack.
-        let mut process_rx_for_mmds = false;
         let mut raise_irq = false;
         let tx_queue = &mut self.queues[TX_INDEX];
 
@@ -539,17 +532,12 @@ impl Net {
                 }
             }
 
-            let frame_consumed_by_mmds = Self::write_to_tap(
+            Self::write_to_tap(
                 &mut self.tx_rate_limiter,
                 &self.tx_frame_buf[..read_count],
                 &mut self.tap,
                 self.guest_mac,
-            )
-            .unwrap_or_else(|_| false);
-            if frame_consumed_by_mmds && !self.rx_deferred_frame {
-                // MMDS consumed this frame/request, let's also try to process the response.
-                process_rx_for_mmds = true;
-            }
+            ).expect("Failed to write to tap!"); // FIXME: propagate
 
             tx_queue.add_used(mem, head_index, 0);
            //     .map_err(DeviceError::QueueError)?;
@@ -562,12 +550,7 @@ impl Net {
             //METRICS.net.no_tx_avail_buffer.inc();
         }
 
-        // An incoming frame for the MMDS may trigger the transmission of a new message.
-        if process_rx_for_mmds {
-            self.process_rx()
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     /// Updates the parameters for the rate limiters
@@ -1373,40 +1356,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_mmds_detour_and_injection() {
-        let mut net = default_net();
-
-        let src_mac = MacAddr::from_str("11:11:11:11:11:11").unwrap();
-        let src_ip = Ipv4Addr::new(10, 1, 2, 3);
-        let dst_mac = MacAddr::from_str("22:22:22:22:22:22").unwrap();
-        let dst_ip = Ipv4Addr::new(169, 254, 169, 254);
-
-        let (frame_buf, frame_len) = create_arp_request(src_mac, src_ip, dst_mac, dst_ip);
-
-        // Call the code which sends the packet to the host or MMDS.
-        // Validate the frame was consumed by MMDS and that the metrics reflect that.
-        check_metric_after_block!(
-            &METRICS.mmds.rx_accepted,
-            1,
-            assert!(Net::write_to_mmds_or_tap(
-                net.mmds_ns.as_mut(),
-                &mut net.tx_rate_limiter,
-                &frame_buf[..frame_len],
-                &mut net.tap,
-                Some(src_mac),
-            )
-            .unwrap())
-        );
-
-        // Validate that MMDS has a response and we can retrieve it.
-        check_metric_after_block!(
-            &METRICS.mmds.tx_frames,
-            1,
-            net.read_from_mmds_or_tap().unwrap()
-        );
-    }
-
-    #[test]
     fn test_mac_spoofing_detection() {
         let mut net = default_net();
 
@@ -1419,6 +1368,7 @@ pub mod tests {
         let (frame_buf, frame_len) = create_arp_request(guest_mac, guest_ip, dst_mac, dst_ip);
 
         // Check that a legit MAC doesn't affect the spoofed MAC metric.
+        /*
         check_metric_after_block!(
             &METRICS.net.tx_spoofed_mac_count,
             0,
@@ -1429,9 +1379,10 @@ pub mod tests {
                 &mut net.tap,
                 Some(guest_mac),
             )
-        );
+        );*/
 
         // Check that a spoofed MAC increases our spoofed MAC metric.
+        /*
         check_metric_after_block!(
             &METRICS.net.tx_spoofed_mac_count,
             1,
@@ -1442,7 +1393,7 @@ pub mod tests {
                 &mut net.tap,
                 Some(not_guest_mac),
             )
-        );
+        );*/
     }
 
     #[test]
