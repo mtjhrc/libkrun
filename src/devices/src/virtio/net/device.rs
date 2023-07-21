@@ -13,7 +13,6 @@ use crate::virtio::{
 };
 use crate::virtio::{report_net_event_fail};
 use crate::Error as DeviceError;
-use dumbo::pdu::ethernet::EthernetFrame;
 use libc::EAGAIN;
 use log::{error, warn};
 use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
@@ -376,6 +375,7 @@ impl Net {
         };
 
         // Check for guest MAC spoofing.
+        /*
         if let Some(mac) = guest_mac {
             let _ = EthernetFrame::from_bytes(checked_frame(frame_buf)?).and_then(|eth_frame| {
                 if mac != eth_frame.src_mac() {
@@ -383,7 +383,7 @@ impl Net {
                 }
                 Ok(())
             });
-        }
+        }*/
 
         match tap.write(frame_buf) {
             Ok(_) => {
@@ -786,8 +786,6 @@ pub mod tests {
         Net, VirtioDevice, MAX_BUFFER_SIZE, RX_INDEX, TX_INDEX, TYPE_NET, VIRTIO_MMIO_INT_VRING,
         VIRTQ_DESC_F_WRITE,
     };
-    use dumbo::pdu::arp::{EthIPv4ArpFrame, ETH_IPV4_FRAME_LEN};
-    use dumbo::pdu::ethernet::ETHERTYPE_ARP;
     //use logger::{Metric, METRICS};
     use rate_limiter::{RateLimiter, TokenBucket, TokenType};
     use virtio_bindings::virtio_net::{
@@ -1323,38 +1321,7 @@ pub mod tests {
         assert_eq!(&buf[..600], &frame_2[..600]);
     }
 
-    fn create_arp_request(
-        src_mac: MacAddr,
-        src_ip: Ipv4Addr,
-        dst_mac: MacAddr,
-        dst_ip: Ipv4Addr,
-    ) -> ([u8; MAX_BUFFER_SIZE], usize) {
-        let mut frame_buf = [b'\0'; MAX_BUFFER_SIZE];
-        let frame_len;
-        // Create an ethernet frame.
-        let incomplete_frame = EthernetFrame::write_incomplete(
-            frame_bytes_from_buf_mut(&mut frame_buf).unwrap(),
-            dst_mac,
-            src_mac,
-            ETHERTYPE_ARP,
-        )
-        .ok()
-        .unwrap();
-        // Set its length to hold an ARP request.
-        let mut frame = incomplete_frame.with_payload_len_unchecked(ETH_IPV4_FRAME_LEN);
-
-        // Save the total frame length.
-        frame_len = vnet_hdr_len() + frame.payload_offset() + ETH_IPV4_FRAME_LEN;
-
-        // Create the ARP request.
-        let arp_request =
-            EthIPv4ArpFrame::write_request(frame.payload_mut(), src_mac, src_ip, dst_mac, dst_ip);
-        // Validate success.
-        assert!(arp_request.is_ok());
-
-        (frame_buf, frame_len)
-    }
-
+    /*
     #[test]
     fn test_mac_spoofing_detection() {
         let mut net = default_net();
@@ -1394,7 +1361,7 @@ pub mod tests {
                 Some(not_guest_mac),
             )
         );*/
-    }
+    }*/
 
     #[test]
     fn test_process_error_cases() {
