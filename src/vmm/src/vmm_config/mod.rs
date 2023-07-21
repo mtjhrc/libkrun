@@ -26,5 +26,3 @@ pub mod vsock;
 
 /// Wrapper for configuring the network devices attached to the microVM.
 pub mod net;
-
-pub mod rate_limiter;

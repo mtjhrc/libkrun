@@ -15,7 +15,6 @@ use crate::virtio::{report_net_event_fail};
 use crate::Error as DeviceError;
 use libc::EAGAIN;
 use log::{error, warn};
-use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
 #[cfg(not(test))]
 use std::io;
 use std::io::{Read, Write};
@@ -102,10 +101,6 @@ pub struct Net {
     pub(crate) queues: Vec<Queue>,
     pub(crate) queue_evts: Vec<EventFd>,
 
-    pub(crate) rx_rate_limiter: RateLimiter,
-    pub(crate) tx_rate_limiter: RateLimiter,
-
-    pub(crate) rx_deferred_frame: bool,
     rx_deferred_irqs: bool,
 
     rx_bytes_read: usize,
@@ -133,8 +128,6 @@ impl Net {
         id: String,
         tap_if_name: String,
         guest_mac: Option<&MacAddr>,
-        rx_rate_limiter: RateLimiter,
-        tx_rate_limiter: RateLimiter,
     ) -> Result<Self> {
         let tap = Tap::open_named(&tap_if_name).map_err(Error::TapOpen)?;
 
@@ -178,9 +171,6 @@ impl Net {
             acked_features: 0u64,
             queues,
             queue_evts,
-            rx_rate_limiter,
-            tx_rate_limiter,
-            rx_deferred_frame: false,
             rx_deferred_irqs: false,
             rx_bytes_read: 0,
             rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
@@ -227,42 +217,6 @@ impl Net {
         }
 
         Ok(())
-    }
-
-    // Attempts to copy a single frame into the guest if there is enough
-    // rate limiting budget.
-    // Returns true on successful frame delivery.
-    fn rate_limited_rx_single_frame(&mut self) -> bool {
-        // If limiter.consume() fails it means there is no more TokenType::Ops
-        // budget and rate limiting is in effect.
-        if !self.rx_rate_limiter.consume(1, TokenType::Ops) {
-            //METRICS.net.rx_rate_limiter_throttled.inc();
-            return false;
-        }
-        // If limiter.consume() fails it means there is no more TokenType::Bytes
-        // budget and rate limiting is in effect.
-        if !self
-            .rx_rate_limiter
-            .consume(self.rx_bytes_read as u64, TokenType::Bytes)
-        {
-            // revert the OPS consume()
-            self.rx_rate_limiter.manual_replenish(1, TokenType::Ops);
-            //METRICS.net.rx_rate_limiter_throttled.inc();
-            return false;
-        }
-
-        // Attempt frame delivery.
-        let success = self.write_frame_to_guest();
-
-        // Undo the tokens consumption if guest delivery failed.
-        if !success {
-            // revert the OPS consume()
-            self.rx_rate_limiter.manual_replenish(1, TokenType::Ops);
-            // revert the BYTES consume()
-            self.rx_rate_limiter
-                .manual_replenish(self.rx_bytes_read as u64, TokenType::Bytes);
-        }
-        success
     }
 
     // Copies a single frame from `self.rx_frame_buf` into the guest.
@@ -361,7 +315,6 @@ impl Net {
     //
     // `frame_buf` should contain the frame bytes in a slice of exact length.
     fn write_to_tap(
-        rate_limiter: &mut RateLimiter,
         frame_buf: &[u8],
         tap: &mut Tap,
         guest_mac: Option<MacAddr>,
@@ -405,11 +358,7 @@ impl Net {
             match self.read_tap() {
                 Ok(count) => {
                     self.rx_bytes_read = count;
-                    //METRICS.net.rx_count.inc();
-                    if !self.rate_limited_rx_single_frame() {
-                        self.rx_deferred_frame = true;
-                        break;
-                    }
+                    self.write_frame_to_guest();
                 }
                 Err(e) => {
                     // The tap device is non-blocking, so any error aside from EAGAIN is
@@ -432,26 +381,6 @@ impl Net {
         self.signal_rx_used_queue()
     }
 
-    // Process the deferred frame first, then continue reading from tap.
-    fn handle_deferred_frame(&mut self) -> result::Result<(), DeviceError> {
-        if self.rate_limited_rx_single_frame() {
-            self.rx_deferred_frame = false;
-            // process_rx() was interrupted possibly before consuming all
-            // packets in the tap; try continuing now.
-            return self.process_rx();
-        }
-
-        self.signal_rx_used_queue()
-    }
-
-    fn resume_rx(&mut self) -> result::Result<(), DeviceError> {
-        if self.rx_deferred_frame {
-            self.handle_deferred_frame()
-        } else {
-            Ok(())
-        }
-    }
-
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
@@ -463,16 +392,6 @@ impl Net {
         let tx_queue = &mut self.queues[TX_INDEX];
 
         while let Some(head) = tx_queue.pop(mem) {
-            // If limiter.consume() fails it means there is no more TokenType::Ops
-            // budget and rate limiting is in effect.
-            if !self.tx_rate_limiter.consume(1, TokenType::Ops) {
-                // Stop processing the queue and return this descriptor chain to the
-                // avail ring, for later processing.
-                tx_queue.undo_pop();
-                //METRICS.net.tx_rate_limiter_throttled.inc();
-                break;
-            }
-
             let head_index = head.index;
             let mut read_count = 0;
             let mut next_desc = Some(head);
@@ -486,21 +405,6 @@ impl Net {
                 self.tx_iovec.push((desc.addr, desc.len as usize));
                 read_count += desc.len as usize;
                 next_desc = desc.next_descriptor();
-            }
-
-            // If limiter.consume() fails it means there is no more TokenType::Bytes
-            // budget and rate limiting is in effect.
-            if !self
-                .tx_rate_limiter
-                .consume(read_count as u64, TokenType::Bytes)
-            {
-                // revert the OPS consume()
-                self.tx_rate_limiter.manual_replenish(1, TokenType::Ops);
-                // Stop processing the queue and return this descriptor chain to the
-                // avail ring, for later processing.
-                tx_queue.undo_pop();
-                //METRICS.net.tx_rate_limiter_throttled.inc();
-                break;
             }
 
             read_count = 0;
@@ -533,7 +437,6 @@ impl Net {
             }
 
             Self::write_to_tap(
-                &mut self.tx_rate_limiter,
                 &self.tx_frame_buf[..read_count],
                 &mut self.tap,
                 self.guest_mac,
@@ -553,17 +456,6 @@ impl Net {
         Ok(())
     }
 
-    /// Updates the parameters for the rate limiters
-    pub fn patch_rate_limiters(
-        &mut self,
-        rx_bytes: BucketUpdate,
-        rx_ops: BucketUpdate,
-        tx_bytes: BucketUpdate,
-        tx_ops: BucketUpdate,
-    ) {
-        self.rx_rate_limiter.update_buckets(rx_bytes, rx_ops);
-        self.tx_rate_limiter.update_buckets(tx_bytes, tx_ops);
-    }
 
     //TODO(mhrica)
     #[cfg(not(test))]
@@ -580,11 +472,11 @@ impl Net {
             //METRICS.net.event_fails.inc();
         } else {
             // If the limiter is not blocked, resume the receiving of bytes.
-            if !self.rx_rate_limiter.is_blocked() {
-                self.resume_rx().unwrap_or_else(report_net_event_fail);
-            } else {
+            //if !self.rx_rate_limiter.is_blocked() {
+                //self.resume_rx().unwrap_or_else(report_net_event_fail);
+            //} else {
                 //METRICS.net.rx_rate_limiter_throttled.inc();
-            }
+            //}
         }
     }
 
@@ -600,26 +492,20 @@ impl Net {
         // don't process any more incoming. Otherwise start processing a frame. In the
         // process the deferred_frame flag will be set in order to avoid freezing the
         // RX queue.
-        if self.queues[RX_INDEX].is_empty(mem) && self.rx_deferred_frame {
+        if self.queues[RX_INDEX].is_empty(mem)/* && self.rx_deferred_frame*/ {
             //METRICS.net.no_rx_avail_buffer.inc();
             return;
         }
 
-        // While limiter is blocked, don't process any more incoming.
-        if self.rx_rate_limiter.is_blocked() {
-            //METRICS.net.rx_rate_limiter_throttled.inc();
-            return;
-        }
-
-        if self.rx_deferred_frame
+        //if self.rx_deferred_frame
         // Process a deferred frame first if available. Don't read from tap again
         // until we manage to receive this deferred frame.
-        {
-            self.handle_deferred_frame()
-                .unwrap_or_else(report_net_event_fail);
-        } else {
+        //{
+        //    self.handle_deferred_frame()
+        //        .unwrap_or_else(report_net_event_fail);
+        //} else {
             self.process_rx().unwrap_or_else(report_net_event_fail);
-        }
+        //}
     }
 
     pub fn process_tx_queue_event(&mut self) {
@@ -627,45 +513,8 @@ impl Net {
         if let Err(e) = self.queue_evts[TX_INDEX].read() {
             error!("Failed to get tx queue event: {:?}", e);
             //METRICS.net.event_fails.inc();
-        } else if !self.tx_rate_limiter.is_blocked()
-        // If the limiter is not blocked, continue transmitting bytes.
-        {
-            self.process_tx().unwrap_or_else(report_net_event_fail);
         } else {
-            //METRICS.net.tx_rate_limiter_throttled.inc();
-        }
-    }
-
-    pub fn process_rx_rate_limiter_event(&mut self) {
-        //METRICS.net.rx_event_rate_limiter_count.inc();
-        // Upon rate limiter event, call the rate limiter handler
-        // and restart processing the queue.
-
-        match self.rx_rate_limiter.event_handler() {
-            Ok(_) => {
-                // There might be enough budget now to receive the frame.
-                self.resume_rx().unwrap_or_else(report_net_event_fail);
-            }
-            Err(e) => {
-                error!("Failed to get rx rate-limiter event: {:?}", e);
-                //METRICS.net.event_fails.inc();
-            }
-        }
-    }
-
-    pub fn process_tx_rate_limiter_event(&mut self) {
-        //METRICS.net.tx_rate_limiter_event_count.inc();
-        // Upon rate limiter event, call the rate limiter handler
-        // and restart processing the queue.
-        match self.tx_rate_limiter.event_handler() {
-            Ok(_) => {
-                // There might be enough budget now to send the frame.
-                self.process_tx().unwrap_or_else(report_net_event_fail);
-            }
-            Err(e) => {
-                error!("Failed to get tx rate-limiter event: {:?}", e);
-                //METRICS.net.event_fails.inc();
-            }
+            self.process_tx().unwrap_or_else(report_net_event_fail);
         }
     }
 }
@@ -787,7 +636,6 @@ pub mod tests {
         VIRTQ_DESC_F_WRITE,
     };
     //use logger::{Metric, METRICS};
-    use rate_limiter::{RateLimiter, TokenBucket, TokenType};
     use virtio_bindings::virtio_net::{
         virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
         VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO,
@@ -1042,7 +890,7 @@ pub mod tests {
         th.rxq.check_used_elem(1, 3, 0);
         th.rxq.check_used_elem(2, 4, 0);
         // Check that the frame wasn't deferred.
-        assert!(!th.net().rx_deferred_frame);
+        //assert!(!th.net().rx_deferred_frame);
         // Check that the frame has been written successfully to the valid Rx descriptor chain.
         th.rxq.check_used_elem(3, 5, frame.len() as u32);
         th.rxq.dtable[5].check_data(&frame);
@@ -1075,7 +923,7 @@ pub mod tests {
         );
 
         // Check that the frame wasn't deferred.
-        assert!(!th.net().rx_deferred_frame);
+        //assert!(!th.net().rx_deferred_frame);
         // Check that the used queue has advanced.
         assert_eq!(th.rxq.used.idx.get(), 1);
         check_used_queue_signal(&th.net(), 1);
@@ -1114,7 +962,7 @@ pub mod tests {
         );
 
         // Check that the frames weren't deferred.
-        assert!(!th.net().rx_deferred_frame);
+        //assert!(!th.net().rx_deferred_frame);
         // Check that the used queue has advanced.
         assert_eq!(th.rxq.used.idx.get(), 2);
         check_used_queue_signal(&th.net(), 1);
@@ -1395,7 +1243,7 @@ pub mod tests {
         th.net().mocks.set_read_tap(ReadTapMock::Failure);
 
         // The RX queue is empty and rx_deffered_frame is set.
-        th.net().rx_deferred_frame = true;
+        //th.net().rx_deferred_frame = true;
         check_metric_after_block!(
             &METRICS.net.no_rx_avail_buffer,
             1,
@@ -1409,287 +1257,6 @@ pub mod tests {
             1,
             th.simulate_event(NetEvent::Tap)
         );
-    }
-
-    #[test]
-    fn test_rx_rate_limiter_handling() {
-        let mut th = TestHelper::default();
-        th.activate_net();
-
-        th.net().rx_rate_limiter = RateLimiter::new(0, 0, 0, 0, 0, 0).unwrap();
-        // There is no actual event on the rate limiter's timerfd.
-        check_metric_after_block!(
-            &METRICS.net.event_fails,
-            1,
-            th.simulate_event(NetEvent::RxRateLimiter)
-        );
-    }
-
-    #[test]
-    fn test_tx_rate_limiter_handling() {
-        let mut th = TestHelper::default();
-        th.activate_net();
-
-        th.net().tx_rate_limiter = RateLimiter::new(0, 0, 0, 0, 0, 0).unwrap();
-        th.simulate_event(NetEvent::TxRateLimiter);
-        // There is no actual event on the rate limiter's timerfd.
-        check_metric_after_block!(
-            &METRICS.net.event_fails,
-            1,
-            th.simulate_event(NetEvent::TxRateLimiter)
-        );
-    }
-
-    #[test]
-    fn test_bandwidth_rate_limiter() {
-        let mut th = TestHelper::default();
-        th.activate_net();
-
-        // Test TX bandwidth rate limiting
-        {
-            // create bandwidth rate limiter that allows 40960 bytes/s with bucket size 4096 bytes
-            let mut rl = RateLimiter::new(0x1000, 0, 100, 0, 0, 0).unwrap();
-            // use up the budget
-            assert!(rl.consume(0x1000, TokenType::Bytes));
-
-            // set this tx rate limiter to be used
-            th.net().tx_rate_limiter = rl;
-
-            // try doing TX
-            // following TX procedure should fail because of bandwidth rate limiting
-            {
-                // trigger the TX handler
-                th.add_desc_chain(NetQueue::Tx, 0, &[(0, 4096, 0)]);
-                th.simulate_event(NetEvent::TxQueue);
-
-                // assert that limiter is blocked
-                assert!(th.net().tx_rate_limiter.is_blocked());
-                //assert_eq!(METRICS.net.tx_rate_limiter_throttled.count(), 1);
-                // make sure the data is still queued for processing
-                assert_eq!(th.txq.used.idx.get(), 0);
-            }
-
-            // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(200));
-
-            // following TX procedure should succeed because bandwidth should now be available
-            {
-                // tx_count increments 1 from process_tx() and 1 from write_to_mmds_or_tap()
-                check_metric_after_block!(
-                    &METRICS.net.tx_count,
-                    2,
-                    th.simulate_event(NetEvent::TxRateLimiter)
-                );
-                // validate the rate_limiter is no longer blocked
-                assert!(!th.net().tx_rate_limiter.is_blocked());
-                // make sure the data queue advanced
-                assert_eq!(th.txq.used.idx.get(), 1);
-            }
-        }
-
-        // Test RX bandwidth rate limiting
-        {
-            // create bandwidth rate limiter that allows 40960 bytes/s with bucket size 4096 bytes
-            let mut rl = RateLimiter::new(0x1000, 0, 100, 0, 0, 0).unwrap();
-            // use up the budget
-            assert!(rl.consume(0x1000, TokenType::Bytes));
-
-            // set this rx rate limiter to be used
-            th.net().rx_rate_limiter = rl;
-
-            // set up RX
-            assert!(!th.net().rx_deferred_frame);
-            th.add_desc_chain(NetQueue::Rx, 0, &[(0, 4096, VIRTQ_DESC_F_WRITE)]);
-
-            // following RX procedure should fail because of bandwidth rate limiting
-            {
-                // trigger the RX handler
-                th.simulate_event(NetEvent::Tap);
-
-                // assert that limiter is blocked
-                assert!(th.net().rx_rate_limiter.is_blocked());
-                //assert_eq!(METRICS.net.rx_rate_limiter_throttled.count(), 1);
-                assert!(th.net().rx_deferred_frame);
-                // assert that no operation actually completed (limiter blocked it)
-                check_used_queue_signal(&th.net(), 1);
-                // make sure the data is still queued for processing
-                assert_eq!(th.rxq.used.idx.get(), 0);
-            }
-
-            // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(200));
-
-            // following RX procedure should succeed because bandwidth should now be available
-            {
-                let frame = &th.net().mocks.read_tap.mock_frame();
-                // no longer throttled
-                check_metric_after_block!(
-                    &METRICS.net.rx_rate_limiter_throttled,
-                    0,
-                    th.simulate_event(NetEvent::RxRateLimiter)
-                );
-                // validate the rate_limiter is no longer blocked
-                assert!(!th.net().rx_rate_limiter.is_blocked());
-                // make sure the virtio queue operation completed this time
-                check_used_queue_signal(&th.net(), 1);
-                // make sure the data queue advanced
-                assert_eq!(th.rxq.used.idx.get(), 1);
-                th.rxq.check_used_elem(0, 0, frame.len() as u32);
-                th.rxq.dtable[0].check_data(&frame);
-            }
-        }
-    }
-
-    #[test]
-    fn test_ops_rate_limiter() {
-        let mut th = TestHelper::default();
-        th.activate_net();
-
-        // Test TX ops rate limiting
-        {
-            // create ops rate limiter that allows 10 ops/s with bucket size 1 ops
-            let mut rl = RateLimiter::new(0, 0, 0, 1, 0, 100).unwrap();
-            // use up the budget
-            assert!(rl.consume(1, TokenType::Ops));
-
-            // set this tx rate limiter to be used
-            th.net().tx_rate_limiter = rl;
-
-            // try doing TX
-            // following TX procedure should fail because of ops rate limiting
-            {
-                // trigger the TX handler
-                th.add_desc_chain(NetQueue::Tx, 0, &[(0, 4096, 0)]);
-                check_metric_after_block!(
-                    METRICS.net.tx_rate_limiter_throttled,
-                    1,
-                    th.simulate_event(NetEvent::TxQueue)
-                );
-
-                // assert that limiter is blocked
-                assert!(th.net().tx_rate_limiter.is_blocked());
-                // make sure the data is still queued for processing
-                assert_eq!(th.txq.used.idx.get(), 0);
-            }
-
-            // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(200));
-
-            // following TX procedure should succeed because ops should now be available
-            {
-                // no longer throttled
-                check_metric_after_block!(
-                    &METRICS.net.tx_rate_limiter_throttled,
-                    0,
-                    th.simulate_event(NetEvent::TxRateLimiter)
-                );
-                // validate the rate_limiter is no longer blocked
-                assert!(!th.net().tx_rate_limiter.is_blocked());
-                // make sure the data queue advanced
-                assert_eq!(th.txq.used.idx.get(), 1);
-            }
-        }
-
-        // Test RX ops rate limiting
-        {
-            // create ops rate limiter that allows 10 ops/s with bucket size 1 ops
-            let mut rl = RateLimiter::new(0, 0, 0, 1, 0, 100).unwrap();
-            // use up the initial budget
-            assert!(rl.consume(1, TokenType::Ops));
-
-            // set this rx rate limiter to be used
-            th.net().rx_rate_limiter = rl;
-
-            // set up RX
-            assert!(!th.net().rx_deferred_frame);
-            th.add_desc_chain(NetQueue::Rx, 0, &[(0, 4096, VIRTQ_DESC_F_WRITE)]);
-
-            // following RX procedure should fail because of ops rate limiting
-            {
-                // trigger the RX handler
-                check_metric_after_block!(
-                    METRICS.net.rx_rate_limiter_throttled,
-                    1,
-                    th.simulate_event(NetEvent::Tap)
-                );
-
-                // assert that limiter is blocked
-                assert!(th.net().rx_rate_limiter.is_blocked());
-                //assert!(METRICS.net.rx_rate_limiter_throttled.count() >= 1);
-                assert!(th.net().rx_deferred_frame);
-                // assert that no operation actually completed (limiter blocked it)
-                check_used_queue_signal(&th.net(), 1);
-                // make sure the data is still queued for processing
-                assert_eq!(th.rxq.used.idx.get(), 0);
-
-                // trigger the RX handler again, this time it should do the limiter fast path exit
-                th.simulate_event(NetEvent::Tap);
-                // assert that no operation actually completed, that the limiter blocked it
-                check_used_queue_signal(&th.net(), 0);
-                // make sure the data is still queued for processing
-                assert_eq!(th.rxq.used.idx.get(), 0);
-            }
-
-            // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(200));
-
-            // following RX procedure should succeed because ops should now be available
-            {
-                let frame = &th.net().mocks.read_tap.mock_frame();
-                th.simulate_event(NetEvent::RxRateLimiter);
-                // make sure the virtio queue operation completed this time
-                check_used_queue_signal(&th.net(), 1);
-                // make sure the data queue advanced
-                assert_eq!(th.rxq.used.idx.get(), 1);
-                th.rxq.check_used_elem(0, 0, frame.len() as u32);
-                th.rxq.dtable[0].check_data(&frame);
-            }
-        }
-    }
-
-    #[test]
-    fn test_patch_rate_limiters() {
-        let mut th = TestHelper::default();
-        th.activate_net();
-
-        th.net().rx_rate_limiter = RateLimiter::new(10, 0, 10, 2, 0, 2).unwrap();
-        th.net().tx_rate_limiter = RateLimiter::new(10, 0, 10, 2, 0, 2).unwrap();
-
-        let rx_bytes = TokenBucket::new(1000, 1001, 1002).unwrap();
-        let rx_ops = TokenBucket::new(1003, 1004, 1005).unwrap();
-        let tx_bytes = TokenBucket::new(1006, 1007, 1008).unwrap();
-        let tx_ops = TokenBucket::new(1009, 1010, 1011).unwrap();
-
-        th.net().patch_rate_limiters(
-            BucketUpdate::Update(rx_bytes.clone()),
-            BucketUpdate::Update(rx_ops.clone()),
-            BucketUpdate::Update(tx_bytes.clone()),
-            BucketUpdate::Update(tx_ops.clone()),
-        );
-        let compare_buckets = |a: &TokenBucket, b: &TokenBucket| {
-            assert_eq!(a.capacity(), b.capacity());
-            assert_eq!(a.one_time_burst(), b.one_time_burst());
-            assert_eq!(a.refill_time_ms(), b.refill_time_ms());
-        };
-        compare_buckets(th.net().rx_rate_limiter.bandwidth().unwrap(), &rx_bytes);
-        compare_buckets(th.net().rx_rate_limiter.ops().unwrap(), &rx_ops);
-        compare_buckets(th.net().tx_rate_limiter.bandwidth().unwrap(), &tx_bytes);
-        compare_buckets(th.net().tx_rate_limiter.ops().unwrap(), &tx_ops);
-
-        th.net().patch_rate_limiters(
-            BucketUpdate::Disabled,
-            BucketUpdate::Disabled,
-            BucketUpdate::Disabled,
-            BucketUpdate::Disabled,
-        );
-        assert!(th.net().rx_rate_limiter.bandwidth().is_none());
-        assert!(th.net().rx_rate_limiter.ops().is_none());
-        assert!(th.net().tx_rate_limiter.bandwidth().is_none());
-        assert!(th.net().tx_rate_limiter.ops().is_none());
     }
 
     #[test]

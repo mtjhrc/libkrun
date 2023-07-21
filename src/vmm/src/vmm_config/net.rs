@@ -8,11 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use devices::virtio::net::TapError;
 use devices::virtio::Net;
-use rate_limiter::{BucketUpdate, TokenBucket};
 use utils::net::mac::MacAddr;
 
 use serde::Deserialize;
-use crate::vmm_config::rate_limiter::RateLimiterConfig;
 use std::str::FromStr;
 
 /// This struct represents the strongly typed equivalent of the json body from net iface
@@ -26,68 +24,6 @@ pub struct NetworkInterfaceConfig {
     pub host_dev_name: String,
     /// Guest MAC address.
     pub guest_mac: Option<MacAddr>,
-    /// Rate Limiter for received packages.
-    pub rx_rate_limiter: Option<RateLimiterConfig>,
-    /// Rate Limiter for transmitted packages.
-    pub tx_rate_limiter: Option<RateLimiterConfig>,
-}
-
-/// The data fed into a network iface update request. Currently, only the RX and TX rate limiters
-/// can be updated.
-#[derive(Debug, PartialEq, Clone)]
-pub struct NetworkInterfaceUpdateConfig {
-    /// The net iface ID, as provided by the user at iface creation time.
-    pub iface_id: String,
-    /// New RX rate limiter config. Only provided data will be updated. I.e. if any optional data
-    /// is missing, it will not be nullified, but left unchanged.
-    pub rx_rate_limiter: Option<RateLimiterConfig>,
-    /// New TX rate limiter config. Only provided data will be updated. I.e. if any optional data
-    /// is missing, it will not be nullified, but left unchanged.
-    pub tx_rate_limiter: Option<RateLimiterConfig>,
-}
-
-macro_rules! get_bucket_update {
-    ($self:ident, $rate_limiter: ident, $metric: ident) => {{
-        match &$self.$rate_limiter {
-            Some(rl_cfg) => match rl_cfg.$metric {
-                // There is data to update.
-                Some(tb_cfg) => {
-                    TokenBucket::new(
-                        tb_cfg.size,
-                        tb_cfg.one_time_burst.unwrap_or(0),
-                        tb_cfg.refill_time,
-                    )
-                    // Updated active rate-limiter.
-                    .map(BucketUpdate::Update)
-                    // Updated/deactivated rate-limiter
-                    .unwrap_or(BucketUpdate::Disabled)
-                }
-                // No update to the rate-limiter.
-                None => BucketUpdate::None,
-            },
-            // No update to the rate-limiter.
-            None => BucketUpdate::None,
-        }
-    }};
-}
-
-impl NetworkInterfaceUpdateConfig {
-    /// Provides a `BucketUpdate` description for the RX bandwidth rate limiter.
-    pub fn rx_bytes(&self) -> BucketUpdate {
-        get_bucket_update!(self, rx_rate_limiter, bandwidth)
-    }
-    /// Provides a `BucketUpdate` description for the RX ops rate limiter.
-    pub fn rx_ops(&self) -> BucketUpdate {
-        get_bucket_update!(self, rx_rate_limiter, ops)
-    }
-    /// Provides a `BucketUpdate` description for the TX bandwidth rate limiter.
-    pub fn tx_bytes(&self) -> BucketUpdate {
-        get_bucket_update!(self, tx_rate_limiter, bandwidth)
-    }
-    /// Provides a `BucketUpdate` description for the TX ops rate limiter.
-    pub fn tx_ops(&self) -> BucketUpdate {
-        get_bucket_update!(self, tx_rate_limiter, ops)
-    }
 }
 
 /// Errors associated with `NetworkInterfaceConfig`.
@@ -198,24 +134,11 @@ impl NetBuilder {
 
     /// Creates a Net device from a NetworkInterfaceConfig.
     pub fn create_net(cfg: NetworkInterfaceConfig) -> Result<Net> {
-        let rx_rate_limiter = cfg
-            .rx_rate_limiter
-            .map(RateLimiterConfig::try_into)
-            .transpose()
-            .map_err(NetworkInterfaceError::CreateRateLimiter)?;
-        let tx_rate_limiter = cfg
-            .tx_rate_limiter
-            .map(RateLimiterConfig::try_into)
-            .transpose()
-            .map_err(NetworkInterfaceError::CreateRateLimiter)?;
-
         // Create and return the Net device
-        devices::virtio::net::Net::new_with_tap(
+        Net::new_with_tap(
             cfg.iface_id,
             cfg.host_dev_name.clone(),
-            cfg.guest_mac.as_ref(),
-            rx_rate_limiter.unwrap_or_default(),
-            tx_rate_limiter.unwrap_or_default(),
+            cfg.guest_mac.as_ref()
         )
         .map_err(NetworkInterfaceError::CreateNetworkDevice)
     }
@@ -243,8 +166,6 @@ mod tests {
                 iface_id: self.iface_id.clone(),
                 host_dev_name: self.host_dev_name.clone(),
                 guest_mac: self.guest_mac,
-                rx_rate_limiter: None,
-                tx_rate_limiter: None,
             }
         }
     }
@@ -254,8 +175,6 @@ mod tests {
             iface_id: String::from(id),
             host_dev_name: String::from(name),
             guest_mac: Some(MacAddr::from_str(mac).unwrap()),
-            rx_rate_limiter: Some(RateLimiterConfig::default()),
-            tx_rate_limiter: Some(RateLimiterConfig::default()),
         }
     }
 

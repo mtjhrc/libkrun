@@ -766,8 +766,6 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         iface_id: "testnet".to_string(),
         host_dev_name: "testnet".to_string(),
         guest_mac: Some(MacAddr::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
-        rx_rate_limiter: None,
-        tx_rate_limiter: None,
     };
     ctx_cfg.vmr.add_network_interface(network_interface_config)
         .expect("Failed to create network interface");  //TODO: process the error and inform the caller

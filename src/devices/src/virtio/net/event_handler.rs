@@ -63,8 +63,6 @@ impl Subscriber for Net {
         if self.is_activated() {
             let virtq_rx_ev_fd = self.queue_evts[RX_INDEX].as_raw_fd();
             let virtq_tx_ev_fd = self.queue_evts[TX_INDEX].as_raw_fd();
-            let rx_rate_limiter_fd = self.rx_rate_limiter.as_raw_fd();
-            let tx_rate_limiter_fd = self.tx_rate_limiter.as_raw_fd();
             let tap_fd = self.tap.as_raw_fd();
             let activate_fd = self.activate_evt.as_raw_fd();
 
@@ -73,8 +71,6 @@ impl Subscriber for Net {
                 _ if source == virtq_rx_ev_fd => self.process_rx_queue_event(),
                 _ if source == tap_fd => self.process_tap_rx_event(),
                 _ if source == virtq_tx_ev_fd => self.process_tx_queue_event(),
-                _ if source == rx_rate_limiter_fd => self.process_rx_rate_limiter_event(),
-                _ if source == tx_rate_limiter_fd => self.process_tx_rate_limiter_event(),
                 _ if activate_fd == source => self.process_activate_event(evmgr),
                 _ => {
                     warn!("Net: Spurious event received: {:?}", source);
@@ -98,8 +94,6 @@ impl Subscriber for Net {
             vec![
                 EpollEvent::new(EventSet::IN, self.queue_evts[RX_INDEX].as_raw_fd() as u64),
                 EpollEvent::new(EventSet::IN, self.queue_evts[TX_INDEX].as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.rx_rate_limiter.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.tx_rate_limiter.as_raw_fd() as u64),
                 EpollEvent::new(
                     EventSet::IN | EventSet::EDGE_TRIGGERED,
                     self.tap.as_raw_fd() as u64,
