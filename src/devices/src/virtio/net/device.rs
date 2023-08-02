@@ -5,7 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use crate::virtio::net::tap::Tap;
 use crate::virtio::net::{MAX_BUFFER_SIZE, QUEUE_SIZE, QUEUE_SIZES, RX_INDEX, TX_INDEX};
 //use crate::virtio::net::test_utils::Mocks;
 use crate::virtio::{
@@ -22,6 +21,12 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{cmp, mem, result};
+use std::os::fd::RawFd;
+use nix::dir::Type::Socket;
+use nix::fcntl::{F_SETFL, fcntl, open};
+use nix::sys::socket::{AddressFamily, connect, socket, SockFlag, SockType, UnixAddr};
+use nix::unistd;
+use nix::unistd::read;
 use utils::eventfd::EventFd;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
 const VIRTIO_F_VERSION_1: u32 = 32; // FIXME: why is this not in virtio_bindings::virtio_net: ???
@@ -41,8 +46,9 @@ enum FrontendError {
 }
 
 use crate::virtio::net::{Result, Error};
-#[cfg(test)]
-use crate::virtio::net::test_utils::Mocks;
+use crate::virtio::net::Error::PasstSocketRead;
+//#[cfg(test)]
+//use crate::virtio::net::test_utils::Mocks;
 
 pub(crate) fn vnet_hdr_len() -> usize {
     mem::size_of::<virtio_net_hdr_v1>()
@@ -93,7 +99,7 @@ unsafe impl ByteValued for ConfigSpace {}
 pub struct Net {
     pub(crate) id: String,
 
-    pub(crate) tap: Tap,
+    pub(crate) passt_socket: RawFd,
 
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -117,18 +123,16 @@ pub struct Net {
 
     pub(crate) device_state: DeviceState,
     pub(crate) activate_evt: EventFd,
-
-    #[cfg(test)]
-    pub(crate) mocks: Mocks,
 }
 
 impl Net {
-    /// Create a new virtio network device with the given TAP interface.
-    pub fn new_with_tap(
+    /// Create a new virtio network device using passt
+    pub fn new(
         id: String,
         tap_if_name: String,
         guest_mac: Option<&MacAddr>,
     ) -> Result<Self> {
+        /*
         let tap = Tap::open_named(&tap_if_name).map_err(Error::TapOpen)?;
 
         // Set offload flags to match the virtio features below.
@@ -136,10 +140,21 @@ impl Net {
             net_gen::TUN_F_CSUM | net_gen::TUN_F_UFO | net_gen::TUN_F_TSO4 | net_gen::TUN_F_TSO6,
         )
         .map_err(Error::TapSetOffload)?;
+        */
+        //let vnet_hdr_size = vnet_hdr_len() as i32;
 
-        let vnet_hdr_size = vnet_hdr_len() as i32;
-        tap.set_vnet_hdr_size(vnet_hdr_size)
-            .map_err(Error::TapSetVnetHdrSize)?;
+        //tap.set_vnet_hdr_size(vnet_hdr_size)
+        //    .map_err(Error::TapSetVnetHdrSize)?;
+
+        let passt_socket = socket(AddressFamily::Unix, SockType::Stream, SockFlag::SOCK_NONBLOCK, None)
+            .map_err(Error::PasstSocketOpen)?;
+        //TODO: pass name as arg
+        let unix_addr = UnixAddr::new("/tmp/passt_1.socket")
+            .map_err(Error::PasstSocketOpen)?;
+        connect(passt_socket, &unix_addr)
+            .map_err(Error::PasstSocketConnect)?;
+
+        log::info!("Connected just fine!");
 
         let mut avail_features = 1 << VIRTIO_NET_F_GUEST_CSUM
             | 1 << VIRTIO_NET_F_CSUM
@@ -166,7 +181,7 @@ impl Net {
 
         Ok(Net {
             id,
-            tap,
+            passt_socket,
             avail_features,
             acked_features: 0u64,
             queues,
@@ -182,9 +197,6 @@ impl Net {
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
             config_space,
             guest_mac: guest_mac.copied(),
-
-            #[cfg(test)]
-            mocks: Mocks::default(),
         })
     }
 
@@ -311,60 +323,20 @@ impl Net {
         false
     }
 
-    // Sends frame on the host TAP.
-    //
-    // `frame_buf` should contain the frame bytes in a slice of exact length.
-    fn write_to_tap(
-        frame_buf: &[u8],
-        tap: &mut Tap,
-        guest_mac: Option<MacAddr>,
-    ) -> Result<()> {
-        let checked_frame = |frame_buf| {
-            frame_bytes_from_buf(frame_buf).map_err(|e| {
-                error!("VNET header missing in the TX frame.");
-                //METRICS.net.tx_malformed_frames.inc();
-                e
-            })
-        };
-
-        // Check for guest MAC spoofing.
-        /*
-        if let Some(mac) = guest_mac {
-            let _ = EthernetFrame::from_bytes(checked_frame(frame_buf)?).and_then(|eth_frame| {
-                if mac != eth_frame.src_mac() {
-                    //METRICS.net.tx_spoofed_mac_count.inc();
-                }
-                Ok(())
-            });
-        }*/
-
-        match tap.write(frame_buf) {
-            Ok(_) => {
-                //METRICS.net.tx_bytes_count.add(frame_buf.len());
-                //METRICS.net.tx_packets_count.inc();
-                //METRICS.net.tx_count.inc();
-            }
-            Err(e) => {
-                error!("Failed to write to tap: {:?}", e);
-                //METRICS.net.tap_write_fails.inc();
-            }
-        };
-        Ok(())
-    }
-
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
         loop {
-            match self.read_tap() {
+            match self.read_frame_from_passt() {
                 Ok(count) => {
+                    log::info!("Read {count} bytes from passt: {:x?}", &self.rx_frame_buf[..count]);
                     self.rx_bytes_read = count;
                     self.write_frame_to_guest();
                 }
                 Err(e) => {
                     // The tap device is non-blocking, so any error aside from EAGAIN is
                     // unexpected.
-                    match e.raw_os_error() {
-                        Some(err) if err == EAGAIN => (),
+                    match e {
+                        Error::PasstSocketRead(err) if err == nix::Error::EAGAIN => (),
                         _ => {
                             error!("Failed to read tap: {:?}", e);
                             //METRICS.net.tap_read_fails.inc();
@@ -436,11 +408,10 @@ impl Net {
                 }
             }
 
-            Self::write_to_tap(
-                &self.tx_frame_buf[..read_count],
-                &mut self.tap,
-                self.guest_mac,
-            ).expect("Failed to write to tap!"); // FIXME: propagate
+            log::info!("Writing to passt: {:x?}", &self.tx_frame_buf[..read_count]);
+            if let Err(e) = nix::unistd::write(self.passt_socket, &self.tx_frame_buf[..read_count]) {
+                log::warn!("[TODO propagate] Failed to write to passt: {}", e);
+            }
 
             tx_queue.add_used(mem, head_index, 0);
            //     .map_err(DeviceError::QueueError)?;
@@ -457,10 +428,9 @@ impl Net {
     }
 
 
-    //TODO(mhrica)
-    #[cfg(not(test))]
-    fn read_tap(&mut self) -> std::io::Result<usize> {
-        self.tap.read(&mut self.rx_frame_buf)
+    fn read_frame_from_passt(&mut self) -> Result<usize> {
+        unistd::read(self.passt_socket, &mut self.rx_frame_buf)
+            .map_err(PasstSocketRead)
     }
 
     pub fn process_rx_queue_event(&mut self) {
@@ -610,7 +580,7 @@ impl VirtioDevice for Net {
         todo!()
     }
 }
-
+/*
 #[cfg(test)]
 #[macro_use]
 pub mod tests {
@@ -1285,3 +1255,4 @@ pub mod tests {
         check_used_queue_signal(&net, 0);
     }
 }
+*/

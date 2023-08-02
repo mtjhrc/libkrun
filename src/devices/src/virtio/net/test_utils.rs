@@ -1,6 +1,6 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-
+/*
 #[cfg(test)]
 mod test_utils_internal {
     use std::fs::File;
@@ -14,7 +14,6 @@ mod test_utils_internal {
 
 
     use crate::virtio::net::device::vnet_hdr_len;
-    use crate::virtio::net::tap::{Error, IfReqBuilder, Tap};
     use crate::virtio::net::{Net};
 
     use vm_memory::{GuestAddress, GuestMemoryMmap};
@@ -38,7 +37,7 @@ mod test_utils_internal {
 
         let guest_mac = default_guest_mac();
 
-        let net = Net::new_with_tap(
+        let net = Net::new(
             format!("net-device{}", next_tap),
             tap_dev_name,
             Some(&guest_mac),
@@ -474,3 +473,4 @@ mod test_utils_internal {
 }
 
 pub use test_utils_internal::*;
+ */

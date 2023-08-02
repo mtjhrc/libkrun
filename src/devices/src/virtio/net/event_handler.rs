@@ -63,13 +63,13 @@ impl Subscriber for Net {
         if self.is_activated() {
             let virtq_rx_ev_fd = self.queue_evts[RX_INDEX].as_raw_fd();
             let virtq_tx_ev_fd = self.queue_evts[TX_INDEX].as_raw_fd();
-            let tap_fd = self.tap.as_raw_fd();
+            let passt_socket = self.passt_socket;
             let activate_fd = self.activate_evt.as_raw_fd();
 
             // Looks better than C style if/else if/else.
             match source {
                 _ if source == virtq_rx_ev_fd => self.process_rx_queue_event(),
-                _ if source == tap_fd => self.process_tap_rx_event(),
+                _ if source == passt_socket => self.process_tap_rx_event(),
                 _ if source == virtq_tx_ev_fd => self.process_tx_queue_event(),
                 _ if activate_fd == source => self.process_activate_event(evmgr),
                 _ => {
@@ -96,7 +96,7 @@ impl Subscriber for Net {
                 EpollEvent::new(EventSet::IN, self.queue_evts[TX_INDEX].as_raw_fd() as u64),
                 EpollEvent::new(
                     EventSet::IN | EventSet::EDGE_TRIGGERED,
-                    self.tap.as_raw_fd() as u64,
+                    self.passt_socket as u64,
                 ),
             ]
         } else {

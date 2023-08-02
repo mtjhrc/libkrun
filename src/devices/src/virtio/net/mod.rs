@@ -14,25 +14,21 @@ pub const TX_INDEX: usize = 1;
 
 pub mod device;
 pub mod event_handler;
-mod tap;
 
 #[cfg(test)]
 pub mod test_utils;
 
 pub use self::device::Net;
 pub use self::event_handler::*;
-pub use tap::Error as TapError;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Open tap device failed.
-    TapOpen(TapError),
-    /// Setting tap interface offload flags failed.
-    TapSetOffload(TapError),
-    /// Setting vnet header size failed.
-    TapSetVnetHdrSize(TapError),
-    /// Enabling tap interface failed.
-    TapEnable(TapError),
+    // Open passt socket failed
+    PasstSocketOpen(nix::Error),
+    // Open passt socket failed
+    PasstSocketConnect(nix::Error),
+    // Read passt socket failed
+    PasstSocketRead(nix::Error),
     /// EventFd error.
     EventFd(io::Error),
     /// IO error.

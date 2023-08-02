@@ -6,7 +6,6 @@ use std::fmt;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use devices::virtio::net::TapError;
 use devices::virtio::Net;
 use utils::net::mac::MacAddr;
 
@@ -37,8 +36,6 @@ pub enum NetworkInterfaceError {
     GuestMacAddressInUse(String),
     /// Couldn't find the interface to update (patch).
     DeviceIdNotFound,
-    /// Cannot open/create tap device.
-    OpenTap(TapError),
 }
 
 impl fmt::Display for NetworkInterfaceError {
@@ -53,7 +50,7 @@ impl fmt::Display for NetworkInterfaceError {
                 format!("The guest MAC address {} is already in use.", mac_addr)
             ),
             DeviceIdNotFound => write!(f, "Invalid interface ID - not found."),
-            OpenTap(ref e) => {
+            /*OpenTap(ref e) => {
                 // We are propagating the Tap Error. This error can contain
                 // imbricated quotes which would result in an invalid json.
                 let mut tap_err = format!("{:?}", e);
@@ -65,7 +62,7 @@ impl fmt::Display for NetworkInterfaceError {
                     "Cannot open TAP device. Invalid name/permissions. ".to_string(),
                     tap_err
                 )
-            }
+            }*/
         }
     }
 }
@@ -135,7 +132,7 @@ impl NetBuilder {
     /// Creates a Net device from a NetworkInterfaceConfig.
     pub fn create_net(cfg: NetworkInterfaceConfig) -> Result<Net> {
         // Create and return the Net device
-        Net::new_with_tap(
+        Net::new(
             cfg.iface_id,
             cfg.host_dev_name.clone(),
             cfg.guest_mac.as_ref()
@@ -143,7 +140,7 @@ impl NetBuilder {
         .map_err(NetworkInterfaceError::CreateNetworkDevice)
     }
 }
-
+/*
 #[cfg(test)]
 mod tests {
     use std::str;
@@ -306,3 +303,4 @@ mod tests {
         );
     }
 }
+*/
