@@ -248,7 +248,13 @@ impl Net {
         })?;
         let head_index = head_descriptor.index;
 
-        let mut frame_slice = &self.rx_frame_buf[..self.rx_bytes_read];
+        //FIXME: what if the frame is split between 2 buffers?
+        let frame_reported_length = u32::from_be_bytes(self.rx_frame_buf[..4].try_into().unwrap()) as usize;
+
+        // FIXME: mysterious bytes again
+        let crafted_frame: Vec<u8> = [&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0xfe],  &self.rx_frame_buf[frame_reported_length..self.rx_bytes_read]].concat();
+        let mut frame_slice = &crafted_frame[..];
+
         let frame_len = frame_slice.len();
         let mut maybe_next_descriptor = Some(head_descriptor);
         while let Some(descriptor) = &maybe_next_descriptor {
