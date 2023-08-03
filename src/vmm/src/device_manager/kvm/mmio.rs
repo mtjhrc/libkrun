@@ -156,7 +156,7 @@ impl MMIODeviceManager {
                 "virtio_mmio.device",
                 &format!("{}K@0x{:08x}:{}", MMIO_LEN / 1024, mmio_base, irq),
             )
-            .map_err(Error::Cmdline);
+            .map_err(Error::Cmdline)?;
 
         println!("[ME] virtio_mmio.device={}", format!("{}K@0x{:08x}:{}", MMIO_LEN / 1024, mmio_base, irq));
         Ok(())
