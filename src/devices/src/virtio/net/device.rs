@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{cmp, mem, result};
+use std::mem::size_of_val;
 use std::os::fd::RawFd;
 use nix::dir::Type::Socket;
 use nix::fcntl::{F_SETFL, fcntl, open};
@@ -408,10 +409,26 @@ impl Net {
                 }
             }
 
-            log::info!("Writing to passt: {:x?}", &self.tx_frame_buf[..read_count]);
-            if let Err(e) = nix::unistd::write(self.passt_socket, &self.tx_frame_buf[..read_count]) {
-                log::warn!("[TODO propagate] Failed to write to passt: {}", e);
-            }
+            let packet: Box<[u8]> = {
+                // TODO: allocate the buffer in the first place...
+                let header = (read_count as u32).to_be_bytes(); //TODO assert the conversion is not lossy
+                //FIXME: what are these first 12 bytes at the begining
+                // they are either 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, fe
+                // or 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 45, c0
+                // and are then followed by the ethernet header
+                let body = &self.tx_frame_buf[12..read_count];
+                [&header, body].concat().into()
+            };
+
+            log::info!("Writing to passt: {:x?}", &packet);
+
+            match nix::unistd::write(self.passt_socket, &packet) {
+                Ok(wrote_count) => { // TODO: loop
+                    log::info!("Wrote {wrote_count}/{packet_len} bytes to passt", packet_len=packet.len());
+                }Err(e) => {
+                    log::warn!("[TODO propagate] Failed to write to passt: {}", e);
+                }
+            };
 
             tx_queue.add_used(mem, head_index, 0);
            //     .map_err(DeviceError::QueueError)?;
