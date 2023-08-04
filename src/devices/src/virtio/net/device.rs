@@ -12,22 +12,15 @@ use crate::virtio::{
 };
 use crate::virtio::{report_net_event_fail};
 use crate::Error as DeviceError;
-use libc::EAGAIN;
 use log::{error, warn};
-#[cfg(not(test))]
-use std::io;
-use std::io::{BufReader, BufWriter, ErrorKind, Read, repeat, Write};
+use std::io::{BufReader, Read, Write};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{cmp, mem, result};
-use std::fs::File;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use nix::fcntl::{F_SETFL, fcntl, open};
 use nix::sys::socket::{AddressFamily, connect, socket, SockFlag, SockType, UnixAddr};
-use nix::unistd;
-use nix::unistd::read;
 use utils::eventfd::EventFd;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
 
@@ -42,7 +35,6 @@ use virtio_bindings::virtio_net::{
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
 
 enum FrontendError {
-    AddUsed,
     DescriptorChainTooSmall,
     EmptyQueue,
     GuestMemory(GuestMemoryError),
@@ -50,30 +42,12 @@ enum FrontendError {
 }
 
 use crate::virtio::net::{Result, Error};
-use crate::virtio::net::Error::{IO, PasstSocketRead, TryAgain};
+use crate::virtio::net::Error::{IO, TryAgain};
 //#[cfg(test)]
 //use crate::virtio::net::test_utils::Mocks;
 
 pub(crate) fn vnet_hdr_len() -> usize {
     mem::size_of::<virtio_net_hdr_v1>()
-}
-
-// Frames being sent/received through the network device model have a VNET header. This
-// function returns a slice which holds the L2 frame bytes without this header.
-fn frame_bytes_from_buf(buf: &[u8]) -> Result<&[u8]> {
-    if buf.len() < vnet_hdr_len() {
-        Err(Error::VnetHeaderMissing)
-    } else {
-        Ok(&buf[vnet_hdr_len()..])
-    }
-}
-
-fn frame_bytes_from_buf_mut(buf: &mut [u8]) -> Result<&mut [u8]> {
-    if buf.len() < vnet_hdr_len() {
-        Err(Error::VnetHeaderMissing)
-    } else {
-        Ok(&mut buf[vnet_hdr_len()..])
-    }
 }
 
 // This initializes to all 0 the virtio_net_hdr part of a buf and return the length of the header
@@ -133,7 +107,6 @@ impl Net {
     /// Create a new virtio network device using passt
     pub fn new(
         id: String,
-        tap_if_name: String,
         guest_mac: Option<&MacAddr>,
     ) -> Result<Self> {
         /*
@@ -322,7 +295,7 @@ impl Net {
         for _ in 0..max_iterations {
             match self.do_write_frame_to_guest() {
                 Ok(()) => return true,
-                Err(FrontendError::EmptyQueue) | Err(FrontendError::AddUsed) => {
+                Err(FrontendError::EmptyQueue) => {
                     return false;
                 }
                 Err(_) => {
@@ -638,7 +611,7 @@ impl VirtioDevice for Net {
         Ok(())
     }
 
-    fn set_irq_line(&mut self, irq: u32) {
+    fn set_irq_line(&mut self, _irq: u32) {
         todo!()
     }
 }

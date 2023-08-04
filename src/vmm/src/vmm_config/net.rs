@@ -1,7 +1,6 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryInto;
 use std::fmt;
 use std::result;
 use std::sync::{Arc, Mutex};
@@ -9,8 +8,6 @@ use std::sync::{Arc, Mutex};
 use devices::virtio::Net;
 use utils::net::mac::MacAddr;
 
-use serde::Deserialize;
-use std::str::FromStr;
 
 /// This struct represents the strongly typed equivalent of the json body from net iface
 /// related requests.
@@ -134,7 +131,6 @@ impl NetBuilder {
         // Create and return the Net device
         Net::new(
             cfg.iface_id,
-            cfg.host_dev_name.clone(),
             cfg.guest_mac.as_ref()
         )
         .map_err(NetworkInterfaceError::CreateNetworkDevice)

@@ -19,7 +19,7 @@ use devices::legacy::Gic;
 use devices::legacy::Serial;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::VirtioShmRegion;
-use devices::virtio::{MmioTransport, Net, VirtioDevice, Vsock};
+use devices::virtio::{MmioTransport, Net, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -46,7 +46,7 @@ use arch::ArchMemoryInfo;
 use arch::InitrdConfig;
 #[cfg(feature = "tee")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
-use polly::event_manager::{Error as EventManagerError, EventManager, Subscriber};
+use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
 use utils::time::TimestampUs;
