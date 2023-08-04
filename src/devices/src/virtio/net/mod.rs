@@ -29,6 +29,8 @@ pub enum Error {
     PasstSocketConnect(nix::Error),
     // Read passt socket failed
     PasstSocketRead(nix::Error),
+    // TODO
+    TryAgain,
     /// EventFd error.
     EventFd(io::Error),
     /// IO error.

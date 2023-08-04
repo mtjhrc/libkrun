@@ -16,21 +16,24 @@ use libc::EAGAIN;
 use log::{error, warn};
 #[cfg(not(test))]
 use std::io;
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, repeat, Write};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{cmp, mem, result};
-use std::mem::size_of_val;
-use std::os::fd::RawFd;
-use nix::dir::Type::Socket;
+use std::fs::File;
+use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use nix::fcntl::{F_SETFL, fcntl, open};
 use nix::sys::socket::{AddressFamily, connect, socket, SockFlag, SockType, UnixAddr};
 use nix::unistd;
 use nix::unistd::read;
 use utils::eventfd::EventFd;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
-const VIRTIO_F_VERSION_1: u32 = 32; // FIXME: why is this not in virtio_bindings::virtio_net: ???
+
+const VIRTIO_F_VERSION_1: u32 = 32;
+
+// FIXME: why is this not in virtio_bindings::virtio_net: ???
 use virtio_bindings::virtio_net::{
     virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
     VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO,
@@ -47,7 +50,7 @@ enum FrontendError {
 }
 
 use crate::virtio::net::{Result, Error};
-use crate::virtio::net::Error::PasstSocketRead;
+use crate::virtio::net::Error::{IO, PasstSocketRead, TryAgain};
 //#[cfg(test)]
 //use crate::virtio::net::test_utils::Mocks;
 
@@ -73,13 +76,12 @@ fn frame_bytes_from_buf_mut(buf: &mut [u8]) -> Result<&mut [u8]> {
     }
 }
 
-// This initializes to all 0 the VNET hdr part of a buf.
-fn init_vnet_hdr(buf: &mut [u8]) {
-    // The buffer should be larger than vnet_hdr_len.
-    // TODO: any better way to set all these bytes to 0? Or is this optimized by the compiler?
-    for i in &mut buf[0..vnet_hdr_len()] {
-        *i = 0;
-    }
+// This initializes to all 0 the virtio_net_hdr part of a buf and return the length of the header
+// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-2050006
+fn write_virtio_net_hdr(buf: &mut [u8]) -> usize {
+    let len = vnet_hdr_len();
+    buf[0..len].fill(0);
+    len
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +103,7 @@ pub struct Net {
     pub(crate) id: String,
 
     pub(crate) passt_socket: RawFd,
+    passt_buffered_reader: BufReader<UnixStream>,
 
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -180,9 +183,16 @@ impl Net {
 
         let queues = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
 
+        //TODO: should probably use std::net Unix socket in the first place and clone it
+        // https://stackoverflow.com/questions/58467659/how-to-store-tcpstream-with-bufreader-and-bufwriter-in-a-data-structure
+        let passt_buffered_reader = BufReader::new(
+            unsafe { UnixStream::from_raw_fd(passt_socket) }
+        );
+
         Ok(Net {
             id,
             passt_socket,
+            passt_buffered_reader,
             avail_features,
             acked_features: 0u64,
             queues,
@@ -248,12 +258,7 @@ impl Net {
         })?;
         let head_index = head_descriptor.index;
 
-        //FIXME: what if the frame is split between 2 buffers?
-        let frame_reported_length = u32::from_be_bytes(self.rx_frame_buf[..4].try_into().unwrap()) as usize;
-
-        // FIXME: mysterious bytes again
-        let crafted_frame: Vec<u8> = [&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0xfe],  &self.rx_frame_buf[frame_reported_length..self.rx_bytes_read]].concat();
-        let mut frame_slice = &crafted_frame[..];
+        let mut frame_slice = &self.rx_frame_buf[..self.rx_bytes_read];
 
         let frame_len = frame_slice.len();
         let mut maybe_next_descriptor = Some(head_descriptor);
@@ -296,11 +301,11 @@ impl Net {
         // Mark the descriptor chain as used. If an error occurred, skip the descriptor chain.
         let used_len = if result.is_err() { 0 } else { frame_len as u32 };
         queue.add_used(mem, head_index, used_len);
-            /*
-            .map_err(|e| {
-            error!("Failed to add available descriptor {}: {}", head_index, e);
-            FrontendError::AddUsed
-        })?;*/
+        /*
+        .map_err(|e| {
+        error!("Failed to add available descriptor {}: {}", head_index, e);
+        FrontendError::AddUsed
+    })?;*/
         self.rx_deferred_irqs = true;
 
         if result.is_ok() {
@@ -343,6 +348,12 @@ impl Net {
                     // The tap device is non-blocking, so any error aside from EAGAIN is
                     // unexpected.
                     match e {
+                        TryAgain => {
+                            error!("TryAgain while reading from passt");
+                        }
+                        IO(e) => {
+                            error!("IO error while reading from passt: {:?}", e);
+                        }
                         Error::PasstSocketRead(err) if err == nix::Error::EAGAIN => (),
                         _ => {
                             error!("Failed to read tap: {:?}", e);
@@ -429,15 +440,17 @@ impl Net {
             log::info!("Writing to passt: {:x?}", &packet);
 
             match nix::unistd::write(self.passt_socket, &packet) {
-                Ok(wrote_count) => { // TODO: loop
+                Ok(wrote_count) => {
+                    // TODO: loop
                     log::info!("Wrote {wrote_count}/{packet_len} bytes to passt", packet_len=packet.len());
-                }Err(e) => {
+                }
+                Err(e) => {
                     log::warn!("[TODO propagate] Failed to write to passt: {}", e);
                 }
             };
 
             tx_queue.add_used(mem, head_index, 0);
-           //     .map_err(DeviceError::QueueError)?;
+            //     .map_err(DeviceError::QueueError)?;
             raise_irq = true;
         }
 
@@ -450,10 +463,36 @@ impl Net {
         Ok(())
     }
 
-
+    /// Fills self.rx_frame_buf with an ethernet frame from passt and prepends virtio_net_hdr to it
     fn read_frame_from_passt(&mut self) -> Result<usize> {
-        unistd::read(self.passt_socket, &mut self.rx_frame_buf)
-            .map_err(PasstSocketRead)
+        let mut len = 0;
+        len += write_virtio_net_hdr(&mut self.rx_frame_buf);
+
+        const PASST_HEADER_LEN: usize = 4;
+        let frame_length: usize = {
+            // each frame from passt is prepended by a 4 byte "header",that is
+            // interpreted as a big-endian u32 integer and is the length of the following ethernet
+            // frame.
+            let mut frame_length = [0u8; PASST_HEADER_LEN];
+            self.passt_buffered_reader.read_exact(&mut frame_length)
+                .map_err(IO)?; // TODO: better enum
+            //println!("frame length read as: {:x?}", frame_length);
+            u32::from_be_bytes(frame_length) as usize
+        };
+        println!("!!! Frame from passt reported length={} read len {}", frame_length,  self.rx_frame_buf[len..len + frame_length].len());
+
+
+        self.passt_buffered_reader.read_exact(&mut self.rx_frame_buf[len..len + frame_length])
+            .map_err(IO)?; // TODO: better enum
+
+        /*let mut buf = vec![0u8; frame_length];
+        self.passt_buffered_reader.read_exact(&mut buf[..]);
+        println!("frame read: {:x?}", &buf);
+        */
+
+        len += frame_length;
+
+        Ok(len)
     }
 
     pub fn process_rx_queue_event(&mut self) {
@@ -466,9 +505,9 @@ impl Net {
         } else {
             // If the limiter is not blocked, resume the receiving of bytes.
             //if !self.rx_rate_limiter.is_blocked() {
-                //self.resume_rx().unwrap_or_else(report_net_event_fail);
+            //self.resume_rx().unwrap_or_else(report_net_event_fail);
             //} else {
-                //METRICS.net.rx_rate_limiter_throttled.inc();
+            //METRICS.net.rx_rate_limiter_throttled.inc();
             //}
         }
     }
@@ -497,7 +536,7 @@ impl Net {
         //    self.handle_deferred_frame()
         //        .unwrap_or_else(report_net_event_fail);
         //} else {
-            self.process_rx().unwrap_or_else(report_net_event_fail);
+        self.process_rx().unwrap_or_else(report_net_event_fail);
         //}
     }
 
@@ -562,7 +601,7 @@ impl VirtioDevice for Net {
             data.write_all(
                 &config_space_bytes[offset as usize..cmp::min(end, config_len) as usize],
             )
-            .unwrap();
+                .unwrap();
         }
     }
 
