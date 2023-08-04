@@ -232,6 +232,7 @@ impl Net {
         let head_index = head_descriptor.index;
 
         let mut frame_slice = &self.rx_frame_buf[..self.rx_bytes_read];
+        log::info!("Will write frame slice {} to guest: {:x?}", self.rx_bytes_read, &self.rx_frame_buf[..self.rx_bytes_read]);
 
         let frame_len = frame_slice.len();
         let mut maybe_next_descriptor = Some(head_descriptor);
@@ -313,7 +314,6 @@ impl Net {
         loop {
             match self.read_frame_from_passt() {
                 Ok(count) => {
-                    log::info!("Read {count} bytes from passt: {:x?}", &self.rx_frame_buf[..count]);
                     self.rx_bytes_read = count;
                     self.write_frame_to_guest();
                 }
@@ -401,12 +401,14 @@ impl Net {
 
             let packet: Box<[u8]> = {
                 // TODO: allocate the buffer in the first place...
-                let header = (read_count as u32).to_be_bytes(); //TODO assert the conversion is not lossy
+                log::info!("read count is {read_count}");
+                let actual_frame_length = read_count - vnet_hdr_len();
+                let header = (actual_frame_length as u32).to_be_bytes(); //TODO assert the conversion is not lossy
                 //FIXME: what are these first 12 bytes at the begining
                 // they are either 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, fe
                 // or 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 45, c0
                 // and are then followed by the ethernet header
-                let body = &self.tx_frame_buf[12..read_count];
+                let body = &self.tx_frame_buf[vnet_hdr_len()..read_count];
                 [&header, body].concat().into()
             };
 
@@ -452,9 +454,7 @@ impl Net {
             //println!("frame length read as: {:x?}", frame_length);
             u32::from_be_bytes(frame_length) as usize
         };
-        println!("!!! Frame from passt reported length={} read len {}", frame_length,  self.rx_frame_buf[len..len + frame_length].len());
-
-
+        log::info!("!!! Frame from passt reported length={} read len {}", frame_length,  self.rx_frame_buf[len..len + frame_length].len());
         self.passt_buffered_reader.read_exact(&mut self.rx_frame_buf[len..len + frame_length])
             .map_err(IO)?; // TODO: better enum
 
