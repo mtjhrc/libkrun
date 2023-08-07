@@ -11,7 +11,6 @@ use crate::virtio::{
     ActivateResult, DeviceState, Queue, VirtioDevice, TYPE_NET, VIRTIO_MMIO_INT_VRING,
 };
 use crate::Error as DeviceError;
-use log::{error, warn};
 use std::io::{BufReader, Read, Write};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -197,7 +196,7 @@ impl Net {
         self.interrupt_status
             .fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
         self.interrupt_evt.write(1).map_err(|e| {
-            error!("Failed to signal used queue: {:?}", e);
+            log::error!("Failed to signal used queue: {:?}", e);
             DeviceError::FailedSignalingUsedQueue(e)
         })?;
 
@@ -249,7 +248,7 @@ impl Net {
                     frame_slice = &frame_slice[len..];
                 }
                 Err(e) => {
-                    error!("Failed to write slice: {:?}", e);
+                    log::error!("Failed to write slice: {:?}", e);
                     result = Err(FrontendError::GuestMemory(e));
                     break;
                 }
@@ -258,7 +257,7 @@ impl Net {
             maybe_next_descriptor = descriptor.next_descriptor();
         }
         if result.is_ok() && !frame_slice.is_empty() {
-            warn!("Receiving buffer is too small to hold frame of current size");
+            log::warn!("Receiving buffer is too small to hold frame of current size");
             result = Err(FrontendError::DescriptorChainTooSmall);
         }
 
@@ -267,7 +266,7 @@ impl Net {
         queue.add_used(mem, head_index, used_len);
         /*
         .map_err(|e| {
-        error!("Failed to add available descriptor {}: {}", head_index, e);
+        log::error!("Failed to add available descriptor {}: {}", head_index, e);
         FrontendError::AddUsed
     })?;*/
         self.rx_deferred_irqs = true;
@@ -308,14 +307,14 @@ impl Net {
                     // unexpected.
                     match e {
                         TryAgain => {
-                            error!("TryAgain while reading from passt");
+                            log::error!("TryAgain while reading from passt");
                         }
                         IO(e) => {
-                            error!("IO error while reading from passt: {:?}", e);
+                            log::error!("IO error while reading from passt: {:?}", e);
                         }
                         Error::PasstSocketRead(err) if err == nix::Error::EAGAIN => (),
                         _ => {
-                            error!("Failed to read tap: {:?}", e);
+                            log::error!("Failed to read tap: {:?}", e);
                             return Err(DeviceError::FailedReadTap);
                         }
                     };
@@ -371,7 +370,7 @@ impl Net {
                         read_count += limit - read_count;
                     }
                     Err(e) => {
-                        error!("Failed to read slice: {:?}", e);
+                        log::error!("Failed to read slice: {:?}", e);
                         /*match e {
                             GuestMemoryError::PartialBuffer { .. } => &METRICS.net.tx_partial_reads,
                             _ => &METRICS.net.rx_fails,
@@ -532,7 +531,7 @@ impl VirtioDevice for Net {
         let config_space_bytes = self.config_space.as_slice();
         let config_len = config_space_bytes.len() as u64;
         if offset >= config_len {
-            error!("Failed to read config space");
+            log::error!("Failed to read config space");
             return;
         }
         if let Some(end) = offset.checked_add(data.len() as u64) {
@@ -549,7 +548,7 @@ impl VirtioDevice for Net {
         let config_space_bytes = self.config_space.as_mut_slice();
         let config_len = config_space_bytes.len() as u64;
         if offset + data_len > config_len {
-            error!("Failed to write config space");
+            log::error!("Failed to write config space");
             return;
         }
 
@@ -568,7 +567,7 @@ impl VirtioDevice for Net {
 
     fn activate(&mut self, mem: GuestMemoryMmap) -> ActivateResult {
         if self.activate_evt.write(1).is_err() {
-            error!("Net: Cannot write to activate_evt");
+            log::error!("Net: Cannot write to activate_evt");
             return Err(super::super::ActivateError::BadActivate);
         }
         self.device_state = DeviceState::Activated(mem);

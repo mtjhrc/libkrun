@@ -3,7 +3,6 @@
 
 use std::os::unix::io::AsRawFd;
 
-use log::{debug, error, warn};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 
@@ -15,7 +14,7 @@ impl Net {
     fn process_activate_event(&self, event_manager: &mut EventManager) {
         debug!("net: activate event");
         if let Err(e) = self.activate_evt.read() {
-            error!("Failed to consume net activate event: {:?}", e);
+            log::error!("Failed to consume net activate event: {:?}", e);
         }
         let activate_fd = self.activate_evt.as_raw_fd();
         // The subscriber must exist as we previously registered activate_evt via
@@ -23,7 +22,7 @@ impl Net {
         let self_subscriber = match event_manager.subscriber(activate_fd) {
             Ok(subscriber) => subscriber,
             Err(e) => {
-                error!("Failed to process block activate evt: {:?}", e);
+                log::error!("Failed to process block activate evt: {:?}", e);
                 return;
             }
         };
@@ -34,12 +33,12 @@ impl Net {
             event_manager
                 .register(event.data() as i32, event, self_subscriber.clone())
                 .unwrap_or_else(|e| {
-                    error!("Failed to register net events: {:?}", e);
+                    log::error!("Failed to register net events: {:?}", e);
                 });
         }
 
         event_manager.unregister(activate_fd).unwrap_or_else(|e| {
-            error!("Failed to unregister net activate evt: {:?}", e);
+            log::error!("Failed to unregister net activate evt: {:?}", e);
         });
     }
 }
@@ -53,7 +52,7 @@ impl Subscriber for Net {
         // to handle errors in devices.
         let supported_events = EventSet::IN;
         if !supported_events.contains(event_set) {
-            warn!(
+            log::warn!(
                 "Received unknown event: {:?} from source: {:?}",
                 event_set, source
             );
@@ -73,11 +72,11 @@ impl Subscriber for Net {
                 _ if source == virtq_tx_ev_fd => self.process_tx_queue_event(),
                 _ if activate_fd == source => self.process_activate_event(evmgr),
                 _ => {
-                    warn!("Net: Spurious event received: {:?}", source);
+                    log::warn!("Net: Spurious event received: {:?}", source);
                 }
             }
         } else {
-            warn!(
+            log::warn!(
                 "Net: The device is not yet activated. Spurious event received: {:?}",
                 source
             );
