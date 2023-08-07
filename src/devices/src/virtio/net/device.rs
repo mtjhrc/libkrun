@@ -10,7 +10,6 @@ use crate::virtio::net::{MAX_BUFFER_SIZE, QUEUE_SIZE, QUEUE_SIZES, RX_INDEX, TX_
 use crate::virtio::{
     ActivateResult, DeviceState, Queue, VirtioDevice, TYPE_NET, VIRTIO_MMIO_INT_VRING,
 };
-use crate::virtio::{report_net_event_fail};
 use crate::Error as DeviceError;
 use log::{error, warn};
 use std::io::{BufReader, Read, Write};
@@ -469,19 +468,8 @@ impl Net {
     }
 
     pub fn process_rx_queue_event(&mut self) {
-        //METRICS.net.rx_queue_event_count.inc();
-
         if let Err(e) = self.queue_evts[RX_INDEX].read() {
-            // rate limiters present but with _very high_ allowed rate
-            error!("Failed to get rx queue event: {:?}", e);
-            //METRICS.net.event_fails.inc();
-        } else {
-            // If the limiter is not blocked, resume the receiving of bytes.
-            //if !self.rx_rate_limiter.is_blocked() {
-            //self.resume_rx().unwrap_or_else(report_net_event_fail);
-            //} else {
-            //METRICS.net.rx_rate_limiter_throttled.inc();
-            //}
+            log::error!("Failed to get rx event from queue: {:?}", e);
         }
     }
 
@@ -491,8 +479,8 @@ impl Net {
             // This should never happen, it's been already validated in the event handler.
             DeviceState::Inactive => unreachable!(),
         };
-        //METRICS.net.rx_tap_event_count.inc();
 
+        // TODO(mhrica): is this necessary?
         // While there are no available RX queue buffers and there's a deferred_frame
         // don't process any more incoming. Otherwise start processing a frame. In the
         // process the deferred_frame flag will be set in order to avoid freezing the
@@ -502,24 +490,21 @@ impl Net {
             return;
         }
 
-        //if self.rx_deferred_frame
-        // Process a deferred frame first if available. Don't read from tap again
-        // until we manage to receive this deferred frame.
-        //{
-        //    self.handle_deferred_frame()
-        //        .unwrap_or_else(report_net_event_fail);
-        //} else {
-        self.process_rx().unwrap_or_else(report_net_event_fail);
-        //}
+        self.process_rx().unwrap_or_else(|err| {
+            log::error!("Failed to process rx queue event: {err:?}");
+        });
     }
 
     pub fn process_tx_queue_event(&mut self) {
-        //METRICS.net.tx_queue_event_count.inc();
-        if let Err(e) = self.queue_evts[TX_INDEX].read() {
-            error!("Failed to get tx queue event: {:?}", e);
-            //METRICS.net.event_fails.inc();
-        } else {
-            self.process_tx().unwrap_or_else(report_net_event_fail);
+        match self.queue_evts[TX_INDEX].read() {
+            Ok(_) => {
+                self.process_tx().unwrap_or_else(|err| {
+                    log::error!("Failed to process tx event: {err:?}");
+                });
+            }
+            Err(err) => {
+                log::error!("Failed to get tx queue event from queue: {err:?}");
+            }
         }
     }
 }

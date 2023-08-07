@@ -41,14 +41,7 @@ pub use self::queue::*;
 pub use self::rng::*;
 pub use self::vsock::*;
 pub use self::net::*;
-use crate::Error as DeviceError;
 
-// Function used for reporting error in terms of logging
-// but also in terms of METRICS net event fails.
-pub(crate) fn report_net_event_fail(err: DeviceError) {
-    error!("{:?}", err);
-    //METRICS.net.event_fails.inc();
-}
 
 /// When the driver initializes the device, it lets the device know about the
 /// completed stages using the Device Status Field.
