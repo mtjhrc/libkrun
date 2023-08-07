@@ -5,20 +5,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use crate::virtio::net::{MAX_BUFFER_SIZE, QUEUE_SIZE, QUEUE_SIZES, RX_INDEX, TX_INDEX};
-//use crate::virtio::net::test_utils::Mocks;
+use crate::virtio::net::{passt, MAX_BUFFER_SIZE, QUEUE_SIZE, QUEUE_SIZES, RX_INDEX, TX_INDEX};
 use crate::virtio::{
     ActivateResult, DeviceState, Queue, VirtioDevice, TYPE_NET, VIRTIO_MMIO_INT_VRING,
 };
 use crate::Error as DeviceError;
-use std::io::{BufReader, Read, Write};
+use std::io::{Write};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{cmp, mem, result};
-use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::net::UnixStream;
-use nix::sys::socket::{AddressFamily, connect, socket, SockFlag, SockType, UnixAddr};
+use std::os::fd::RawFd;
 use utils::eventfd::EventFd;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
 
@@ -26,9 +23,8 @@ const VIRTIO_F_VERSION_1: u32 = 32;
 
 // FIXME: why is this not in virtio_bindings::virtio_net: ???
 use virtio_bindings::virtio_net::{
-    virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
-    VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO,
-    VIRTIO_NET_F_MAC,
+    virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4,
+    VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO, VIRTIO_NET_F_MAC,
 };
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
 
@@ -39,10 +35,8 @@ enum FrontendError {
     ReadOnlyDescriptor,
 }
 
-use crate::virtio::net::{Result, Error};
-use crate::virtio::net::Error::{IO, TryAgain};
-//#[cfg(test)]
-//use crate::virtio::net::test_utils::Mocks;
+use crate::virtio::net::passt::Passt;
+use crate::virtio::net::{Error, Result};
 
 pub(crate) fn vnet_hdr_len() -> usize {
     mem::size_of::<virtio_net_hdr_v1>()
@@ -74,8 +68,7 @@ unsafe impl ByteValued for ConfigSpace {}
 pub struct Net {
     pub(crate) id: String,
 
-    pub(crate) passt_socket: RawFd,
-    passt_buffered_reader: BufReader<UnixStream>,
+    passt: Passt,
 
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -103,20 +96,10 @@ pub struct Net {
 
 impl Net {
     /// Create a new virtio network device using passt
-    pub fn new(
-        id: String,
-        guest_mac: Option<&MacAddr>,
-    ) -> Result<Self> {
-        let passt_socket = socket(AddressFamily::Unix, SockType::Stream, SockFlag::SOCK_NONBLOCK, None)
-            .map_err(Error::PasstSocketOpen)?;
-        //TODO: pass name as arg
-        let unix_addr = UnixAddr::new("/tmp/passt_1.socket")
-            .map_err(Error::PasstSocketOpen)?;
-        connect(passt_socket, &unix_addr)
-            .map_err(Error::PasstSocketConnect)?;
-
-        log::info!("Connected just fine!");
-
+    pub fn new(id: String, guest_mac: Option<&MacAddr>) -> Result<Self> {
+        const PASST_SOCK_NAME: &str = "/tmp/passt_1.socket";
+        let passt = Passt::connect_to_socket(PASST_SOCK_NAME)?;
+        log::info!("Connected to passt @ {PASST_SOCK_NAME}");
         let mut avail_features = 1 << VIRTIO_NET_F_GUEST_CSUM
             | 1 << VIRTIO_NET_F_CSUM
             | 1 << VIRTIO_NET_F_GUEST_TSO4
@@ -140,16 +123,9 @@ impl Net {
 
         let queues = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
 
-        //TODO: should probably use std::net Unix socket in the first place and clone it
-        // https://stackoverflow.com/questions/58467659/how-to-store-tcpstream-with-bufreader-and-bufwriter-in-a-data-structure
-        let passt_buffered_reader = BufReader::new(
-            unsafe { UnixStream::from_raw_fd(passt_socket) }
-        );
-
         Ok(Net {
             id,
-            passt_socket,
-            passt_buffered_reader,
+            passt,
             avail_features,
             acked_features: 0u64,
             queues,
@@ -208,13 +184,15 @@ impl Net {
         };
 
         let queue = &mut self.queues[RX_INDEX];
-        let head_descriptor = queue.pop(mem).ok_or_else(|| {
-            FrontendError::EmptyQueue
-        })?;
+        let head_descriptor = queue.pop(mem).ok_or_else(|| FrontendError::EmptyQueue)?;
         let head_index = head_descriptor.index;
 
         let mut frame_slice = &self.rx_frame_buf[..self.rx_bytes_read];
-        log::info!("Will write frame slice {} to guest: {:x?}", self.rx_bytes_read, &self.rx_frame_buf[..self.rx_bytes_read]);
+        log::info!(
+            "Will write frame slice {} to guest: {:x?}",
+            self.rx_bytes_read,
+            &self.rx_frame_buf[..self.rx_bytes_read]
+        );
 
         let frame_len = frame_slice.len();
         let mut maybe_next_descriptor = Some(head_descriptor);
@@ -278,25 +256,16 @@ impl Net {
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
         loop {
-            match self.read_frame_from_passt() {
-                Ok(count) => {
-                    self.rx_bytes_read = count;
+            match self.read_into_rx_frame_buf_from_passt() {
+                Ok(()) => {
                     self.write_frame_to_guest();
                 }
                 Err(e) => {
-                    // The tap device is non-blocking, so any error aside from EAGAIN is
-                    // unexpected.
                     match e {
-                        TryAgain => {
-                            log::error!("TryAgain while reading from passt");
-                        }
-                        IO(e) => {
-                            log::error!("IO error while reading from passt: {:?}", e);
-                        }
-                        Error::PasstSocketRead(err) if err == nix::Error::EAGAIN => (),
+                        passt::Error::WouldBlock => (),
                         _ => {
                             log::error!("Failed to read tap: {:?}", e);
-                            return Err(DeviceError::FailedReadTap);
+                            return Err(DeviceError::PasstError);
                         }
                     };
                     break;
@@ -358,30 +327,12 @@ impl Net {
                 }
             }
 
-            let packet: Box<[u8]> = {
-                // TODO: allocate the buffer in the first place...
-                log::info!("read count is {read_count}");
-                let actual_frame_length = read_count - vnet_hdr_len();
-                let header = (actual_frame_length as u32).to_be_bytes(); //TODO assert the conversion is not lossy
-                //FIXME: what are these first 12 bytes at the begining
-                // they are either 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, fe
-                // or 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 45, c0
-                // and are then followed by the ethernet header
-                let body = &self.tx_frame_buf[vnet_hdr_len()..read_count];
-                [&header, body].concat().into()
-            };
-
-            log::info!("Writing to passt: {:x?}", &packet);
-
-            match nix::unistd::write(self.passt_socket, &packet) {
-                Ok(wrote_count) => {
-                    // TODO: loop
-                    log::info!("Wrote {wrote_count}/{packet_len} bytes to passt", packet_len=packet.len());
-                }
-                Err(e) => {
-                    log::warn!("[TODO propagate] Failed to write to passt: {}", e);
-                }
-            };
+            self.passt
+                .write_frame(vnet_hdr_len(), &mut self.tx_frame_buf[..read_count])
+                .map_err(|e| {
+                    log::error!("Failed to write frame to passt {e:?}");
+                    DeviceError::PasstError
+                })?;
 
             tx_queue.add_used(mem, head_index, 0);
             //     .map_err(DeviceError::QueueError)?;
@@ -396,33 +347,14 @@ impl Net {
     }
 
     /// Fills self.rx_frame_buf with an ethernet frame from passt and prepends virtio_net_hdr to it
-    fn read_frame_from_passt(&mut self) -> Result<usize> {
-        let mut len = 0;
-        len += write_virtio_net_hdr(&mut self.rx_frame_buf);
-
-        const PASST_HEADER_LEN: usize = 4;
-        let frame_length: usize = {
-            // each frame from passt is prepended by a 4 byte "header",that is
-            // interpreted as a big-endian u32 integer and is the length of the following ethernet
-            // frame.
-            let mut frame_length = [0u8; PASST_HEADER_LEN];
-            self.passt_buffered_reader.read_exact(&mut frame_length)
-                .map_err(IO)?; // TODO: better enum
-            //println!("frame length read as: {:x?}", frame_length);
-            u32::from_be_bytes(frame_length) as usize
-        };
-        log::info!("!!! Frame from passt reported length={} read len {}", frame_length,  self.rx_frame_buf[len..len + frame_length].len());
-        self.passt_buffered_reader.read_exact(&mut self.rx_frame_buf[len..len + frame_length])
-            .map_err(IO)?; // TODO: better enum
-
-        /*let mut buf = vec![0u8; frame_length];
-        self.passt_buffered_reader.read_exact(&mut buf[..]);
-        println!("frame read: {:x?}", &buf);
-        */
-
-        len += frame_length;
-
-        Ok(len)
+    fn read_into_rx_frame_buf_from_passt(&mut self) -> passt::Result<()> {
+        // TODO: consider having less variables inside the struct
+        self.rx_bytes_read = 0;
+        self.rx_bytes_read += write_virtio_net_hdr(&mut self.rx_frame_buf);
+        self.rx_bytes_read += self
+            .passt
+            .read_frame(&mut self.rx_frame_buf[self.rx_bytes_read..])?;
+        Ok(())
     }
 
     pub fn process_rx_queue_event(&mut self) {
@@ -431,7 +363,7 @@ impl Net {
         }
     }
 
-    pub fn process_tap_rx_event(&mut self) {
+    pub fn process_passt_rx_event(&mut self) {
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
             // This should never happen, it's been already validated in the event handler.
@@ -443,7 +375,9 @@ impl Net {
         // don't process any more incoming. Otherwise start processing a frame. In the
         // process the deferred_frame flag will be set in order to avoid freezing the
         // RX queue.
-        if self.queues[RX_INDEX].is_empty(mem)/* && self.rx_deferred_frame*/ {
+        if self.queues[RX_INDEX].is_empty(mem)
+        /* && self.rx_deferred_frame*/
+        {
             return;
         }
 
@@ -463,6 +397,10 @@ impl Net {
                 log::error!("Failed to get tx queue event from queue: {err:?}");
             }
         }
+    }
+
+    pub(crate) fn raw_passt_socket_fd(&self) -> RawFd {
+        self.passt.raw_socket_fd()
     }
 }
 
@@ -515,7 +453,7 @@ impl VirtioDevice for Net {
             data.write_all(
                 &config_space_bytes[offset as usize..cmp::min(end, config_len) as usize],
             )
-                .unwrap();
+            .unwrap();
         }
     }
 

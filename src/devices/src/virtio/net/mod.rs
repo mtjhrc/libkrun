@@ -14,26 +14,27 @@ pub const TX_INDEX: usize = 1;
 
 pub mod device;
 pub mod event_handler;
+mod passt;
 
 pub use self::device::Net;
 pub use self::event_handler::*;
 
 #[derive(Debug)]
 pub enum Error {
-    // Open passt socket failed
-    PasstSocketOpen(nix::Error),
-    // Open passt socket failed
-    PasstSocketConnect(nix::Error),
-    // Read passt socket failed
-    PasstSocketRead(nix::Error),
-    // TODO
-    TryAgain,
+    /// Error communicating with Passt
+    PasstError(passt::Error),
     /// EventFd error.
     EventFd(io::Error),
     /// IO error.
     IO(io::Error),
     /// The VNET header is missing from the frame.
     VnetHeaderMissing,
+}
+
+impl From<passt::Error> for Error {
+    fn from(err: passt::Error) -> Self {
+        Self::PasstError(err)
+    }
 }
 
 pub type Result<T> = result::Result<T, Error>;
