@@ -198,7 +198,6 @@ impl Net {
             .fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
         self.interrupt_evt.write(1).map_err(|e| {
             error!("Failed to signal used queue: {:?}", e);
-            //METRICS.net.event_fails.inc();
             DeviceError::FailedSignalingUsedQueue(e)
         })?;
 
@@ -225,7 +224,6 @@ impl Net {
 
         let queue = &mut self.queues[RX_INDEX];
         let head_descriptor = queue.pop(mem).ok_or_else(|| {
-            //METRICS.net.no_rx_avail_buffer.inc();
             FrontendError::EmptyQueue
         })?;
         let head_index = head_descriptor.index;
@@ -248,16 +246,10 @@ impl Net {
             let len = std::cmp::min(frame_slice.len(), descriptor.len as usize);
             match mem.write_slice(&frame_slice[..len], descriptor.addr) {
                 Ok(()) => {
-                    //METRICS.net.rx_count.inc();
                     frame_slice = &frame_slice[len..];
                 }
                 Err(e) => {
                     error!("Failed to write slice: {:?}", e);
-                    /*match e {
-                        GuestMemoryError::PartialBuffer { .. } => &METRICS.net.rx_partial_writes,
-                        _ => &METRICS.net.rx_fails,
-                    }
-                    .inc();*/
                     result = Err(FrontendError::GuestMemory(e));
                     break;
                 }
@@ -267,7 +259,6 @@ impl Net {
         }
         if result.is_ok() && !frame_slice.is_empty() {
             warn!("Receiving buffer is too small to hold frame of current size");
-            //METRICS.net.rx_fails.inc();
             result = Err(FrontendError::DescriptorChainTooSmall);
         }
 
@@ -281,10 +272,6 @@ impl Net {
     })?;*/
         self.rx_deferred_irqs = true;
 
-        if result.is_ok() {
-            //METRICS.net.rx_bytes_count.add(frame_len);
-            //METRICS.net.rx_packets_count.inc();
-        }
         result
     }
 
@@ -329,7 +316,6 @@ impl Net {
                         Error::PasstSocketRead(err) if err == nix::Error::EAGAIN => (),
                         _ => {
                             error!("Failed to read tap: {:?}", e);
-                            //METRICS.net.tap_read_fails.inc();
                             return Err(DeviceError::FailedReadTap);
                         }
                     };
@@ -383,7 +369,6 @@ impl Net {
                 match read_result {
                     Ok(()) => {
                         read_count += limit - read_count;
-                        //METRICS.net.tx_count.inc();
                     }
                     Err(e) => {
                         error!("Failed to read slice: {:?}", e);
@@ -430,8 +415,6 @@ impl Net {
 
         if raise_irq {
             self.signal_used_queue()?;
-        } else {
-            //METRICS.net.no_tx_avail_buffer.inc();
         }
 
         Ok(())
@@ -486,7 +469,6 @@ impl Net {
         // process the deferred_frame flag will be set in order to avoid freezing the
         // RX queue.
         if self.queues[RX_INDEX].is_empty(mem)/* && self.rx_deferred_frame*/ {
-            //METRICS.net.no_rx_avail_buffer.inc();
             return;
         }
 
@@ -551,7 +533,6 @@ impl VirtioDevice for Net {
         let config_len = config_space_bytes.len() as u64;
         if offset >= config_len {
             error!("Failed to read config space");
-            //METRICS.net.cfg_fails.inc();
             return;
         }
         if let Some(end) = offset.checked_add(data.len() as u64) {
@@ -569,7 +550,6 @@ impl VirtioDevice for Net {
         let config_len = config_space_bytes.len() as u64;
         if offset + data_len > config_len {
             error!("Failed to write config space");
-            //METRICS.net.cfg_fails.inc();
             return;
         }
 
@@ -577,7 +557,6 @@ impl VirtioDevice for Net {
         self.guest_mac = Some(MacAddr::from_bytes_unchecked(
             &self.config_space.guest_mac[..MAC_ADDR_LEN],
         ));
-        //METRICS.net.mac_address_updates.inc();
     }
 
     fn is_activated(&self) -> bool {

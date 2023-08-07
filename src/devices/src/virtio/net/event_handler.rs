@@ -74,7 +74,6 @@ impl Subscriber for Net {
                 _ if activate_fd == source => self.process_activate_event(evmgr),
                 _ => {
                     warn!("Net: Spurious event received: {:?}", source);
-                    //METRICS.net.event_fails.inc();
                 }
             }
         } else {
