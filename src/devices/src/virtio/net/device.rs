@@ -107,20 +107,6 @@ impl Net {
         id: String,
         guest_mac: Option<&MacAddr>,
     ) -> Result<Self> {
-        /*
-        let tap = Tap::open_named(&tap_if_name).map_err(Error::TapOpen)?;
-
-        // Set offload flags to match the virtio features below.
-        tap.set_offload(
-            net_gen::TUN_F_CSUM | net_gen::TUN_F_UFO | net_gen::TUN_F_TSO4 | net_gen::TUN_F_TSO6,
-        )
-        .map_err(Error::TapSetOffload)?;
-        */
-        //let vnet_hdr_size = vnet_hdr_len() as i32;
-
-        //tap.set_vnet_hdr_size(vnet_hdr_size)
-        //    .map_err(Error::TapSetVnetHdrSize)?;
-
         let passt_socket = socket(AddressFamily::Unix, SockType::Stream, SockFlag::SOCK_NONBLOCK, None)
             .map_err(Error::PasstSocketOpen)?;
         //TODO: pass name as arg
@@ -264,11 +250,6 @@ impl Net {
         // Mark the descriptor chain as used. If an error occurred, skip the descriptor chain.
         let used_len = if result.is_err() { 0 } else { frame_len as u32 };
         queue.add_used(mem, head_index, used_len);
-        /*
-        .map_err(|e| {
-        log::error!("Failed to add available descriptor {}: {}", head_index, e);
-        FrontendError::AddUsed
-    })?;*/
         self.rx_deferred_irqs = true;
 
         result
@@ -371,11 +352,6 @@ impl Net {
                     }
                     Err(e) => {
                         log::error!("Failed to read slice: {:?}", e);
-                        /*match e {
-                            GuestMemoryError::PartialBuffer { .. } => &METRICS.net.tx_partial_reads,
-                            _ => &METRICS.net.rx_fails,
-                        }
-                        .inc();*/
                         read_count = 0;
                         break;
                     }
