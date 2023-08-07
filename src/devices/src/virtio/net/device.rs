@@ -349,11 +349,12 @@ impl Net {
     /// Fills self.rx_frame_buf with an ethernet frame from passt and prepends virtio_net_hdr to it
     fn read_into_rx_frame_buf_from_passt(&mut self) -> passt::Result<()> {
         // TODO: consider having less variables inside the struct
-        self.rx_bytes_read = 0;
-        self.rx_bytes_read += write_virtio_net_hdr(&mut self.rx_frame_buf);
-        self.rx_bytes_read += self
+        let mut len = 0;
+        len += write_virtio_net_hdr(&mut self.rx_frame_buf);
+        len += self
             .passt
-            .read_frame(&mut self.rx_frame_buf[self.rx_bytes_read..])?;
+            .read_frame(&mut self.rx_frame_buf[len..])?;
+        self.rx_bytes_read = len;
         Ok(())
     }
 

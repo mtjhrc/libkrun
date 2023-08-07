@@ -101,6 +101,8 @@ fn read_frame_impl(reader: &mut impl Read, buf: &mut [u8]) -> Result<usize> {
             log::error!("Passt promised {frame_length} bytes of data, but read failed.");
             Error::UnspecifiedIO(e)
         })?;
+
+    log::trace!("Rx eth frame from passt: {:x?}", &buf[..frame_length]);
     Ok(frame_length)
 }
 
@@ -111,8 +113,9 @@ fn write_frame_impl(writer: &mut impl Write, hdr_len: usize, buf: &mut [u8]) -> 
 
     buf[hdr_len - PASST_HEADER_LEN..hdr_len].copy_from_slice(&(frame_length as u32).to_be_bytes());
     // TODO: investigate handling EAGAIN / EWOULDBLOCK here
-    writer.write_all(buf)
+    writer.write_all(&buf[hdr_len - PASST_HEADER_LEN..])
         .map_err(Error::from_failed_read_write)?;
+    log::trace!("Tx eth frame to passt: {:x?}", &buf[hdr_len..]);
     Ok(())
 }
 
@@ -130,7 +133,7 @@ mod tests {
 
         let mut writer: Vec<u8> = Vec::new();
         write_frame_impl(&mut writer, header.len(), &mut msg[..])?;
-        assert_eq!(&writer[header.len() - PASST_HEADER_LEN..], b"\x00\x00\x00\x0cHello world!");
+        assert_eq!(&writer[..], b"\x00\x00\x00\x0cHello world!");
         Ok(())
     }
 
