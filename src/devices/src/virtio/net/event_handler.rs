@@ -51,6 +51,7 @@ impl Subscriber for Net {
         // TODO: also check for errors. Pending high level discussions on how we want
         // to handle errors in devices.
         let supported_events = EventSet::IN;
+
         if !supported_events.contains(event_set) {
             log::warn!(
                 "Received unknown event: {:?} from source: {:?}",

@@ -103,11 +103,11 @@ impl Net {
         let mut avail_features = 1 << VIRTIO_NET_F_GUEST_CSUM
             | 1 << VIRTIO_NET_F_CSUM
             | 1 << VIRTIO_NET_F_GUEST_TSO4
-            | 1 << VIRTIO_NET_F_GUEST_UFO
             | 1 << VIRTIO_NET_F_HOST_TSO4
-            | 1 << VIRTIO_NET_F_HOST_UFO
             | 1 << VIRTIO_F_VERSION_1;
-
+        // | 1 << VIRTIO_NET_F_GUEST_UFO
+        //             | 1 << VIRTIO_NET_F_HOST_UFO
+        //
         let mut config_space = ConfigSpace::default();
         if let Some(mac) = guest_mac {
             config_space.guest_mac.copy_from_slice(mac.get_bytes());
@@ -376,11 +376,11 @@ impl Net {
         // don't process any more incoming. Otherwise start processing a frame. In the
         // process the deferred_frame flag will be set in order to avoid freezing the
         // RX queue.
-        if self.queues[RX_INDEX].is_empty(mem)
+        //if self.queues[RX_INDEX].is_empty(mem)
         /* && self.rx_deferred_frame*/
-        {
-            return;
-        }
+        //{
+        //    return;
+        //}
 
         self.process_rx().unwrap_or_else(|err| {
             log::error!("Failed to process rx queue event: {err:?}");
