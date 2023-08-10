@@ -4,6 +4,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use libc::socket;
+use nix::sys::socket::{MsgFlags, recv};
 use vm_memory::VolatileMemory;
 
 /// Each frame from passt is prepended by a 4 byte "header".
@@ -34,7 +35,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Passt {
     passt_sock: UnixStream,
-    read_next_frame_length_left: u32,
+    //read_next_frame_length_left: u32,
     read_buffer: Vec<u8>,
 }
 
@@ -69,42 +70,38 @@ impl Passt {
     /// Try to read a frame from passt. If no bytes are available reports PasstError::WouldBlock
     pub fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize> {
         //let expecting_frame_length = self.expec
-        self.read_next_frame_length_left = if self.read_next_frame_length_left == 0 {
+        let frame_length = {
             let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
-            self.passt_sock
-                .read_exact(&mut frame_length_buf)
+            let read_size= self.passt_sock
+                .read(&mut frame_length_buf)
                 .map_err(Error::from_failed_read_write)?;
+            if(read_size != 4){
+                todo!("when read frame_length_buf does a partial read")
+            }
             let len = u32::from_be_bytes(frame_length_buf);
             log::trace!("Got frame length {}", len);
-            len
-        } else {
-            log::trace!("Restored frame length {}", self.read_next_frame_length_left);
-            self.read_next_frame_length_left
+            len as usize
         };
 
-        self.read_buffer.clear();
-        self.read_buffer.resize(self.read_next_frame_length_left as usize, 0);
-
-        return loop {
-            match self.passt_sock.read(&mut self.read_buffer[..])
-                .map_err(Error::from_failed_read_write)
-            {
-                Err(Error::WouldBlock) => {
-                    Err(Error::WouldBlock);
-                },
-                Err(e) => {
-                    Err(e)
-                }
+        let mut bytes_read = 0;
+        loop {
+            let result = recv(self.passt_sock.as_raw_fd(), &mut buf[bytes_read..frame_length], MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL);
+            match result {
                 Ok(size) => {
-                    if(size > self.read_next_frame_length_left) {
-                        self.read_next_frame_length_left = 0;
+                    bytes_read += size;
+                    assert!(bytes_read <= size);
+                    if (bytes_read == size) {
+                        return Ok(frame_length);
                     }
-                    self.read_next_frame_length_left -= size;
+                },
+                Err(e) =>{
+                    panic!("Read from passt failed {e:?}")
                 }
             }
         }
 
-        match self.passt_sock.read_exact(&mut buf[..*expecting_frame_length as usize]).map_err(Error::from_failed_read_write) {
+        /*
+        match self.passt_sock.read_exact(&mut buf[..read_next_frame_length_left as usize]).map_err(Error::from_failed_read_write) {
             // If the passt socket blocks, that means passst send a "short" frame, so it is garbage.
             // Get rid everything in socket
             Err(Error::WouldBlock) => {
@@ -136,8 +133,8 @@ impl Passt {
                 //log::trace!("Rx eth frame from passt: {:x?}", &buf[..frame_length]);
                 Ok(frame_length)
             }
-         */
-        }
+
+        } */
     }
 
     /// Try to write a frame to passt.
@@ -161,10 +158,11 @@ impl Passt {
     }
 
     pub fn raw_socket_fd(&self) -> RawFd {
-        self.socket_writer.as_raw_fd()
+        self.passt_sock.as_raw_fd()
     }
 }
 
+/*
 // TODO: report error if the buffer is too small instead of panicking
 fn read_frame_impl(reader: &mut impl Read, expecting_frame_length: &mut u32, buf: &mut [u8]) -> Result<usize> {
 
@@ -204,4 +202,4 @@ mod tests {
         assert_eq!(expecting_frame_length, 0);
         Ok(())
     }
-}
+}*/
