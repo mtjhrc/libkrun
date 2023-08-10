@@ -3,17 +3,12 @@ use std::io::{BufReader, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use libc::socket;
 use vm_memory::VolatileMemory;
 
 /// Each frame from passt is prepended by a 4 byte "header".
 /// It is interpreted as a big-endian u32 integer and is the length of the following ethernet frame.
 const PASST_HEADER_LEN: usize = 4;
-
-pub struct Passt {
-    socket_writer: UnixStream,
-    socket_reader: BufReader<UnixStream>,
-    expecting_frame_length: u32,
-}
 
 #[derive(Debug)]
 pub enum Error {
@@ -36,6 +31,12 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub struct Passt {
+    passt_sock: UnixStream,
+    read_next_frame_length_left: u32,
+    read_buffer: Vec<u8>,
+}
 
 // TODO: add the ability to start passt
 
@@ -60,15 +61,83 @@ impl Passt {
         };
 
         Ok(Self {
-            socket_writer: passt_sock,
-            socket_reader,
-            expecting_frame_length: 0,
+            passt_sock,
+            read_buffer: Vec::new(),
         })
     }
 
     /// Try to read a frame from passt. If no bytes are available reports PasstError::WouldBlock
     pub fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize> {
-        read_frame_impl(&mut self.socket_reader, &mut self.expecting_frame_length, buf)
+        //let expecting_frame_length = self.expec
+        self.read_next_frame_length_left = if self.read_next_frame_length_left == 0 {
+            let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
+            self.passt_sock
+                .read_exact(&mut frame_length_buf)
+                .map_err(Error::from_failed_read_write)?;
+            let len = u32::from_be_bytes(frame_length_buf);
+            log::trace!("Got frame length {}", len);
+            len
+        } else {
+            log::trace!("Restored frame length {}", self.read_next_frame_length_left);
+            self.read_next_frame_length_left
+        };
+
+        self.read_buffer.clear();
+        self.read_buffer.resize(self.read_next_frame_length_left as usize, 0);
+
+        return loop {
+            match self.passt_sock.read(&mut self.read_buffer[..])
+                .map_err(Error::from_failed_read_write)
+            {
+                Err(Error::WouldBlock) => {
+                    Err(Error::WouldBlock);
+                },
+                Err(e) => {
+                    Err(e)
+                }
+                Ok(size) => {
+                    if(size > self.read_next_frame_length_left) {
+                        self.read_next_frame_length_left = 0;
+                    }
+                    self.read_next_frame_length_left -= size;
+                }
+            }
+        }
+
+        match self.passt_sock.read_exact(&mut buf[..*expecting_frame_length as usize]).map_err(Error::from_failed_read_write) {
+            // If the passt socket blocks, that means passst send a "short" frame, so it is garbage.
+            // Get rid everything in socket
+            Err(Error::WouldBlock) => {
+                /*
+                let mut garbage = vec![0u8; 100_000];
+                let mut total_size = 0;
+                let mut rounds = 0;
+                while let Ok(size) = reader.read(&mut garbage[total_size..]) {
+                    total_size += size;
+                    rounds += 1;
+                };*/
+
+                //log::error!("Passt promised {frame_length} bytes of data, but  WouldBlock, read {total_size} bytes in {rounds} rounds;\ngarbage was: {garbage:x?}");
+                /*.map_err(|e| {
+
+                    Error::UnspecifiedIO(e)
+                })?;*/
+                log::error!("Passt promised {} bytes of data, but read WouldBlock",*expecting_frame_length);
+                Err(Error::WouldBlock)
+            }
+            Err(e) => {
+                log::error!("Passt promised {} bytes of data, but read failed: {e:?}", *expecting_frame_length);
+                Err(e)
+            }
+            Ok(_) => {
+                let frame_length = *expecting_frame_length as usize;
+                *expecting_frame_length = 0;
+                log::trace!("Rx eth frame from passt {} OK", frame_length);
+                //log::trace!("Rx eth frame from passt: {:x?}", &buf[..frame_length]);
+                Ok(frame_length)
+            }
+         */
+        }
     }
 
     /// Try to write a frame to passt.
@@ -78,11 +147,17 @@ impl Passt {
     ///                     frame, must >= PASST_HEADER_LEN
     /// * `buf` - the buffer to write to passt, `buf[..hdr_len]` may be overwritten
     pub fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<()> {
-        log::trace!("Writing while expecting {}b on read", self.expecting_frame_length);
-        if (self.expecting_frame_length != 0) {
-            return Err(Error::WouldBlock);
-        }
-        write_frame_impl(&mut self.socket_writer, hdr_len, buf)
+        assert!(hdr_len >= PASST_HEADER_LEN, "Not enough space to write passt header");
+        assert!(buf.len() > hdr_len);
+        let frame_length = buf.len() - hdr_len;
+
+        buf[hdr_len - PASST_HEADER_LEN..hdr_len].copy_from_slice(&(frame_length as u32).to_be_bytes());
+        // TODO: investigate handling EAGAIN / EWOULDBLOCK here
+        self.passt_sock.write_all(&buf[hdr_len - PASST_HEADER_LEN..])
+            .map_err(Error::from_failed_read_write)?;
+        log::trace!("Tx eth frame to passt: {}", frame_length);
+        //log::trace!("Tx eth frame to passt: {:x?}", &buf[hdr_len..]);
+        Ok(())
     }
 
     pub fn raw_socket_fd(&self) -> RawFd {
@@ -92,66 +167,11 @@ impl Passt {
 
 // TODO: report error if the buffer is too small instead of panicking
 fn read_frame_impl(reader: &mut impl Read, expecting_frame_length: &mut u32, buf: &mut [u8]) -> Result<usize> {
-    *expecting_frame_length = if *expecting_frame_length == 0 {
-        let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
-        reader
-            .read_exact(&mut frame_length_buf)
-            .map_err(Error::from_failed_read_write)?;
-        let len = u32::from_be_bytes(frame_length_buf);
-        log::trace!("Got frame length {}", len);
-        len
-    } else {
-        log::trace!("Restored frame length {}", *expecting_frame_length);
-        *expecting_frame_length
-    };
 
-    match reader.read_exact(&mut buf[..*expecting_frame_length as usize]).map_err(Error::from_failed_read_write) {
-        // If the passt socket blocks, that means passst send a "short" frame, so it is garbage.
-        // Get rid everything in socket
-        Err(Error::WouldBlock) => {
-            /*
-            let mut garbage = vec![0u8; 100_000];
-            let mut total_size = 0;
-            let mut rounds = 0;
-            while let Ok(size) = reader.read(&mut garbage[total_size..]) {
-                total_size += size;
-                rounds += 1;
-            };*/
-
-            //log::error!("Passt promised {frame_length} bytes of data, but  WouldBlock, read {total_size} bytes in {rounds} rounds;\ngarbage was: {garbage:x?}");
-            /*.map_err(|e| {
-
-                Error::UnspecifiedIO(e)
-            })?;*/
-            log::error!("Passt promised {} bytes of data, but read WouldBlock",*expecting_frame_length);
-            Err(Error::WouldBlock)
-        }
-        Err(e) => {
-            log::error!("Passt promised {} bytes of data, but read failed: {e:?}", *expecting_frame_length);
-            Err(e)
-        }
-        Ok(_) => {
-            let frame_length = *expecting_frame_length as usize;
-            *expecting_frame_length = 0;
-            log::trace!("Rx eth frame from passt {} OK", frame_length);
-            //log::trace!("Rx eth frame from passt: {:x?}", &buf[..frame_length]);
-            Ok(frame_length)
-        }
-    }
 }
 
 fn write_frame_impl(writer: &mut impl Write, hdr_len: usize, buf: &mut [u8]) -> Result<()> {
-    assert!(hdr_len >= PASST_HEADER_LEN, "Not enough space to write passt header");
-    assert!(buf.len() > hdr_len);
-    let frame_length = buf.len() - hdr_len;
 
-    buf[hdr_len - PASST_HEADER_LEN..hdr_len].copy_from_slice(&(frame_length as u32).to_be_bytes());
-    // TODO: investigate handling EAGAIN / EWOULDBLOCK here
-    writer.write_all(&buf[hdr_len - PASST_HEADER_LEN..])
-        .map_err(Error::from_failed_read_write)?;
-    log::trace!("Tx eth frame to passt: {}", frame_length);
-    //log::trace!("Tx eth frame to passt: {:x?}", &buf[hdr_len..]);
-    Ok(())
 }
 
 #[cfg(test)]
