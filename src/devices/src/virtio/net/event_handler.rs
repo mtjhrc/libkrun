@@ -94,7 +94,7 @@ impl Subscriber for Net {
                 EpollEvent::new(EventSet::IN, self.queue_evts[RX_INDEX].as_raw_fd() as u64),
                 EpollEvent::new(EventSet::IN, self.queue_evts[TX_INDEX].as_raw_fd() as u64),
                 EpollEvent::new(
-                    EventSet::IN | EventSet::EDGE_TRIGGERED,
+                    EventSet::IN, //| EventSet::EDGE_TRIGGERED,
                     self.raw_passt_socket_fd() as u64,
                 ),
             ]

@@ -84,17 +84,23 @@ impl Passt {
         };
 
         let mut bytes_read = 0;
+        let mut rounds = 0;
         loop {
             let result = recv(self.passt_sock.as_raw_fd(), &mut buf[bytes_read..frame_length], MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL);
             match result {
                 Ok(size) => {
                     bytes_read += size;
-                    assert!(bytes_read <= size);
-                    if (bytes_read == size) {
+                    rounds += 1;
+                    assert!(bytes_read <= frame_length);
+                    if (bytes_read == frame_length) {
+                        log::trace!("Read {bytes_read}/{frame_length}bytes in {rounds} rounds");
                         return Ok(frame_length);
                     }
                 },
-                Err(e) =>{
+                Err(nix::Error::EAGAIN) => {
+                    log::trace!("Read {bytes_read}/{frame_length}bytes got EAGAIN");
+                }
+                Err(e) => {
                     panic!("Read from passt failed {e:?}")
                 }
             }
