@@ -45,6 +45,23 @@ const MAX_ARGS: usize = 4096;
 const INIT_PATH: &str = "/init.krun";
 
 #[derive(Default)]
+struct TSIConfig {
+    port_map: Option<HashMap<u16, u16>>,
+}
+
+enum NetworkConfig {
+    ModeNone,
+    ModeTSI(TSIConfig),
+}
+
+impl Default for NetworkConfig {
+    /// Default network mode is TSI, for backwards compatibility
+    fn default() -> Self {
+        NetworkConfig::ModeTSI(Default::default())
+    }
+}
+
+#[derive(Default)]
 struct ContextConfig {
     vmr: VmResources,
     workdir: Option<String>,
@@ -52,13 +69,13 @@ struct ContextConfig {
     env: Option<String>,
     args: Option<String>,
     rlimits: Option<String>,
+    net_cfg: NetworkConfig,
     #[cfg(not(feature = "tee"))]
     fs_cfg: Option<FsDeviceConfig>,
     #[cfg(feature = "tee")]
     root_block_cfg: Option<BlockDeviceConfig>,
     #[cfg(feature = "tee")]
     data_block_cfg: Option<BlockDeviceConfig>,
-    port_map: Option<HashMap<u16, u16>>,
     #[cfg(feature = "tee")]
     tee_config_file: Option<PathBuf>,
 }
@@ -149,12 +166,19 @@ impl ContextConfig {
         self.data_block_cfg.clone()
     }
 
-    fn set_port_map(&mut self, port_map: HashMap<u16, u16>) {
-        self.port_map = Some(port_map);
+    fn set_net_cfg(&mut self, net_cfg: NetworkConfig) {
+        self.net_cfg = net_cfg;
     }
 
-    fn get_port_map(&self) -> Option<HashMap<u16, u16>> {
-        self.port_map.clone()
+    // Returns Err if not supported
+    fn set_port_map(&mut self, new_port_map: HashMap<u16, u16>) -> Result<(), ()> {
+        match &mut self.net_cfg {
+            NetworkConfig::ModeNone => Err(()),
+            NetworkConfig::ModeTSI(tsi_config) => {
+                tsi_config.port_map.replace(new_port_map);
+                Ok(())
+            }
+        }
     }
 
     #[cfg(feature = "tee")]
@@ -460,6 +484,27 @@ pub unsafe extern "C" fn krun_set_data_disk(ctx_id: u32, c_disk_path: *const c_c
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
+pub unsafe extern "C" fn krun_set_net_mode(ctx_id: u32, net_mode: u32) -> i32 {
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            let net_cfg = match net_mode {
+                // see #defines in include/libkrun.h
+                0 => NetworkConfig::ModeNone,
+                1 => NetworkConfig::ModeTSI(Default::default()),
+                _ => return -libc::EINVAL,
+            };
+
+            cfg.set_net_cfg(net_cfg);
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
 pub unsafe extern "C" fn krun_set_port_map(ctx_id: u32, c_port_map: *const *const c_char) -> i32 {
     let mut port_map = HashMap::new();
     let port_map_array: &[*const c_char] = slice::from_raw_parts(c_port_map, MAX_ARGS);
@@ -499,7 +544,9 @@ pub unsafe extern "C" fn krun_set_port_map(ctx_id: u32, c_port_map: *const *cons
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
-            cfg.set_port_map(port_map);
+            if let Err(()) = cfg.set_port_map(port_map) {
+                return -libc::ENOTSUP;
+            }
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
@@ -762,12 +809,17 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         return -libc::EINVAL;
     }
 
-    let vsock_device_config = VsockDeviceConfig {
-        vsock_id: "vsock0".to_string(),
-        guest_cid: 3,
-        host_port_map: ctx_cfg.get_port_map(),
-    };
-    ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
+    match ctx_cfg.net_cfg {
+        NetworkConfig::ModeNone => (),
+        NetworkConfig::ModeTSI(tsi_cfg) => {
+            let vsock_device_config = VsockDeviceConfig {
+                vsock_id: "vsock0".to_string(),
+                guest_cid: 3,
+                host_port_map: tsi_cfg.port_map,
+            };
+            ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
+        }
+    }
 
     let _vmm = match vmm::builder::build_microvm(&ctx_cfg.vmr, &mut event_manager) {
         Ok(vmm) => vmm,

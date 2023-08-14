@@ -1,5 +1,8 @@
 #include <inttypes.h>
 
+#define KRUN_NET_MODE_NONE 0
+#define KRUN_NET_MODE_TSI 1
+
 /*
  * Sets the log level for the library.
  *
@@ -104,6 +107,24 @@ int32_t krun_set_data_disk(uint32_t ctx_id, const char *disk_path);
 int32_t krun_set_mapped_volumes(uint32_t ctx_id, char *const mapped_volumes[]);
 
 /*
+ * Configures the networking mode to use.
+ *
+ *
+ * Arguments:
+ *  "ctx_id"         - the configuration context ID.
+ *  "mode"           - the networking mode to use, valid options are: KRUN_NET_MODE_NONE, KRUN_NET_MODE_TSI
+ *
+ * Notes:
+ * If you do not call this function, the default network mode is used, which is KRUN_NET_MODE_TSI.
+ * This function should be called before krun_set_port_map.
+ * Calling krun_set_net_mode after krun_set_port_map removes the port map.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_set_net_mode(uint32_t ctx_id, uint32_t mode);
+
+/*
  * Configures a map of host to guest TCP ports for the microVM.
  *
  * Arguments:
@@ -123,6 +144,7 @@ int32_t krun_set_mapped_volumes(uint32_t ctx_id, char *const mapped_volumes[]);
  *  means that for a map such as "8080:80", applications running inside the guest will also
  *  need to access the service through the "8080" port.
  *
+ * If the specified networking mode does not support port mapping, -ENOTSUP will be returned.
  */
 int32_t krun_set_port_map(uint32_t ctx_id, char *const port_map[]);
 
