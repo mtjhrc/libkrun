@@ -24,7 +24,7 @@ pub enum Error {
         event_type: &'static str,
         underlying: io::Error,
     },
-    FailedReadTap,
+    PasstError,
     FailedSignalingUsedQueue(io::Error),
     PayloadExpected,
     IoError(io::Error),

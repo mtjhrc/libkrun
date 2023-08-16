@@ -17,6 +17,8 @@
 #define MAX_PATH 4096
 #endif
 
+#define NET_MODE KRUN_NET_MODE_PASST
+
 int main(int argc, char *const argv[])
 {
     char *const envp[] =
@@ -104,12 +106,22 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    // Map port 18000 in the host to 8000 in the guest.
+    // Set the network mode, if this function is not called NET_MODE_TSI is assumed
+    if (err = krun_set_net_mode(ctx_id, NET_MODE)) {
+        errno = -err;
+        perror("Error configuring net mode");
+        return -1;
+    }
+
+    // Map port 18000 in the host to 8000 in the guest (if networking is enabled)
+    // TODO: not implemented in passt yet
+#if NET_MODE != KRUN_NET_MODE_NONE && NET_MODE != KRUN_NET_MODE_PASST
     if (err = krun_set_port_map(ctx_id, &port_map[0])) {
         errno = -err;
         perror("Error configuring port map");
         return -1;
     }
+#endif
 
     // Configure the rlimits that will be set in the guest
     if (err = krun_set_rlimits(ctx_id, &rlimits[0])) {

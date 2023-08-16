@@ -2,6 +2,7 @@
 
 #define KRUN_NET_MODE_NONE 0
 #define KRUN_NET_MODE_TSI 1
+#define KRUN_NET_MODE_PASST 2
 
 /*
  * Sets the log level for the library.
@@ -47,7 +48,7 @@ int32_t krun_free_ctx(uint32_t ctx_id);
  *  "num_vcpus" - the number of vCPUs.
  *  "ram_mib"   - the amount of RAM in MiB.
  *
- * Returns:
+ * Returns:t
  *  Zero on success or a negative error number on failure.
  */
 int32_t krun_set_vm_config(uint32_t ctx_id, uint8_t num_vcpus, uint32_t ram_mib);
