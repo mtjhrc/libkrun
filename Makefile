@@ -31,6 +31,10 @@ ifeq ($(TIMESYNC),1)
     INIT_DEFS += -D__TIMESYNC__
 endif
 
+ifneq ($(NET),0)
+    FEATURE_FLAGS := --features net
+endif
+
 OS = $(shell uname -s)
 
 KRUN_BINARY_Linux = libkrun$(VARIANT).so.$(FULL_VERSION)
