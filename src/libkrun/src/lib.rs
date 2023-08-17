@@ -13,6 +13,7 @@ use std::path::Path;
 #[cfg(feature = "tee")]
 use std::path::PathBuf;
 use std::slice;
+#[cfg(feature = "net")]
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -23,6 +24,7 @@ use env_logger::Env;
 use libc::{c_char, size_t};
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
+#[cfg(feature = "net")]
 use utils::net::mac::MacAddr;
 use vmm::resources::VmResources;
 #[cfg(feature = "tee")]
@@ -34,6 +36,7 @@ use vmm::vmm_config::kernel_bundle::KernelBundle;
 #[cfg(feature = "tee")]
 use vmm::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle};
 use vmm::vmm_config::machine_config::VmConfig;
+#[cfg(feature = "net")]
 use vmm::vmm_config::net::NetworkInterfaceConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
@@ -55,6 +58,7 @@ struct TSIConfig {
 enum NetworkConfig {
     ModeNone,
     ModeTSI(TSIConfig),
+    #[cfg(feature = "net")]
     ModePasst,
 }
 
@@ -182,6 +186,7 @@ impl ContextConfig {
                 tsi_config.port_map.replace(new_port_map);
                 Ok(())
             }
+            #[cfg(feature = "net")]
             NetworkConfig::ModePasst => todo!("Not yet implemented"),
         }
     }
@@ -497,7 +502,13 @@ pub unsafe extern "C" fn krun_set_net_mode(ctx_id: u32, net_mode: u32) -> i32 {
                 // see #defines in include/libkrun.h
                 0 => NetworkConfig::ModeNone,
                 1 => NetworkConfig::ModeTSI(Default::default()),
-                2 => NetworkConfig::ModePasst,
+                2 => {
+                    #[cfg(not(feature = "net"))]
+                    return -libc::ENOTSUP;
+
+                    #[cfg(feature = "net")]
+                    NetworkConfig::ModePasst
+                }
                 _ => return -libc::EINVAL,
             };
 
@@ -825,6 +836,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             };
             ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
         }
+        #[cfg(feature = "net")]
         NetworkConfig::ModePasst => {
             let network_interface_config = NetworkInterfaceConfig {
                 iface_id: "testnet".to_string(),
