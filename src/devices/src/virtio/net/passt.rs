@@ -1,6 +1,7 @@
 use nix::sys::socket::{
     connect, recv, send, socket, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr,
 };
+use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::result;
@@ -23,12 +24,23 @@ pub enum Error {
     Internal(nix::Error),
 }
 
+#[derive(Debug)]
+pub enum WriteError {
+    /// Nothing was written, you can drop the frame or try to resend it later
+    NothingWritten,
+    /// Part of the buffer was written, the write has to be finished using try_finish_write
+    PartialWrite,
+    /// Another internal error occurred
+    Internal(nix::Error),
+}
+
 pub type Result<T> = result::Result<T, Error>;
 
 pub struct Passt {
     passt_sock: RawFd,
     // 0 when a frame length has not been read
     expecting_frame_length: u32,
+    last_partial_write_length: Option<NonZeroUsize>,
 }
 
 impl Passt {
@@ -49,6 +61,7 @@ impl Passt {
         Ok(Self {
             passt_sock: sock,
             expecting_frame_length: 0,
+            last_partial_write_length: None,
         })
     }
 
@@ -75,7 +88,17 @@ impl Passt {
     /// * `hdr_len` - specifies the size of any existing headers encapsulating the ethernet
     ///                     frame, must >= PASST_HEADER_LEN
     /// * `buf` - the buffer to write to passt, `buf[..hdr_len]` may be overwritten
-    pub fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<()> {
+    ///
+    /// If this function returns WriteError::PartialWrite, you have to finish the write using
+    /// try_finish_write.
+    pub fn write_frame(
+        &mut self,
+        hdr_len: usize,
+        buf: &mut [u8],
+    ) -> result::Result<(), WriteError> {
+        if self.last_partial_write_length.is_some() {
+            panic!("Cannot write a frame to passt, while a partial write is not resolved.");
+        }
         assert!(
             hdr_len >= PASST_HEADER_LEN,
             "Not enough space to write passt header"
@@ -86,8 +109,64 @@ impl Passt {
         buf[hdr_len - PASST_HEADER_LEN..hdr_len]
             .copy_from_slice(&(frame_length as u32).to_be_bytes());
 
-        send_loop(self.passt_sock, &buf[hdr_len - PASST_HEADER_LEN..])?;
-        log::trace!("Write eth frame to passt: {} bytes", frame_length);
+        self.send_loop(&buf[hdr_len - PASST_HEADER_LEN..])?;
+        Ok(())
+    }
+
+    pub fn has_unfinished_write(&self) -> bool {
+        self.last_partial_write_length.is_some()
+    }
+
+    /// Try to finish a partial write
+    ///
+    /// If not partial write is required will do nothing.
+    ///
+    /// * `hdr_len` - must be the same value as passed to write_frame, that caused the partial write
+    /// * `buf` - must be same buffer that was given to write_frame, that caused the partial write
+    pub fn try_finish_write(
+        &mut self,
+        hdr_len: usize,
+        buf: &[u8],
+    ) -> result::Result<(), WriteError> {
+        log::trace!("Requested to finish partial write");
+        if let Some(written_bytes) = self.last_partial_write_length {
+            self.send_loop(&buf[hdr_len - PASST_HEADER_LEN + written_bytes.get()..])?;
+            log::debug!(
+                "Finished partial write ({}bytes written before)",
+                written_bytes.get()
+            )
+        }
+
+        Ok(())
+    }
+
+    fn send_loop(&mut self, buf: &[u8]) -> result::Result<(), WriteError> {
+        let mut bytes_send = 0;
+
+        while bytes_send < buf.len() {
+            match send(
+                self.passt_sock,
+                buf,
+                MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
+            ) {
+                Ok(size) => bytes_send += size,
+                #[allow(unreachable_patterns)]
+                Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
+                    if bytes_send == 0 {
+                        return Err(WriteError::NothingWritten);
+                    } else {
+                        log::trace!(
+                            "Wrote {} bytes, but socket blocked, will need try_finish_write() to finish",
+                            bytes_send
+                        );
+                        self.last_partial_write_length = Some(bytes_send.try_into().unwrap());
+                        return Err(WriteError::PartialWrite);
+                    }
+                }
+                Err(e) => return Err(WriteError::Internal(e)),
+            }
+        }
+        self.last_partial_write_length = None;
         Ok(())
     }
 
@@ -125,19 +204,6 @@ fn recv_loop(fd: RawFd, buf: &mut [u8]) -> Result<()> {
                 log::trace!("recv {}/{}", bytes_read, buf.len());
             }
         }
-    }
-
-    Ok(())
-}
-
-fn send_loop(fd: RawFd, buf: &[u8]) -> Result<()> {
-    let mut bytes_send = 0;
-
-    // TODO: possibly drop full frames, if the socket blocks
-    while bytes_send < buf.len() {
-        bytes_send += send(fd, buf, MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL)
-            .map_err(Error::Internal)?;
-        log::trace!("send {}/{}", bytes_send, buf.len());
     }
 
     Ok(())

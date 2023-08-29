@@ -22,6 +22,7 @@ use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
 const VIRTIO_F_VERSION_1: u32 = 32;
 
 use crate::legacy::Gic;
+use crate::Error::PasstError;
 use virtio_bindings::virtio_net::{
     virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4,
     VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO, VIRTIO_NET_F_MAC,
@@ -83,6 +84,7 @@ pub struct Net {
 
     tx_iovec: Vec<(GuestAddress, usize)>,
     tx_frame_buf: [u8; MAX_BUFFER_SIZE],
+    tx_frame_len: usize,
 
     pub(crate) interrupt_status: Arc<AtomicUsize>,
     pub(crate) interrupt_evt: EventFd,
@@ -139,6 +141,7 @@ impl Net {
             rx_bytes_read: 0,
             rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+            tx_frame_len: 0,
             tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
             interrupt_status: Arc::new(AtomicUsize::new(0)),
             interrupt_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
@@ -285,6 +288,11 @@ impl Net {
     }
 
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
+        if self.passt_has_unfinished_write() {
+            log::trace!("process_tx: not processing, because passt has an unfinished write");
+            return Ok(());
+        }
+
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
             // This should never happen, it's been already validated in the event handler.
@@ -331,16 +339,37 @@ impl Net {
                 }
             }
 
-            self.passt
-                .write_frame(vnet_hdr_len(), &mut self.tx_frame_buf[..read_count])
-                .map_err(|e| {
-                    log::error!("Failed to write frame to passt {e:?}");
-                    DeviceError::PasstError
-                })?;
+            macro_rules! mark_used {
+                () => {{
+                    self.tx_frame_len = 0;
+                    raise_irq = true;
+                    tx_queue.add_used(mem, head_index, 0);
+                }};
+            }
 
-            tx_queue.add_used(mem, head_index, 0);
-            //     .map_err(DeviceError::QueueError)?;
-            raise_irq = true;
+            self.tx_frame_len = read_count;
+            match self
+                .passt
+                .write_frame(vnet_hdr_len(), &mut self.tx_frame_buf[..read_count])
+            {
+                Ok(()) => mark_used!(),
+                Err(passt::WriteError::NothingWritten) => {
+                    log::trace!("process_tx: nothing written to passt, dropping frame");
+                    mark_used!();
+                }
+                Err(passt::WriteError::PartialWrite) => {
+                    log::trace!("process_tx: partial write");
+                    // we hold on to the frame, return the descriptor to the guest,
+                    // and stop processing any more frames
+                    raise_irq = true;
+                    tx_queue.add_used(mem, head_index, 0);
+                    break;
+                }
+                Err(e @ passt::WriteError::Internal(_)) => {
+                    log::error!("Failed to write to passt: {:?}", e);
+                    return Err(PasstError);
+                }
+            }
         }
 
         if raise_irq {
@@ -348,6 +377,18 @@ impl Net {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn process_passt_socket_writeable(&mut self) {
+        match self
+            .passt
+            .try_finish_write(vnet_hdr_len(), &self.tx_frame_buf[..self.tx_frame_len])
+        {
+            Ok(()) | Err(passt::WriteError::PartialWrite | passt::WriteError::NothingWritten) => (),
+            Err(e @ passt::WriteError::Internal(_)) => {
+                log::error!("try_finish_write failed: {e:?}");
+            }
+        }
     }
 
     /// Fills self.rx_frame_buf with an ethernet frame from passt and prepends virtio_net_hdr to it
@@ -387,6 +428,10 @@ impl Net {
 
     pub(crate) fn raw_passt_socket_fd(&self) -> RawFd {
         self.passt.raw_socket_fd()
+    }
+
+    pub(crate) fn passt_has_unfinished_write(&self) -> bool {
+        self.passt.has_unfinished_write()
     }
 }
 
