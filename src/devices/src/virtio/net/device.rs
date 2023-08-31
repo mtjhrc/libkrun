@@ -263,7 +263,7 @@ impl Net {
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
-        for _ in 0..5 {
+        loop {
             match self.read_into_rx_frame_buf_from_passt() {
                 Ok(()) => {
                     // TODO: check for errors
@@ -361,7 +361,10 @@ impl Net {
                 Ok(()) => mark_used!(),
                 Err(passt::WriteError::NothingWritten) => {
                     log::trace!("process_tx: nothing written to passt, dropping frame");
-                    tx_queue.undo_pop();
+                    tx_queue.add_used(mem, head_index, 0);
+                    while let Some(head) = tx_queue.pop(mem) {
+                        tx_queue.add_used(mem, head.index, 0);
+                    }
                     break;
                     //mark_used!();
                 }
@@ -369,10 +372,10 @@ impl Net {
                     log::trace!("process_tx: partial write");
                     // we hold on to the frame, return the descriptor to the guest,
                     // and stop processing any more frames
+                    tx_queue.add_used(mem, head_index, 0);
                     while let Some(head) = tx_queue.pop(mem) {
                         tx_queue.add_used(mem, head.index, 0);
                     }
-                    tx_queue.add_used(mem, head_index, 0);
                     raise_irq = true;
                     break;
                 }
