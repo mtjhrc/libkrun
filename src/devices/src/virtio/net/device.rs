@@ -263,7 +263,7 @@ impl Net {
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
-        loop {
+        for _ in 0..5 {
             match self.read_into_rx_frame_buf_from_passt() {
                 Ok(()) => {
                     // TODO: check for errors
@@ -288,19 +288,25 @@ impl Net {
     }
 
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
-        if self.passt_has_unfinished_write() {
-            log::trace!("process_tx: not processing, because passt has an unfinished write");
-            return Ok(());
-        }
-
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
             // This should never happen, it's been already validated in the event handler.
             DeviceState::Inactive => unreachable!(),
         };
 
+        let has_unfinished_write = self.passt_has_unfinished_write();
         let mut raise_irq = false;
         let tx_queue = &mut self.queues[TX_INDEX];
+
+
+        if has_unfinished_write {
+            log::trace!("process_tx: not processing, because passt has an unfinished write");
+            /*while let Some(head) = tx_queue.pop(mem) {
+                tx_queue.add_used(mem, head.index, 0);
+            }
+            self.signal_used_queue()?;*/
+            return Ok(());
+        }
 
         while let Some(head) = tx_queue.pop(mem) {
             let head_index = head.index;
@@ -355,14 +361,19 @@ impl Net {
                 Ok(()) => mark_used!(),
                 Err(passt::WriteError::NothingWritten) => {
                     log::trace!("process_tx: nothing written to passt, dropping frame");
-                    mark_used!();
+                    tx_queue.undo_pop();
+                    break;
+                    //mark_used!();
                 }
                 Err(passt::WriteError::PartialWrite) => {
                     log::trace!("process_tx: partial write");
                     // we hold on to the frame, return the descriptor to the guest,
                     // and stop processing any more frames
-                    raise_irq = true;
+                    while let Some(head) = tx_queue.pop(mem) {
+                        tx_queue.add_used(mem, head.index, 0);
+                    }
                     tx_queue.add_used(mem, head_index, 0);
+                    raise_irq = true;
                     break;
                 }
                 Err(e @ passt::WriteError::Internal(_)) => {

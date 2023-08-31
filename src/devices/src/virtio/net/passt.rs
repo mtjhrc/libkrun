@@ -1,10 +1,9 @@
-use nix::sys::socket::{
-    connect, recv, send, socket, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr,
-};
+use nix::sys::socket::{connect, recv, send, socket, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, setsockopt, sockopt};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::result;
+use libc::SO_SNDBUF;
 use vm_memory::VolatileMemory;
 
 // TODO: add the ability to start passt
@@ -49,7 +48,7 @@ impl Passt {
         let sock = socket(
             AddressFamily::Unix,
             SockType::Stream,
-            SockFlag::SOCK_NONBLOCK,
+            SockFlag::empty(),
             None,
         )
         .map_err(Error::FailedToConnect)?;
@@ -57,6 +56,8 @@ impl Passt {
         let addr = UnixAddr::new(socket_path.as_ref()).map_err(Error::FailedToConnect)?;
 
         connect(sock, &addr).map_err(Error::FailedToConnect)?;
+        setsockopt(sock, sockopt::SndBuf, &(16*1024*1024)).unwrap();
+        //setsockopt(sock, sockopt::RcvBuf, &(16*1024*1024)).unwrap();
 
         Ok(Self {
             passt_sock: sock,
@@ -70,15 +71,15 @@ impl Passt {
         if self.expecting_frame_length == 0 {
             self.expecting_frame_length = {
                 let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
-                recv_loop(self.passt_sock, &mut frame_length_buf)?;
+                recv_loop(self.passt_sock, &mut frame_length_buf, false)?;
                 u32::from_be_bytes(frame_length_buf)
             };
         }
 
         let frame_length = self.expecting_frame_length as usize;
-        recv_loop(self.passt_sock, &mut buf[..frame_length])?;
+        recv_loop(self.passt_sock, &mut buf[..frame_length], true)?;
         self.expecting_frame_length = 0;
-        log::trace!("Read eth frame from passt: {} bytes", frame_length);
+        //log::trace!("Read eth frame from passt: {} bytes", frame_length);
         Ok(frame_length)
     }
 
@@ -177,14 +178,16 @@ impl Passt {
 
 /// Try to read until filling the whole slice.
 /// May return WouldBlock only if the first read fails
-fn recv_loop(fd: RawFd, buf: &mut [u8]) -> Result<()> {
+fn recv_loop(fd: RawFd, buf: &mut [u8], blocking: bool) -> Result<()> {
     let mut bytes_read = 0;
 
-    match recv(fd, buf, MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL) {
-        Ok(size) => bytes_read += size,
-        #[allow(unreachable_patterns)] // EAGAIN/EWOULDBLOCK may be a different value...
-        Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => return Err(Error::WouldBlock),
-        Err(e) => return Err(Error::Internal(e)),
+    if !blocking {
+        match recv(fd, buf, MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL) {
+            Ok(size) => bytes_read += size,
+            #[allow(unreachable_patterns)] // EAGAIN/EWOULDBLOCK may be a different value...
+            Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => return Err(Error::WouldBlock),
+            Err(e) => return Err(Error::Internal(e)),
+        }
     }
 
     while bytes_read < buf.len() {
@@ -201,7 +204,7 @@ fn recv_loop(fd: RawFd, buf: &mut [u8]) -> Result<()> {
             Err(e) => return Err(Error::Internal(e)),
             Ok(size) => {
                 bytes_read += size;
-                log::trace!("recv {}/{}", bytes_read, buf.len());
+                //log::trace!("recv {}/{}", bytes_read, buf.len());
             }
         }
     }
