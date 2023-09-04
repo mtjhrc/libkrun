@@ -245,11 +245,12 @@ impl Net {
     // the operation if possible. Returns true if the operation was successfull.
     fn write_frame_to_guest(&mut self) -> bool {
         let max_iterations = self.queues[RX_INDEX].actual_size();
-        for _ in 0..max_iterations {
+        loop {
             match self.do_write_frame_to_guest() {
                 Ok(()) => return true,
                 Err(FrontendError::EmptyQueue) => {
-                    return false;
+                    continue;
+                    //return false;
                 }
                 Err(_) => {
                     // retry
@@ -263,11 +264,15 @@ impl Net {
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
-        loop {
+        for _ in 0..10 {
+        //loop {
             match self.read_into_rx_frame_buf_from_passt() {
                 Ok(()) => {
                     // TODO: check for errors
-                    self.write_frame_to_guest();
+                    if !self.write_frame_to_guest() {
+                        log::error!("Failed to write frame to guest");
+                        break;
+                    }
                 }
                 Err(e) => {
                     match e {

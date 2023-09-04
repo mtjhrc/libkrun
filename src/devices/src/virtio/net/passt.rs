@@ -56,7 +56,7 @@ impl Passt {
         let addr = UnixAddr::new(socket_path.as_ref()).map_err(Error::FailedToConnect)?;
 
         connect(sock, &addr).map_err(Error::FailedToConnect)?;
-        setsockopt(sock, sockopt::SndBuf, &(16*1024*1024)).unwrap();
+        setsockopt(sock, sockopt::SndBuf, &(64*1024*1024)).unwrap();
         //setsockopt(sock, sockopt::RcvBuf, &(16*1024*1024)).unwrap();
 
         Ok(Self {
@@ -150,7 +150,10 @@ impl Passt {
                 buf,
                 MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
             ) {
-                Ok(size) => bytes_send += size,
+                Ok(size) => {
+                    bytes_send += size;
+                    //log::trace!("send {}/{}", bytes_send, buf.len());
+                },
                 #[allow(unreachable_patterns)]
                 Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
                     if bytes_send == 0 {
@@ -204,7 +207,7 @@ fn recv_loop(fd: RawFd, buf: &mut [u8], blocking: bool) -> Result<()> {
             Err(e) => return Err(Error::Internal(e)),
             Ok(size) => {
                 bytes_read += size;
-                //log::trace!("recv {}/{}", bytes_read, buf.len());
+                log::trace!("recv {}/{}", bytes_read, buf.len());
             }
         }
     }
