@@ -450,7 +450,7 @@ impl Net {
             .unwrap_or_else(|e| log::error!("Failed to resure rx: {e:?}"));
     }
 
-    pub fn process_passt_rx_event(&mut self) {
+    pub fn process_passt_socket_readable(&mut self) {
         if self.rx_deferred_frame {
             self.handle_deferred_frame().unwrap_or_else(|err| {
                 log::error!("Failed to process deferred frame: {err:?}");

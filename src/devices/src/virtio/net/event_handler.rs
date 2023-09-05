@@ -66,7 +66,7 @@ impl Subscriber for Net {
                 }
                 _ if source == passt_socket => {
                     if event_set.contains(EventSet::IN) {
-                        self.process_passt_rx_event()
+                        self.process_passt_socket_readable()
                     }
 
                     if event_set.contains(EventSet::OUT) {
