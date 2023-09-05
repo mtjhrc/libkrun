@@ -81,6 +81,7 @@ pub struct Net {
 
     rx_bytes_read: usize,
     rx_frame_buf: [u8; MAX_BUFFER_SIZE],
+    rx_deferred_frame: bool,
 
     tx_iovec: Vec<(GuestAddress, usize)>,
     tx_frame_buf: [u8; MAX_BUFFER_SIZE],
@@ -142,6 +143,7 @@ impl Net {
             rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_len: 0,
+            rx_deferred_frame: false,
             tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
             interrupt_status: Arc::new(AtomicUsize::new(0)),
             interrupt_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
@@ -245,12 +247,11 @@ impl Net {
     // the operation if possible. Returns true if the operation was successfull.
     fn write_frame_to_guest(&mut self) -> bool {
         let max_iterations = self.queues[RX_INDEX].actual_size();
-        loop {
+        for _ in 0..max_iterations {
             match self.do_write_frame_to_guest() {
                 Ok(()) => return true,
                 Err(FrontendError::EmptyQueue) => {
-                    continue;
-                    //return false;
+                    return false;
                 }
                 Err(_) => {
                     // retry
@@ -264,13 +265,14 @@ impl Net {
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
-        for _ in 0..10 {
-        //loop {
+        //for _ in 0..10 {
+        loop {
             match self.read_into_rx_frame_buf_from_passt() {
                 Ok(()) => {
                     // TODO: check for errors
                     if !self.write_frame_to_guest() {
-                        log::error!("Failed to write frame to guest");
+                        //log::error!("Failed to write frame to guest");
+                        self.rx_deferred_frame = true;
                         break;
                     }
                 }
@@ -291,6 +293,27 @@ impl Net {
         // We have to wake the guest if at least one descriptor chain has been used.
         self.signal_rx_used_queue()
     }
+
+    // Process the deferred frame first, then continue reading from tap.
+    fn handle_deferred_frame(&mut self) -> result::Result<(), DeviceError> {
+        if self.write_frame_to_guest() {
+            self.rx_deferred_frame = false;
+            // process_rx() was interrupted possibly before consuming all
+            // packets in the tap; try continuing now.
+            return self.process_rx();
+        }
+
+        self.signal_rx_used_queue()
+    }
+
+    fn resume_rx(&mut self) -> result::Result<(), DeviceError> {
+        if self.rx_deferred_frame {
+            self.handle_deferred_frame()
+        } else {
+            Ok(())
+        }
+    }
+
 
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
         let mem = match self.device_state {
@@ -424,12 +447,36 @@ impl Net {
         if let Err(e) = self.queue_evts[RX_INDEX].read() {
             log::error!("Failed to get rx event from queue: {:?}", e);
         }
+        self.resume_rx().map_err(|e| {
+            log::error!("Failed to resure rx: {e:?}")
+        });
     }
 
     pub fn process_passt_rx_event(&mut self) {
-        self.process_rx().unwrap_or_else(|err| {
-            log::error!("Failed to process rx queue event: {err:?}");
-        });
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+
+        // While there are no available RX queue buffers and there's a deferred_frame
+        // don't process any more incoming. Otherwise start processing a frame. In the
+        // process the deferred_frame flag will be set in order to avoid freezing the
+        // RX queue.
+        if self.queues[RX_INDEX].is_empty(mem) && self.rx_deferred_frame {
+            log::trace!("Not process: queue is empty and we have a deffered frame!");
+            return;
+        }
+
+        if self.rx_deferred_frame {
+            self.handle_deferred_frame().unwrap_or_else(|err| {
+                log::error!("Failed to process deferred frame: {err:?}");
+            });
+        }else{
+            self.process_rx().unwrap_or_else(|err| {
+                log::error!("Failed to process rx queue event: {err:?}");
+            });
+        }
     }
 
     pub fn process_tx_queue_event(&mut self) {
