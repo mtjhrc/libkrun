@@ -21,15 +21,15 @@ pub use self::event_handler::*;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Error communicating with Passt
-    PasstError(passt::Error),
+    /// Error connecting to passt
+    PasstConnect(passt::ConnectError),
     /// EventFd error.
     EventFd(io::Error),
 }
 
-impl From<passt::Error> for Error {
-    fn from(err: passt::Error) -> Self {
-        Self::PasstError(err)
+impl From<passt::ConnectError> for Error {
+    fn from(err: passt::ConnectError) -> Self {
+        Self::PasstConnect(err)
     }
 }
 

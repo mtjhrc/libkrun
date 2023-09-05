@@ -1,24 +1,21 @@
-use nix::sys::socket::{connect, recv, send, socket, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, setsockopt, sockopt};
+use nix::sys::socket::{
+    connect, recv, send, setsockopt, socket, sockopt, AddressFamily, MsgFlags, SockFlag, SockType,
+    UnixAddr,
+};
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
-use std::result;
-use libc::SO_SNDBUF;
 use vm_memory::VolatileMemory;
-
-// TODO: add the ability to start passt
-// TODO: handle/report passt disconnect properly
 
 /// Each frame from passt is prepended by a 4 byte "header".
 /// It is interpreted as a big-endian u32 integer and is the length of the following ethernet frame.
 const PASST_HEADER_LEN: usize = 4;
 
 #[derive(Debug)]
-pub enum Error {
+pub enum ConnectError {
     /// Failed to connect to passt socket
     FailedToConnect(nix::Error),
-    /// The requested operation would block, try again later
-    WouldBlock,
     /// The requested operation would block, try again later
     Internal(nix::Error),
 }
@@ -33,7 +30,13 @@ pub enum WriteError {
     Internal(nix::Error),
 }
 
-pub type Result<T> = result::Result<T, Error>;
+#[derive(Debug)]
+pub enum ReadError {
+    /// Nothing was written
+    NothingRead,
+    /// Another internal error occurred
+    Internal(nix::Error),
+}
 
 pub struct Passt {
     passt_sock: RawFd,
@@ -44,20 +47,19 @@ pub struct Passt {
 
 impl Passt {
     /// Connect to a running passt instance, given a socket path
-    pub fn connect_to_socket(socket_path: impl AsRef<Path>) -> Result<Self> {
+    pub fn connect_to_socket(socket_path: impl AsRef<Path>) -> Result<Self, ConnectError> {
         let sock = socket(
             AddressFamily::Unix,
             SockType::Stream,
             SockFlag::empty(),
             None,
         )
-        .map_err(Error::FailedToConnect)?;
+        .map_err(ConnectError::FailedToConnect)?;
 
-        let addr = UnixAddr::new(socket_path.as_ref()).map_err(Error::FailedToConnect)?;
+        let addr = UnixAddr::new(socket_path.as_ref()).map_err(ConnectError::FailedToConnect)?;
 
-        connect(sock, &addr).map_err(Error::FailedToConnect)?;
-        setsockopt(sock, sockopt::SndBuf, &(64*1024*1024)).unwrap();
-        //setsockopt(sock, sockopt::RcvBuf, &(16*1024*1024)).unwrap();
+        connect(sock, &addr).map_err(ConnectError::FailedToConnect)?;
+        //setsockopt(sock, sockopt::SndBuf, &(64*1024*1024)).unwrap();
 
         Ok(Self {
             passt_sock: sock,
@@ -67,36 +69,32 @@ impl Passt {
     }
 
     /// Try to read a frame from passt. If no bytes are available reports PasstError::WouldBlock
-    pub fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
         if self.expecting_frame_length == 0 {
             self.expecting_frame_length = {
                 let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
-                recv_loop(self.passt_sock, &mut frame_length_buf, false)?;
+                self.read_loop(&mut frame_length_buf, false)?;
                 u32::from_be_bytes(frame_length_buf)
             };
         }
 
         let frame_length = self.expecting_frame_length as usize;
-        recv_loop(self.passt_sock, &mut buf[..frame_length], true)?;
+        self.read_loop(&mut buf[..frame_length], true)?;
         self.expecting_frame_length = 0;
-        //log::trace!("Read eth frame from passt: {} bytes", frame_length);
         Ok(frame_length)
     }
 
     /// Try to write a frame to passt.
     /// (Will mutate and override parts of buf, with a passt header!)
     ///
-    /// * `hdr_len` - specifies the size of any existing headers encapsulating the ethernet
-    ///                     frame, must >= PASST_HEADER_LEN
+    /// * `hdr_len` - specifies the size of any existing headers encapsulating the ethernet frame,
+    ///               (such as vnet header), that can be overwritten.
+    ///               must be >= PASST_HEADER_LEN
     /// * `buf` - the buffer to write to passt, `buf[..hdr_len]` may be overwritten
     ///
     /// If this function returns WriteError::PartialWrite, you have to finish the write using
     /// try_finish_write.
-    pub fn write_frame(
-        &mut self,
-        hdr_len: usize,
-        buf: &mut [u8],
-    ) -> result::Result<(), WriteError> {
+    pub fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
         if self.last_partial_write_length.is_some() {
             panic!("Cannot write a frame to passt, while a partial write is not resolved.");
         }
@@ -110,7 +108,7 @@ impl Passt {
         buf[hdr_len - PASST_HEADER_LEN..hdr_len]
             .copy_from_slice(&(frame_length as u32).to_be_bytes());
 
-        self.send_loop(&buf[hdr_len - PASST_HEADER_LEN..])?;
+        self.write_loop(&buf[hdr_len - PASST_HEADER_LEN..])?;
         Ok(())
     }
 
@@ -120,18 +118,14 @@ impl Passt {
 
     /// Try to finish a partial write
     ///
-    /// If not partial write is required will do nothing.
+    /// If no partial write is required will do nothing and return Ok(())
     ///
     /// * `hdr_len` - must be the same value as passed to write_frame, that caused the partial write
     /// * `buf` - must be same buffer that was given to write_frame, that caused the partial write
-    pub fn try_finish_write(
-        &mut self,
-        hdr_len: usize,
-        buf: &[u8],
-    ) -> result::Result<(), WriteError> {
+    pub fn try_finish_write(&mut self, hdr_len: usize, buf: &[u8]) -> Result<(), WriteError> {
         log::trace!("Requested to finish partial write");
         if let Some(written_bytes) = self.last_partial_write_length {
-            self.send_loop(&buf[hdr_len - PASST_HEADER_LEN + written_bytes.get()..])?;
+            self.write_loop(&buf[hdr_len - PASST_HEADER_LEN + written_bytes.get()..])?;
             log::debug!(
                 "Finished partial write ({}bytes written before)",
                 written_bytes.get()
@@ -141,7 +135,11 @@ impl Passt {
         Ok(())
     }
 
-    fn send_loop(&mut self, buf: &[u8]) -> result::Result<(), WriteError> {
+    pub fn raw_socket_fd(&self) -> RawFd {
+        self.passt_sock.as_raw_fd()
+    }
+
+    fn write_loop(&mut self, buf: &[u8]) -> Result<(), WriteError> {
         let mut bytes_send = 0;
 
         while bytes_send < buf.len() {
@@ -152,8 +150,8 @@ impl Passt {
             ) {
                 Ok(size) => {
                     bytes_send += size;
-                    //log::trace!("send {}/{}", bytes_send, buf.len());
-                },
+                    //log::trace!("passt send {}/{}", bytes_send, buf.len());
+                }
                 #[allow(unreachable_patterns)]
                 Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
                     if bytes_send == 0 {
@@ -174,43 +172,43 @@ impl Passt {
         Ok(())
     }
 
-    pub fn raw_socket_fd(&self) -> RawFd {
-        self.passt_sock.as_raw_fd()
-    }
-}
+    fn read_loop(&self, buf: &mut [u8], block_until_has_data: bool) -> Result<(), ReadError> {
+        let mut bytes_read = 0;
 
-/// Try to read until filling the whole slice.
-/// May return WouldBlock only if the first read fails
-fn recv_loop(fd: RawFd, buf: &mut [u8], blocking: bool) -> Result<()> {
-    let mut bytes_read = 0;
-
-    if !blocking {
-        match recv(fd, buf, MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL) {
-            Ok(size) => bytes_read += size,
-            #[allow(unreachable_patterns)] // EAGAIN/EWOULDBLOCK may be a different value...
-            Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => return Err(Error::WouldBlock),
-            Err(e) => return Err(Error::Internal(e)),
-        }
-    }
-
-    while bytes_read < buf.len() {
-        match recv(
-            fd,
-            &mut buf[bytes_read..],
-            MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL,
-        ) {
-            #[allow(unreachable_patterns)]
-            Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
-                log::trace!("Unexpected EAGAIN/EWOULDBLOCK when MSG_WAITALL was specified");
-                continue;
-            }
-            Err(e) => return Err(Error::Internal(e)),
-            Ok(size) => {
-                bytes_read += size;
-                log::trace!("recv {}/{}", bytes_read, buf.len());
+        if !block_until_has_data {
+            match recv(
+                self.passt_sock,
+                buf,
+                MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
+            ) {
+                Ok(size) => bytes_read += size,
+                #[allow(unreachable_patterns)]
+                Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
+                    return Err(ReadError::NothingRead)
+                }
+                Err(e) => return Err(ReadError::Internal(e)),
             }
         }
-    }
 
-    Ok(())
+        while bytes_read < buf.len() {
+            match recv(
+                self.passt_sock,
+                &mut buf[bytes_read..],
+                MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL,
+            ) {
+                #[allow(unreachable_patterns)]
+                Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
+                    log::warn!("read_loop: unexpected EAGAIN/EWOULDBLOCK on blocking socket");
+                    continue;
+                }
+                Err(e) => return Err(ReadError::Internal(e)),
+                Ok(size) => {
+                    bytes_read += size;
+                    //log::trace!("passt recv {}/{}", bytes_read, buf.len());
+                }
+            }
+        }
+
+        Ok(())
+    }
 }

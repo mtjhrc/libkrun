@@ -77,7 +77,7 @@ pub struct Net {
     pub(crate) queues: Vec<Queue>,
     pub(crate) queue_evts: Vec<EventFd>,
 
-    rx_deferred_irqs: bool,
+    rx_required_irq: bool,
 
     rx_bytes_read: usize,
     rx_frame_buf: [u8; MAX_BUFFER_SIZE],
@@ -138,7 +138,7 @@ impl Net {
             acked_features: 0u64,
             queues,
             queue_evts,
-            rx_deferred_irqs: false,
+            rx_required_irq: false,
             rx_bytes_read: 0,
             rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
@@ -181,9 +181,9 @@ impl Net {
     }
 
     fn signal_rx_used_queue(&mut self) -> result::Result<(), DeviceError> {
-        if self.rx_deferred_irqs {
+        if self.rx_required_irq {
             self.signal_used_queue()?;
-            self.rx_deferred_irqs = false;
+            self.rx_required_irq = false;
         }
 
         Ok(())
@@ -238,7 +238,7 @@ impl Net {
         // Mark the descriptor chain as used. If an error occurred, skip the descriptor chain.
         let used_len = if result.is_err() { 0 } else { frame_len as u32 };
         queue.add_used(mem, head_index, used_len);
-        self.rx_deferred_irqs = true;
+        self.rx_required_irq = true;
 
         result
     }
@@ -265,20 +265,17 @@ impl Net {
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
         // Read as many frames as possible.
-        //for _ in 0..10 {
         loop {
             match self.read_into_rx_frame_buf_from_passt() {
                 Ok(()) => {
-                    // TODO: check for errors
                     if !self.write_frame_to_guest() {
-                        //log::error!("Failed to write frame to guest");
                         self.rx_deferred_frame = true;
                         break;
                     }
                 }
                 Err(e) => {
                     match e {
-                        passt::Error::WouldBlock => (),
+                        passt::ReadError::NothingRead => (),
                         _ => {
                             log::error!("Failed to read from passt: {:?}", e);
                             return Err(DeviceError::PasstError);
@@ -294,12 +291,12 @@ impl Net {
         self.signal_rx_used_queue()
     }
 
-    // Process the deferred frame first, then continue reading from tap.
+    // Process the deferred frame first, then continue reading from passt.
     fn handle_deferred_frame(&mut self) -> result::Result<(), DeviceError> {
         if self.write_frame_to_guest() {
             self.rx_deferred_frame = false;
-            // process_rx() was interrupted possibly before consuming all
-            // packets in the tap; try continuing now.
+            // process_rx() was interrupted possibly before consuming all frames from passt;
+            // try continuing now.
             return self.process_rx();
         }
 
@@ -314,7 +311,6 @@ impl Net {
         }
     }
 
-
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
@@ -322,17 +318,16 @@ impl Net {
             DeviceState::Inactive => unreachable!(),
         };
 
-        let has_unfinished_write = self.passt_has_unfinished_write();
         let mut raise_irq = false;
         let tx_queue = &mut self.queues[TX_INDEX];
+        let mut dropped_frames = 0;
 
-
-        if has_unfinished_write {
-            log::trace!("process_tx: not processing, because passt has an unfinished write");
-            /*while let Some(head) = tx_queue.pop(mem) {
+        if self.passt.has_unfinished_write() && self.passt.try_finish_write(vnet_hdr_len(),&self.tx_frame_buf[..self.tx_frame_len]).is_err() {
+            while let Some(head) = tx_queue.pop(mem) {
                 tx_queue.add_used(mem, head.index, 0);
             }
-            self.signal_used_queue()?;*/
+            self.signal_used_queue()?;
+            log::debug!("process_tx: Dropped {dropped_frames} frames, because of unfinished partial write");
             return Ok(());
         }
 
@@ -388,20 +383,23 @@ impl Net {
             {
                 Ok(()) => mark_used!(),
                 Err(passt::WriteError::NothingWritten) => {
-                    log::trace!("process_tx: nothing written to passt, dropping frame");
-                    tx_queue.add_used(mem, head_index, 0);
-                    while let Some(head) = tx_queue.pop(mem) {
-                        tx_queue.add_used(mem, head.index, 0);
-                    }
-                    break;
-                    //mark_used!();
+                    dropped_frames += 1;
+                    mark_used!();
                 }
                 Err(passt::WriteError::PartialWrite) => {
-                    log::trace!("process_tx: partial write");
-                    // we hold on to the frame, return the descriptor to the guest,
-                    // and stop processing any more frames
+                    log::debug!("process_tx: partial write");
+                    /*
+                    This situation should be pretty rare.
+                    We have written only a part of a frame to the passt socket (the socket is full).
+                    But we cannot wait for passt to process our sending frames, because passt
+                    could be blocked on sending a remainder of a frame to us - us waiting for passt
+                    would cause a deadlock.
+                    We drop the rest of the frames, because we cannot send them now, but the guest,
+                    expects us to process them.
+                     */
                     tx_queue.add_used(mem, head_index, 0);
                     while let Some(head) = tx_queue.pop(mem) {
+                        dropped_frames += 1;
                         tx_queue.add_used(mem, head.index, 0);
                     }
                     raise_irq = true;
@@ -411,6 +409,9 @@ impl Net {
                     log::error!("Failed to write to passt: {:?}", e);
                     return Err(PasstError);
                 }
+            }
+            if dropped_frames > 0 {
+                log::trace!("process_tx: dropped {} frames", dropped_frames);
             }
         }
 
@@ -434,8 +435,7 @@ impl Net {
     }
 
     /// Fills self.rx_frame_buf with an ethernet frame from passt and prepends virtio_net_hdr to it
-    fn read_into_rx_frame_buf_from_passt(&mut self) -> passt::Result<()> {
-        // TODO: consider having less variables inside the struct
+    fn read_into_rx_frame_buf_from_passt(&mut self) -> result::Result<(), passt::ReadError> {
         let mut len = 0;
         len += write_virtio_net_hdr(&mut self.rx_frame_buf);
         len += self.passt.read_frame(&mut self.rx_frame_buf[len..])?;
@@ -447,27 +447,11 @@ impl Net {
         if let Err(e) = self.queue_evts[RX_INDEX].read() {
             log::error!("Failed to get rx event from queue: {:?}", e);
         }
-        self.resume_rx().map_err(|e| {
-            log::error!("Failed to resure rx: {e:?}")
-        });
+        self.resume_rx()
+            .unwrap_or_else(|e| log::error!("Failed to resure rx: {e:?}"));
     }
 
     pub fn process_passt_rx_event(&mut self) {
-        let mem = match self.device_state {
-            DeviceState::Activated(ref mem) => mem,
-            // This should never happen, it's been already validated in the event handler.
-            DeviceState::Inactive => unreachable!(),
-        };
-
-        // While there are no available RX queue buffers and there's a deferred_frame
-        // don't process any more incoming. Otherwise start processing a frame. In the
-        // process the deferred_frame flag will be set in order to avoid freezing the
-        // RX queue.
-        if self.queues[RX_INDEX].is_empty(mem) && self.rx_deferred_frame {
-            log::trace!("Not process: queue is empty and we have a deffered frame!");
-            return;
-        }
-
         if self.rx_deferred_frame {
             self.handle_deferred_frame().unwrap_or_else(|err| {
                 log::error!("Failed to process deferred frame: {err:?}");
