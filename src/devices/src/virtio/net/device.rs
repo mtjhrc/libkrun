@@ -103,7 +103,7 @@ pub struct Net {
 impl Net {
     /// Create a new virtio network device using passt
     pub fn new(id: String, guest_mac: Option<&MacAddr>) -> Result<Self> {
-        // TODO: make configurable
+        // TODO: un-hardcode
         const PASST_SOCK_NAME: &str = "/tmp/passt_1.socket";
 
         let passt = Passt::connect_to_socket(PASST_SOCK_NAME)?;
@@ -389,13 +389,12 @@ impl Net {
                 Err(passt::WriteError::PartialWrite) => {
                     log::debug!("process_tx: partial write");
                     /*
-                    This situation should be pretty rare.
+                    This situation should be pretty rare, assuming reasonably sized socket buffers.
                     We have written only a part of a frame to the passt socket (the socket is full).
                     But we cannot wait for passt to process our sending frames, because passt
                     could be blocked on sending a remainder of a frame to us - us waiting for passt
                     would cause a deadlock.
-                    We drop the rest of the frames, because we cannot send them now, but the guest,
-                    expects us to process them.
+                    The guest, expects us to process the tx_queue, so we drop the rest of the frames.
                      */
                     tx_queue.add_used(mem, head_index, 0);
                     while let Some(head) = tx_queue.pop(mem) {
@@ -486,6 +485,18 @@ impl Net {
 }
 
 impl VirtioDevice for Net {
+    fn avail_features(&self) -> u64 {
+        self.avail_features
+    }
+
+    fn acked_features(&self) -> u64 {
+        self.acked_features
+    }
+
+    fn set_acked_features(&mut self, acked_features: u64) {
+        self.acked_features = acked_features;
+    }
+
     fn device_type(&self) -> u32 {
         TYPE_NET
     }
@@ -510,16 +521,8 @@ impl VirtioDevice for Net {
         self.interrupt_status.clone()
     }
 
-    fn avail_features(&self) -> u64 {
-        self.avail_features
-    }
-
-    fn acked_features(&self) -> u64 {
-        self.acked_features
-    }
-
-    fn set_acked_features(&mut self, acked_features: u64) {
-        self.acked_features = acked_features;
+    fn set_irq_line(&mut self, irq: u32) {
+        self.irq_line = Some(irq);
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
@@ -553,13 +556,6 @@ impl VirtioDevice for Net {
         ));
     }
 
-    fn is_activated(&self) -> bool {
-        match self.device_state {
-            DeviceState::Inactive => false,
-            DeviceState::Activated(_) => true,
-        }
-    }
-
     fn activate(&mut self, mem: GuestMemoryMmap) -> ActivateResult {
         if self.activate_evt.write(1).is_err() {
             log::error!("Net: Cannot write to activate_evt");
@@ -569,7 +565,10 @@ impl VirtioDevice for Net {
         Ok(())
     }
 
-    fn set_irq_line(&mut self, irq: u32) {
-        self.irq_line = Some(irq);
+    fn is_activated(&self) -> bool {
+        match self.device_state {
+            DeviceState::Inactive => false,
+            DeviceState::Activated(_) => true,
+        }
     }
 }

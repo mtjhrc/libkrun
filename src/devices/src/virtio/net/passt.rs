@@ -2,7 +2,6 @@ use nix::sys::socket::{
     connect, recv, send, setsockopt, socket, sockopt, AddressFamily, MsgFlags, SockFlag, SockType,
     UnixAddr,
 };
-use std::io::Read;
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
