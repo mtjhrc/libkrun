@@ -39,8 +39,6 @@ pub enum ReadError {
 
 pub struct Passt {
     passt_sock: RawFd,
-    // 0 when a frame length has not been read
-    expecting_frame_length: u32,
     last_partial_write_length: Option<NonZeroUsize>,
 }
 
@@ -58,28 +56,23 @@ impl Passt {
         let addr = UnixAddr::new(socket_path.as_ref()).map_err(ConnectError::FailedToConnect)?;
 
         connect(sock, &addr).map_err(ConnectError::FailedToConnect)?;
-        setsockopt(sock, sockopt::SndBuf, &(16*1024*1024)).unwrap();
+        setsockopt(sock, sockopt::SndBuf, &(16 * 1024 * 1024)).unwrap();
 
         Ok(Self {
             passt_sock: sock,
-            expecting_frame_length: 0,
             last_partial_write_length: None,
         })
     }
 
     /// Try to read a frame from passt. If no bytes are available reports PasstError::WouldBlock
     pub fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
-        if self.expecting_frame_length == 0 {
-            self.expecting_frame_length = {
-                let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
-                self.read_loop(&mut frame_length_buf, false)?;
-                u32::from_be_bytes(frame_length_buf)
-            };
-        }
+        let frame_length = {
+            let mut frame_length_buf = [0u8; PASST_HEADER_LEN];
+            self.read_loop(&mut frame_length_buf, false)?;
+            u32::from_be_bytes(frame_length_buf) as usize
+        };
 
-        let frame_length = self.expecting_frame_length as usize;
         self.read_loop(&mut buf[..frame_length], true)?;
-        self.expecting_frame_length = 0;
         Ok(frame_length)
     }
 
