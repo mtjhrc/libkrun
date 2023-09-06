@@ -58,7 +58,7 @@ impl Passt {
         let addr = UnixAddr::new(socket_path.as_ref()).map_err(ConnectError::FailedToConnect)?;
 
         connect(sock, &addr).map_err(ConnectError::FailedToConnect)?;
-        //setsockopt(sock, sockopt::SndBuf, &(64*1024*1024)).unwrap();
+        setsockopt(sock, sockopt::SndBuf, &(16*1024*1024)).unwrap();
 
         Ok(Self {
             passt_sock: sock,
