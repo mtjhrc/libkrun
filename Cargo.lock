@@ -197,6 +197,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "hvf",
+ "lazy_static",
  "libc",
  "log",
  "lru",

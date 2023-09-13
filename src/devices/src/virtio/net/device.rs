@@ -275,7 +275,7 @@ impl Net {
                 }
                 Err(e) => {
                     match e {
-                        passt::ReadError::NothingRead => (),
+                        passt::ReadError::NotAvailibleYet => (),
                         _ => {
                             log::error!("Failed to read from passt: {:?}", e);
                             return Err(DeviceError::PasstError);
@@ -437,7 +437,11 @@ impl Net {
     fn read_into_rx_frame_buf_from_passt(&mut self) -> result::Result<(), passt::ReadError> {
         let mut len = 0;
         len += write_virtio_net_hdr(&mut self.rx_frame_buf);
-        len += self.passt.read_frame(&mut self.rx_frame_buf[len..])?;
+        // TODO: remove this copying here
+        let passt_frame = self.passt.read_frame()?;
+        self.rx_frame_buf[len..len+passt_frame.len()].copy_from_slice(passt_frame);
+        println!("writing into rx buf {} bytes, {:x?}", passt_frame.len(), passt_frame);
+
         self.rx_bytes_read = len;
         Ok(())
     }

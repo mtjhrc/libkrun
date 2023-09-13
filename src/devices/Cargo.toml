@@ -27,3 +27,6 @@ virtio-bindings = "0.2.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 hvf = { path = "../hvf" }
 lru = ">=0.9"
+
+[dev-dependencies]
+lazy_static = "1.4.0"
