@@ -72,6 +72,8 @@ impl<T: Default + Copy, const N:usize> DefaultArray for [T;N] {
     }
 }*/
 
+const VNET_HEADER_LEN: usize = 12;
+
 fn default_array<T: Default + Copy, const N: usize>() -> [T; N] {
     [Default::default(); N]
 }
@@ -96,13 +98,13 @@ impl Passt {
             passt_sock: sock,
             read_buf: default_array(),
             read_buf_return_range: None, // range into current range
-            read_current_range: 0..0,    // start of current range always points to the passt header
+            read_current_range: VNET_HEADER_LEN..VNET_HEADER_LEN,    // start of current range always points to the passt header
             last_partial_write_length: None,
         })
     }
 
     /// Try to read a frame from passt. If a frame is not available reports ReadError::WouldBlock
-    pub fn read_frame(&mut self) -> Result<&[u8], ReadError> {
+    pub fn read_frame(&mut self) -> Result<&mut [u8], ReadError> {
         log::trace!("read frame");
         match self.advance_read() {
             Ok(()) => (),
@@ -114,13 +116,13 @@ impl Passt {
         }
         log::trace!("after advance");
 
-        self.last_read_frame().ok_or(ReadError::NotAvailibleYet)
+        self.last_read_frame_mut().ok_or(ReadError::NotAvailibleYet)
     }
 
-    pub fn last_read_frame(&self) -> Option<&[u8]> {
+    pub fn last_read_frame_mut(&mut self) -> Option<&mut [u8]> {
         self.read_buf_return_range
             .clone()
-            .map(|range| &self.read_buf[range])
+            .map(|range| &mut self.read_buf[range])
     }
 
     /// Try to write a frame to passt.
@@ -215,8 +217,8 @@ impl Passt {
         // first lets shift the current contents of the buffer to the left,
         // so we can read as much as possible
         self.read_buf
-            .copy_within(self.read_current_range.clone(), 0);
-        self.read_current_range = 0..self.read_current_range.len();
+            .copy_within(self.read_current_range.clone(), VNET_HEADER_LEN);
+        self.read_current_range = VNET_HEADER_LEN..VNET_HEADER_LEN+self.read_current_range.len();
 
         match recv(
             self.passt_sock,
@@ -248,20 +250,31 @@ impl Passt {
                 .map(|array_of_4_bytes| u32::from_be_bytes(array_of_4_bytes) as usize))
     }
 
-    fn set_return_frame_and_advance_if_valid(&mut self, new_range: Range<usize>) -> bool {
-        if self.read_current_range.contains_range(&new_range) {
-            let normalized_range = self.read_current_range.start + new_range.start
-                ..self.read_current_range.start + new_range.start + new_range.len();
+    fn try_return_frame_of_length(&mut self, frame_length: usize) -> bool {
+        //TODO: rewrite this whole horrible function!
+
+        //let new_range = VNET_HEADER_LEN+PASST_HEADER_LEN..VNET_HEADER_LEN+frame_length + PASST_HEADER_LEN;
+
+        // if the frame is contained within the buffer
+        if self.current_read_slice().len()-PASST_HEADER_LEN >= frame_length {
+            /*let return_range = self.read_current_range.start - VNET_HEADER_LEN
+                ..self.read_current_range.start + frame_length;
+            */
+
+            let return_range = self.read_current_range.start+PASST_HEADER_LEN-VNET_HEADER_LEN
+                ..self.read_current_range.start + PASST_HEADER_LEN + frame_length;
+
             log::trace!(
-                "current:{:?} new_range:{:?} return normalized:{:?}",
+                "current:{:?} frame_length:{:?} return range:{:?}",
                 self.read_current_range,
-                new_range,
-                normalized_range
+                frame_length,
+                return_range
             );
-            self.read_buf_return_range = Some(normalized_range);
-            self.read_current_range.start += new_range.len() + PASST_HEADER_LEN;
+            self.read_buf_return_range = Some(return_range);
+            self.read_current_range.start += PASST_HEADER_LEN + frame_length;
             true
         } else {
+            log::trace!("cannot return frame of length: {frame_length}");
             false
         }
     }
@@ -279,8 +292,8 @@ impl Passt {
 
         assert_ne!(frame_length, 0);
 
-        if self.set_return_frame_and_advance_if_valid(
-            PASST_HEADER_LEN..frame_length + PASST_HEADER_LEN,
+        if self.try_return_frame_of_length(
+            frame_length
         ) {
             Ok(())
         } else if !performed_read {
@@ -288,8 +301,8 @@ impl Passt {
             // so let's try to read
             self.read_fill_buf()?;
 
-            if self.set_return_frame_and_advance_if_valid(
-                PASST_HEADER_LEN..frame_length + PASST_HEADER_LEN,
+            if self.try_return_frame_of_length(
+                frame_length,
             ) {
                 Ok(())
             } else {
@@ -417,7 +430,7 @@ mod tests {
             Ok(RESULT_LENGTH+PASST_HEADER_LEN)
         });
 
-        assert_eq!(passt.read_frame(), Ok(&RESULT_ARRAY[..]));
+        assert_eq!(passt.read_frame(), Ok(&mut RESULT_ARRAY[..]));
         assert_eq!(passt.read_buf_return_range, Some(4..14));
         assert_eq!(passt.read_current_range, 14..14);
     }
@@ -438,7 +451,7 @@ mod tests {
             write_to_buf(buf, concat_bytes!((RESULT_LENGTH as u32).to_be_bytes(), RESULT_ARRAY))
         });
 
-        assert_eq!(passt.read_frame(), Ok(&RESULT_ARRAY[..]));
+        assert_eq!(passt.read_frame(), Ok(&mut RESULT_ARRAY[..]));
         assert_eq!(passt.read_buf_return_range, Some(4..14));
         assert_eq!(passt.read_current_range, 14..14);
     }
@@ -470,37 +483,8 @@ mod tests {
              write_to_buf(buf, RESULT_ARRAY_PART2)
         });
 
-        assert_eq!(passt.read_frame(), Ok(&RESULT_COMBINED[..]));
+        assert_eq!(passt.read_frame(), Ok(&mut RESULT_COMBINED[..]));
         assert_eq!(passt.read_buf_return_range, Some(4..14));
         assert_eq!(passt.read_current_range, 14..14);
     }
-    /*
-    #[test]
-    fn read_a_remainder_of_a_frame() {
-        const RESULT_LENGTH: usize = 10;
-        const RESULT_ARRAY: [u8; RESULT_LENGTH] = [0xffu8; RESULT_LENGTH];
-
-        let mut passt = Passt {
-            passt_sock: 0,
-            last_partial_write_length: None,
-            read_buf: default_array(),
-            read_buf_return_range: None,
-            read_current_range: 9..14,
-        };
-
-        mock_recv!((_fd, buf, _flags), {
-            buf[..RESULT_LENGTH + PASST_HEADER_LEN].copy_from_slice(
-                concat_arrays!(&[u8]: (RESULT_LENGTH as u32).to_be_bytes(), RESULT_ARRAY),
-            );
-            Ok(RESULT_LENGTH+PASST_HEADER_LEN)
-        });
-
-        assert_eq!(passt.read_frame(), Ok(&RESULT_ARRAY[..]));
-        assert_eq!(passt.read_buf_return_range, Some(4..14));
-        assert_eq!(passt.read_current_range, 14..14);
-    }*/
-
-    //#[test]
-    // read returns multiple frames
-    //fn read_when_recv_returns_multiple_frames() {
 }

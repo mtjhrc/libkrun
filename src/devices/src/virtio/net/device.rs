@@ -79,8 +79,8 @@ pub struct Net {
 
     rx_required_irq: bool,
 
-    rx_bytes_read: usize,
-    rx_frame_buf: [u8; MAX_BUFFER_SIZE],
+    //rx_bytes_read: usize,
+    //rx_frame_buf: [u8; MAX_BUFFER_SIZE],
     rx_deferred_frame: bool,
 
     tx_iovec: Vec<(GuestAddress, usize)>,
@@ -139,8 +139,6 @@ impl Net {
             queues,
             queue_evts,
             rx_required_irq: false,
-            rx_bytes_read: 0,
-            rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_len: 0,
             rx_deferred_frame: false,
@@ -202,7 +200,7 @@ impl Net {
         let head_descriptor = queue.pop(mem).ok_or_else(|| FrontendError::EmptyQueue)?;
         let head_index = head_descriptor.index;
 
-        let mut frame_slice = &self.rx_frame_buf[..self.rx_bytes_read];
+        let mut frame_slice = &*self.passt.last_read_frame_mut().unwrap();
 
         let frame_len = frame_slice.len();
         let mut maybe_next_descriptor = Some(head_descriptor);
@@ -267,7 +265,9 @@ impl Net {
         // Read as many frames as possible.
         loop {
             match self.read_into_rx_frame_buf_from_passt() {
-                Ok(()) => {
+                Ok(_) => {
+                    //TODO: is there a better way to work around borrow chchecker here?
+                    //let frame = self.passt.last_read_frame_mut().unwrap();
                     if !self.write_frame_to_guest() {
                         self.rx_deferred_frame = true;
                         break;
@@ -293,6 +293,8 @@ impl Net {
 
     // Process the deferred frame first, then continue reading from passt.
     fn handle_deferred_frame(&mut self) -> result::Result<(), DeviceError> {
+        //let frame = &*self.passt.last_read_frame_mut()
+        //    .expect("Failed invariant: cannot handle deferred frame, when the frame is not within passt reader anymore");
         if self.write_frame_to_guest() {
             self.rx_deferred_frame = false;
             // process_rx() was interrupted possibly before consuming all frames from passt;
@@ -434,17 +436,19 @@ impl Net {
     }
 
     /// Fills self.rx_frame_buf with an ethernet frame from passt and prepends virtio_net_hdr to it
-    fn read_into_rx_frame_buf_from_passt(&mut self) -> result::Result<(), passt::ReadError> {
-        let mut len = 0;
-        len += write_virtio_net_hdr(&mut self.rx_frame_buf);
+    fn read_into_rx_frame_buf_from_passt<'a>(&'a mut self) -> result::Result<&'a mut [u8], passt::ReadError> {
+        //let mut len = 0;
+        //len += write_virtio_net_hdr(&mut self.rx_frame_buf);
         // TODO: remove this copying here
-        let passt_frame = self.passt.read_frame()?;
-        self.rx_frame_buf[len..len+passt_frame.len()].copy_from_slice(passt_frame);
-        //println!("writing into rx buf {} bytes, {:x?}", passt_frame.len(), passt_frame);
-        len+=passt_frame.len();
 
-        self.rx_bytes_read = len;
-        Ok(())
+        //self.rx_frame_buf[len..len+passt_frame.len()].copy_from_slice(passt_frame);
+        //println!("writing into rx buf {} bytes, {:x?}", passt_frame.len(), passt_frame);
+        //len+=passt_frame.len();
+
+        let passt_frame = self.passt.read_frame()?;
+        let vnet_hdr_wrote = write_virtio_net_hdr(passt_frame);
+        assert_eq!(vnet_hdr_wrote, 12);
+        Ok(passt_frame)
     }
 
     pub fn process_rx_queue_event(&mut self) {
