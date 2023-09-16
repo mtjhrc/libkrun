@@ -108,9 +108,11 @@ impl Passt {
             Ok(()) => (),
             Err(e) => {
                 self.read_buf_return_range = None;
+                log::trace!("advance_read: {e:?}");
                 return Err(e);
             }
         }
+        log::trace!("after advance");
 
         self.last_read_frame().ok_or(ReadError::NotAvailibleYet)
     }
@@ -237,13 +239,13 @@ impl Passt {
     }
 
     fn get_len_header_at(&self, index: usize) -> Option<usize> {
-        dbg!(self
+        self
             .current_read_slice()
             .get(index..index + PASST_HEADER_LEN)
             .and_then(|buf| buf
                 .try_into()
                 .ok()
-                .map(|array_of_4_bytes| u32::from_be_bytes(array_of_4_bytes) as usize)))
+                .map(|array_of_4_bytes| u32::from_be_bytes(array_of_4_bytes) as usize))
     }
 
     fn set_return_frame_and_advance_if_valid(&mut self, new_range: Range<usize>) -> bool {

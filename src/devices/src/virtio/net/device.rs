@@ -440,7 +440,8 @@ impl Net {
         // TODO: remove this copying here
         let passt_frame = self.passt.read_frame()?;
         self.rx_frame_buf[len..len+passt_frame.len()].copy_from_slice(passt_frame);
-        println!("writing into rx buf {} bytes, {:x?}", passt_frame.len(), passt_frame);
+        //println!("writing into rx buf {} bytes, {:x?}", passt_frame.len(), passt_frame);
+        len+=passt_frame.len();
 
         self.rx_bytes_read = len;
         Ok(())
