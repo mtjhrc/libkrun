@@ -1,7 +1,9 @@
+use std::cmp::{max, min};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::time::Duration;
 
 #[cfg(not(test))]
 use nix::sys::socket::recv;
@@ -53,11 +55,14 @@ impl<T: PartialOrd> RangeUtil<T> for Range<T> {
     }
 }
 
+const PASST_MAX_MTU: usize = 65520;
+const RESERVED_AT_START: usize = 8;
+
 pub struct Passt {
     passt_sock: RawFd,
     last_partial_write_length: Option<NonZeroUsize>,
 
-    read_buf: [u8; 3 * MAX_BUFFER_SIZE],
+    read_buf: [u8; RESERVED_AT_START+PASST_MAX_MTU+PASST_HEADER_LEN+PASST_MAX_MTU],
     read_buf_return_range: Option<Range<usize>>, // range into current range
     read_current_range: Range<usize>,
 }
@@ -98,7 +103,7 @@ impl Passt {
             passt_sock: sock,
             read_buf: default_array(),
             read_buf_return_range: None, // range into current range
-            read_current_range: VNET_HEADER_LEN..VNET_HEADER_LEN,    // start of current range always points to the passt header
+            read_current_range: Self::size_reserved_for_header()..Self::size_reserved_for_header(),    // start of current range always points to the passt header
             last_partial_write_length: None,
         })
     }
@@ -213,12 +218,18 @@ impl Passt {
         Ok(())
     }
 
+    fn size_reserved_for_header() -> usize {
+        max(PASST_HEADER_LEN.abs_diff(VNET_HEADER_LEN), min(PASST_HEADER_LEN, VNET_HEADER_LEN))
+    }
+
     fn read_fill_buf(&mut self) -> Result<(), ReadError> {
         // first lets shift the current contents of the buffer to the left,
         // so we can read as much as possible
+        log::warn!("have {} bytes, read_current_range:{:?}", self.read_current_range.len(), self.read_current_range);
         self.read_buf
-            .copy_within(self.read_current_range.clone(), VNET_HEADER_LEN);
-        self.read_current_range = VNET_HEADER_LEN..VNET_HEADER_LEN+self.read_current_range.len();
+            .copy_within(self.read_current_range.clone(), Self::size_reserved_for_header());
+        self.read_current_range = Self::size_reserved_for_header()..Self::size_reserved_for_header()+self.read_current_range.len();
+        log::warn!("shifted: {} bytes, read_current_range:{:?}", self.read_current_range.len(), self.read_current_range);
 
         match recv(
             self.passt_sock,
