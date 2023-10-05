@@ -312,7 +312,6 @@ impl Net {
                 Err(passt::WriteError::NothingWritten) => {
                     //tx_queue.undo_pop();
                     self.tx_frame_len = 0;
-                    //dropped_frames += 1;
                     tx_queue.undo_pop();
                     break;
                 }
@@ -328,7 +327,7 @@ impl Net {
                     would cause a deadlock.
                     The guest, expects us to process the tx_queue, so we drop the rest of the frames.
                      */
-                    dropped_frames += drop_rest_of_frames(tx_queue);
+                    // dropped_frames += drop_rest_of_frames(tx_queue);
                     break;
                 }
 
