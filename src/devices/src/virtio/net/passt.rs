@@ -1,4 +1,4 @@
-use nix::sys::socket::{recv, send, setsockopt, sockopt, MsgFlags};
+use nix::sys::socket::{recv, send, setsockopt, sockopt, MsgFlags, getsockopt};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, RawFd};
 use vm_memory::VolatileMemory;
@@ -41,6 +41,9 @@ impl Passt {
             log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
         }
 
+        log::trace!("passt socket snd buf is {:?}", getsockopt(passt_fd, sockopt::SndBuf));
+
+
         Self {
             fd: passt_fd,
             expecting_frame_length: 0,
@@ -61,7 +64,7 @@ impl Passt {
         let frame_length = self.expecting_frame_length as usize;
         self.read_loop(&mut buf[..frame_length], false)?;
         self.expecting_frame_length = 0;
-        log::trace!("Read eth frame from passt: {} bytes", frame_length);
+        //log::trace!("Read eth frame from passt: {} bytes", frame_length);
         Ok(frame_length)
     }
 

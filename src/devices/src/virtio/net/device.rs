@@ -172,7 +172,12 @@ impl Net {
             .passt
             .try_finish_write(vnet_hdr_len(), &self.tx_frame_buf[..self.tx_frame_len])
         {
-            Ok(()) | Err(passt::WriteError::PartialWrite | passt::WriteError::NothingWritten) => (),
+            Ok(()) => {
+                if let Err(e) = self.process_tx() {
+                    log::error!("Failed to continue processing tx after passt socket was writable again: {e:?}");
+                }
+            }
+            Err(passt::WriteError::PartialWrite | passt::WriteError::NothingWritten) => (),
             Err(e @ passt::WriteError::Internal(_)) => {
                 log::error!("Failed to finish write: {e:?}");
             }
@@ -292,8 +297,7 @@ impl Net {
                 }
             }
 
-            tx_queue.add_used(mem, head_index, 0);
-            raise_irq = true;
+
 
             self.tx_frame_len = read_count;
             match self
@@ -302,14 +306,20 @@ impl Net {
             {
                 Ok(()) => {
                     self.tx_frame_len = 0;
+                    tx_queue.add_used(mem, head_index, 0);
+                    raise_irq = true;
                 }
                 Err(passt::WriteError::NothingWritten) => {
+                    //tx_queue.undo_pop();
                     self.tx_frame_len = 0;
-                    dropped_frames += drop_rest_of_frames(tx_queue);
+                    //dropped_frames += 1;
+                    tx_queue.undo_pop();
                     break;
                 }
                 Err(passt::WriteError::PartialWrite) => {
                     log::trace!("process_tx: partial write");
+                    tx_queue.add_used(mem, head_index, 0);
+                    raise_irq = true;
                     /*
                     This situation should be pretty rare, assuming reasonably sized socket buffers.
                     We have written only a part of a frame to the passt socket (the socket is full).
