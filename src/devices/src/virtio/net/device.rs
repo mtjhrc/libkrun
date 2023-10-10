@@ -247,15 +247,14 @@ impl Net {
             dropped_frames
         };
 
-        if self.passt.has_unfinished_write()
-            && self
-                .passt
+        if self.passt
                 .try_finish_write(vnet_hdr_len(), &self.tx_frame_buf[..self.tx_frame_len])
                 .is_err()
         {
-            let dropped_frames = drop_rest_of_frames(tx_queue);
-            log::trace!("Dropped {dropped_frames} frames, due to unfinished partial write");
-            self.signal_used_queue().map_err(TxError::DeviceError)?;
+            log::trace!("Cannot process tx because of unfinised partial write!");
+            //let dropped_frames = drop_rest_of_frames(tx_queue);
+            //log::trace!("Dropped {dropped_frames} frames, due to unfinished partial write");
+            //self.signal_used_queue().map_err(TxError::DeviceError)?;
             return Ok(());
         }
 
