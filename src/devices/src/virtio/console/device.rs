@@ -2,6 +2,7 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::io;
 use std::io::Write;
+use std::mem::size_of;
 use std::ops::DerefMut;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
@@ -10,21 +11,30 @@ use std::sync::{Arc, Mutex};
 
 use libc::TIOCGWINSZ;
 use utils::eventfd::EventFd;
-use vm_memory::{ByteValued, Bytes, GuestMemoryMmap};
+use vm_memory::{ByteValued, Bytes, GuestMemoryMmap, VolatileMemory};
 
 use super::super::super::legacy::ReadableFd;
 use super::super::{
     ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
     VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING,
 };
-use super::{defs, defs::uapi};
+use super::{defs, defs::control_event, defs::uapi};
 use crate::legacy::Gic;
+use crate::virtio::console::defs::control_event::{
+    VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD,
+};
+use crate::virtio::console::defs::NUM_PORTS;
 use crate::Error as DeviceError;
 
 pub(crate) const RXQ_INDEX: usize = 0;
 pub(crate) const TXQ_INDEX: usize = 1;
-pub(crate) const AVAIL_FEATURES: u64 =
-    1 << uapi::VIRTIO_CONSOLE_F_SIZE as u64 | 1 << uapi::VIRTIO_F_VERSION_1 as u64;
+
+pub(crate) const CONTROL_RXQ_INDEX: usize = 2;
+pub(crate) const CONTROL_TXQ_INDEX: usize = 3;
+
+pub(crate) const AVAIL_FEATURES: u64 = 1 << uapi::VIRTIO_CONSOLE_F_SIZE as u64
+    | 1 << uapi::VIRTIO_CONSOLE_F_MULTIPORT as u64
+    | 1 << uapi::VIRTIO_F_VERSION_1 as u64;
 
 pub(crate) fn get_win_size() -> (u16, u16) {
     #[repr(C)]
@@ -56,12 +66,27 @@ pub struct VirtioConsoleConfig {
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioConsoleConfig {}
 
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(C, packed(4))]
+pub struct VirtioConsoleControl {
+    /// Port number
+    id: u32,
+    /// The kind of control event
+    event: u16,
+    /// Extra information for the event
+    value: u16,
+}
+
+// Safe because it only has data and has no implicit padding.
+// but NOTE, that we rely on CPU being little endian, for the values to be correct
+unsafe impl ByteValued for VirtioConsoleControl {}
+
 impl VirtioConsoleConfig {
     pub fn new(cols: u16, rows: u16) -> Self {
         VirtioConsoleConfig {
             cols,
             rows,
-            max_nr_ports: 1u32,
+            max_nr_ports: NUM_PORTS as u32,
             emerg_wr: 0u32,
         }
     }
@@ -72,9 +97,17 @@ impl VirtioConsoleConfig {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PortStatus {
+    NotReady,
+    Ready { opened: bool },
+}
+
 pub struct Console {
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
+    port_statuses: Vec<PortStatus>,
+    pub(crate) cmd_queue: VecDeque<VirtioConsoleControl>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) interrupt_status: Arc<AtomicUsize>,
@@ -110,6 +143,8 @@ impl Console {
         Ok(Console {
             queues,
             queue_events,
+            port_statuses: vec![PortStatus::NotReady; NUM_PORTS],
+            cmd_queue: Default::default(),
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
             interrupt_status: Arc::new(AtomicUsize::new(0)),
@@ -189,6 +224,120 @@ impl Console {
         debug!("update_console_size: {} {}", cols, rows);
         self.config.update_console_size(cols, rows);
         self.signal_config_update().unwrap();
+    }
+
+    pub(crate) fn process_control_rx(&mut self) -> bool {
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+        let queue = &mut self.queues[CONTROL_RXQ_INDEX];
+        let mut used_any = false;
+
+        while let Some(cmd) = self.cmd_queue.front() {
+            if let Some(head) = queue.pop(mem) {
+                if let Err(e) = mem.write_slice(cmd.as_slice(), head.addr) {
+                    log::error!("Failed to write VirtioConsoleControl cmd: {}", e);
+                    continue;
+                }
+                used_any = true;
+                queue.add_used(mem, head.index, head.len);
+                log::error!("Wrote {cmd:?} to guest");
+                self.cmd_queue.pop_front();
+            } else {
+                log::error!("Failed to write {cmd:?} to guest");
+            }
+        }
+
+        used_any
+    }
+
+    pub(crate) fn process_control_tx(&mut self) -> bool {
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+        let queue = &mut self.queues[CONTROL_TXQ_INDEX];
+        let mut used_any = false;
+
+        while let Some(head) = queue.pop(mem) {
+            let mut cmd = VirtioConsoleControl::default();
+            used_any = true;
+            let read_result = mem.read_slice(cmd.as_mut_slice(), head.addr);
+            queue.add_used(mem, head.index, head.len);
+
+            if let Err(e) = read_result {
+                log::error!(
+                    "Failed to read VirtioConsoleControl struct: {}, struct len = {}, head.len = {}",
+                    e,
+                    size_of::<VirtioConsoleControl>(),
+                    head.len,
+                );
+                continue;
+            }
+
+            log::trace!("VirtioConsoleControl cmd: {cmd:?}");
+            match cmd.event {
+                control_event::VIRTIO_CONSOLE_DEVICE_READY => {
+                    log::debug!(
+                        "Device is ready: initialization {}",
+                        if cmd.value == 1 { "ok" } else { "failed" }
+                    );
+                    self.cmd_queue.push_back(VirtioConsoleControl {
+                        id: 0,
+                        event: VIRTIO_CONSOLE_PORT_ADD,
+                        value: 1,
+                    });
+                }
+                control_event::VIRTIO_CONSOLE_PORT_READY => {
+                    if cmd.value != 1 {
+                        log::error!("Port initialization failed: {:?}", cmd);
+                        continue;
+                    }
+                    self.port_statuses[cmd.id as usize] = PortStatus::Ready { opened: false };
+                    if cmd.id == 0 {
+                        //TODO: unhardcode console port
+                        self.cmd_queue.push_back(VirtioConsoleControl {
+                            id: 0,
+                            event: VIRTIO_CONSOLE_CONSOLE_PORT,
+                            value: 1,
+                        });
+                    }
+                }
+                control_event::VIRTIO_CONSOLE_PORT_OPEN => {
+                    let opened = match cmd.value {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            log::error!(
+                                "Invalid value ({}) for VIRTIO_CONSOLE_PORT_OPEN on port {}",
+                                cmd.value,
+                                cmd.id
+                            );
+                            continue;
+                        }
+                    };
+
+                    if self.port_statuses[cmd.id as usize] == PortStatus::NotReady {
+                        log::warn!("Driver signaled opened={} to port {} that was not ready, assuming the port is ready.",opened, cmd.id)
+                    }
+                    self.port_statuses[cmd.id as usize] = PortStatus::Ready { opened };
+                }
+                _ => log::warn!("Unknown console control event {:x}", cmd.event),
+            }
+        }
+
+        if !self.cmd_queue.is_empty() {
+            let control_processed = self.process_control_rx();
+            if !control_processed {
+                log::trace!("process_control_rx doesn't need interupt?");
+            }
+            used_any |= control_processed;
+        }
+
+        used_any
     }
 
     pub(crate) fn process_rx(&mut self) -> bool {

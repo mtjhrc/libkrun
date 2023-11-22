@@ -95,10 +95,13 @@ impl MmioTransport {
     }
 
     fn are_queues_valid(&self) -> bool {
-        self.locked_device()
+
+        let valid = self.locked_device()
             .queues()
             .iter()
-            .all(|q| q.is_valid(&self.mem))
+            .all(|q| q.is_valid(&self.mem));
+        log::trace!("Device {} valid={}", self.locked_device().device_type(), valid);
+        valid
     }
 
     fn with_queue<U, F>(&self, d: U, f: F) -> U
