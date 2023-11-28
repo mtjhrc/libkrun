@@ -1,9 +1,10 @@
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 
-use crate::virtio::console::device::{CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX};
+use crate::virtio::console::device::{VirtioConsoleControl, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX, PortStatus};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
+use crate::virtio::console::defs::control_event::VIRTIO_CONSOLE_PORT_OPEN;
 
 use super::device::{get_win_size, Console, RXQ_INDEX, TXQ_INDEX};
 use crate::virtio::device::VirtioDevice;
@@ -26,28 +27,50 @@ impl Console {
         true
     }
 
-    pub(crate) fn handle_input(&mut self, event: &EpollEvent) {
-        debug!("console: input event");
+    fn push_control_cmd(&mut self, cmd: VirtioConsoleControl) {
+        self.cmd_queue.push_back(cmd);
+        if self.process_control_rx() {
+            self.signal_used_queue().unwrap();
+        }
+    }
 
+    pub(crate) fn handle_input(&mut self, event: &EpollEvent) {
+      //  debug!("console: input event");
         let event_set = event.event_set();
-        match event_set {
-            EventSet::HANG_UP => {
-                log::trace!("Input hang up not implemented");
-                //process::exit(0)
+
+        match self.port_statuses[0] {
+            PortStatus::NotReady => {
+                log::trace!("Is this even a valid/reachable state?")
             }
-            EventSet::IN => {}
-            _ => {
-                warn!("console: input unexpected event {:?}", event_set);
-                return;
+            PortStatus::Ready { opened: true } => {
+                if event_set.contains(EventSet::IN) {
+                    let mut out = [0u8; 64];
+                    let count = self.input.read(&mut out).unwrap();
+                    self.in_buffer.extend(&out[..count]);
+
+                    if self.process_rx() {
+                        self.signal_used_queue().unwrap();
+                    }
+                }
+
+                if event_set.contains(EventSet::HANG_UP) {
+                    self.port_statuses[0] = PortStatus::Ready { opened: false };
+                    self.push_control_cmd(VirtioConsoleControl {
+                        id: 0,
+                        event: VIRTIO_CONSOLE_PORT_OPEN,
+                        value: 0,
+                    })
+                }
+            }
+            PortStatus::Ready { opened: false } => {
+                // We don't have to do anything here I assume
             }
         }
 
-        let mut out = [0u8; 64];
-        let count = self.input.read(&mut out).unwrap();
-        self.in_buffer.extend(&out[..count]);
 
-        if self.process_rx() {
-            self.signal_used_queue().unwrap();
+        if !event_set.difference(EventSet::IN | EventSet::HANG_UP).is_empty() {
+            warn!("console: input unexpected event {:?}", event_set);
+            return;
         }
     }
 
@@ -169,3 +192,4 @@ impl Subscriber for Console {
         }
     }
 }
+

@@ -70,11 +70,11 @@ unsafe impl ByteValued for VirtioConsoleConfig {}
 #[repr(C, packed(4))]
 pub struct VirtioConsoleControl {
     /// Port number
-    id: u32,
+    pub(crate) id: u32,
     /// The kind of control event
-    event: u16,
+    pub(crate) event: u16,
     /// Extra information for the event
-    value: u16,
+    pub(crate) value: u16,
 }
 
 // Safe because it only has data and has no implicit padding.
@@ -98,7 +98,7 @@ impl VirtioConsoleConfig {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-enum PortStatus {
+pub(crate) enum PortStatus {
     NotReady,
     Ready { opened: bool },
 }
@@ -106,7 +106,7 @@ enum PortStatus {
 pub struct Console {
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
-    port_statuses: Vec<PortStatus>,
+    pub(crate) port_statuses: Vec<PortStatus>,
     pub(crate) cmd_queue: VecDeque<VirtioConsoleControl>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -278,7 +278,7 @@ impl Console {
                 continue;
             }
 
-            log::trace!("VirtioConsoleControl cmd: {cmd:?}");
+            log::trace!("Read VirtioConsoleControl: {cmd:?}");
             match cmd.event {
                 control_event::VIRTIO_CONSOLE_DEVICE_READY => {
                     log::debug!(
