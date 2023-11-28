@@ -21,7 +21,7 @@ use devices::legacy::Serial;
 use devices::virtio::Net;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::VirtioShmRegion;
-use devices::virtio::{MmioTransport, Vsock};
+use devices::virtio::{MmioTransport, PortDescription, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -1086,8 +1086,13 @@ fn attach_console_devices(
     use self::StartMicrovmError::*;
 
     let console = Arc::new(Mutex::new(
-        devices::virtio::Console::new(Box::new(SerialStdin::get()), Box::new(io::stdout()))
-            .unwrap(),
+        devices::virtio::Console::new(vec![
+            PortDescription {
+                console: true,
+                input: Some(Box::new(SerialStdin::get())),
+                output: Some(Box::new(io::stdout())),
+            },
+        ]).unwrap(),
     ));
 
     if let Some(intc) = intc {

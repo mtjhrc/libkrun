@@ -1,9 +1,8 @@
 use std::cmp;
 use std::collections::VecDeque;
 use std::io;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::mem::size_of;
-use std::ops::DerefMut;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +22,6 @@ use crate::legacy::Gic;
 use crate::virtio::console::defs::control_event::{
     VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD,
 };
-use crate::virtio::console::defs::NUM_PORTS;
 use crate::Error as DeviceError;
 
 pub(crate) const RXQ_INDEX: usize = 0;
@@ -82,11 +80,11 @@ pub struct VirtioConsoleControl {
 unsafe impl ByteValued for VirtioConsoleControl {}
 
 impl VirtioConsoleConfig {
-    pub fn new(cols: u16, rows: u16) -> Self {
+    pub fn new(cols: u16, rows: u16, max_nr_ports: u32) -> Self {
         VirtioConsoleConfig {
             cols,
             rows,
-            max_nr_ports: NUM_PORTS as u32,
+            max_nr_ports,
             emerg_wr: 0u32,
         }
     }
@@ -103,10 +101,36 @@ pub(crate) enum PortStatus {
     Ready { opened: bool },
 }
 
+pub struct PortDescription {
+    /// If the value is true, port represents a console in the guest
+    pub console: bool,
+    pub input: Option<Box<dyn ReadableFd + Send>>,
+    pub output: Option<Box<dyn io::Write + Send>>,
+}
+
+pub(crate) struct Port {
+    pub(crate) status: PortStatus,
+    pub(crate) console: bool,
+    // It doesn't make sense for both of these to be None, so encode it better
+    pub(crate) input: Option<Box<dyn ReadableFd + Send>>,
+    pub(crate) output: Option<Box<dyn io::Write + Send>>,
+}
+
+impl Port {
+    fn new(description: PortDescription) -> Self {
+        Self {
+            status: PortStatus::NotReady,
+            console: description.console,
+            output: description.output,
+            input: description.input,
+        }
+    }
+}
+
 pub struct Console {
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
-    pub(crate) port_statuses: Vec<PortStatus>,
+    pub(crate) ports: Vec<Port>,
     pub(crate) cmd_queue: VecDeque<VirtioConsoleControl>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -117,33 +141,38 @@ pub struct Console {
     pub(crate) device_state: DeviceState,
     pub(crate) in_buffer: VecDeque<u8>,
     config: VirtioConsoleConfig,
-    pub(crate) input: Box<dyn ReadableFd + Send>,
-    output: Box<dyn io::Write + Send>,
     configured: bool,
     pub(crate) interactive: bool,
     intc: Option<Arc<Mutex<Gic>>>,
     irq_line: Option<u32>,
 }
 
+//pub trait ReadableWritableFd = ReadableFd + io::Write;
+
 impl Console {
-    pub(crate) fn with_queues(
-        input: Box<dyn ReadableFd + Send>,
-        output: Box<dyn io::Write + Send>,
-        queues: Vec<VirtQueue>,
-    ) -> super::Result<Console> {
-        let mut queue_events = Vec::new();
-        for _ in 0..queues.len() {
-            queue_events
-                .push(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(ConsoleError::EventFd)?);
-        }
+    pub fn new(ports: Vec<PortDescription>) -> super::Result<Console> {
+        assert!(
+            ports.len() >= 1,
+            "Creating console device without any ports is currently not supported!"
+        );
+        // 2 control queues, 2 queues for each port (each port always has an input and output queue)
+        let num_queues: usize = 2 + ports.len() * 2;
+        let queues: Vec<VirtQueue> = vec![VirtQueue::new(defs::QUEUE_SIZE); num_queues];
+
+        let mut queue_events: Vec<EventFd> = (0..num_queues)
+            .map(|_| EventFd::new(utils::eventfd::EFD_NONBLOCK))
+            .collect::<Result<_, _>>()
+            .map_err(ConsoleError::EventFd)?;
 
         let (cols, rows) = get_win_size();
-        let config = VirtioConsoleConfig::new(cols, rows);
+        let config = VirtioConsoleConfig::new(cols, rows, ports.len() as u32);
+
+        let ports: Vec<Port> = ports.into_iter().map(Port::new).collect();
 
         Ok(Console {
             queues,
             queue_events,
-            port_statuses: vec![PortStatus::NotReady; NUM_PORTS],
+            ports,
             cmd_queue: Default::default(),
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
@@ -157,24 +186,11 @@ impl Console {
             device_state: DeviceState::Inactive,
             in_buffer: VecDeque::new(),
             config,
-            input,
-            output,
             configured: false,
             interactive: true,
             intc: None,
             irq_line: None,
         })
-    }
-
-    pub fn new(
-        input: Box<dyn ReadableFd + Send>,
-        output: Box<dyn io::Write + Send>,
-    ) -> super::Result<Console> {
-        let queues: Vec<VirtQueue> = defs::QUEUE_SIZES
-            .iter()
-            .map(|&max_size| VirtQueue::new(max_size))
-            .collect();
-        Self::with_queues(input, output, queues)
     }
 
     pub fn id(&self) -> &str {
@@ -237,6 +253,7 @@ impl Console {
 
         while let Some(cmd) = self.cmd_queue.front() {
             if let Some(head) = queue.pop(mem) {
+                // TODO: use mem.write_obj
                 if let Err(e) = mem.write_slice(cmd.as_slice(), head.addr) {
                     log::error!("Failed to write VirtioConsoleControl cmd: {}", e);
                     continue;
@@ -296,11 +313,10 @@ impl Console {
                         log::error!("Port initialization failed: {:?}", cmd);
                         continue;
                     }
-                    self.port_statuses[cmd.id as usize] = PortStatus::Ready { opened: false };
-                    if cmd.id == 0 {
-                        //TODO: unhardcode console port
+                    self.ports[cmd.id as usize].status = PortStatus::Ready { opened: false };
+                    if self.ports[cmd.id as usize].console {
                         self.cmd_queue.push_back(VirtioConsoleControl {
-                            id: 0,
+                            id: cmd.id,
                             event: VIRTIO_CONSOLE_CONSOLE_PORT,
                             value: 1,
                         });
@@ -320,10 +336,10 @@ impl Console {
                         }
                     };
 
-                    if self.port_statuses[cmd.id as usize] == PortStatus::NotReady {
+                    if self.ports[cmd.id as usize].status == PortStatus::NotReady {
                         log::warn!("Driver signaled opened={} to port {} that was not ready, assuming the port is ready.",opened, cmd.id)
                     }
-                    self.port_statuses[cmd.id as usize] = PortStatus::Ready { opened };
+                    self.ports[cmd.id as usize].status = PortStatus::Ready { opened };
                 }
                 _ => log::warn!("Unknown console control event {:x}", cmd.event),
             }
@@ -357,6 +373,7 @@ impl Console {
         while let Some(head) = queue.pop(mem) {
             let len = cmp::min(head.len, self.in_buffer.len() as u32);
             let source_slice = self.in_buffer.drain(..len as usize).collect::<Vec<u8>>();
+
             if let Err(e) = mem.write_slice(&source_slice[..], head.addr) {
                 error!("Failed to write slice: {:?}", e);
                 queue.go_to_previous_position();
@@ -391,10 +408,11 @@ impl Console {
         let queue = &mut self.queues[TXQ_INDEX];
         let mut used_any = false;
         while let Some(head) = queue.pop(mem) {
-            //let mut out = self.output.lock().unwrap();
-            mem.write_to(head.addr, &mut self.output.deref_mut(), head.len as usize)
-                .unwrap();
-            self.output.flush().unwrap();
+            // TODO unhardcode console output port
+            let output = &mut self.ports[0].output.as_mut().unwrap();
+
+            mem.write_to(head.addr, output, head.len as usize).unwrap();
+            output.flush().unwrap();
 
             queue.add_used(mem, head.index, head.len);
             used_any = true;
@@ -468,15 +486,6 @@ impl VirtioDevice for Console {
     }
 
     fn activate(&mut self, mem: GuestMemoryMmap) -> ActivateResult {
-        if self.queues.len() != defs::NUM_QUEUES {
-            error!(
-                "Cannot perform activate. Expected {} queue(s), got {}",
-                defs::NUM_QUEUES,
-                self.queues.len()
-            );
-            return Err(ActivateError::BadActivate);
-        }
-
         if self.activate_evt.write(1).is_err() {
             error!("Cannot write to activate_evt",);
             return Err(ActivateError::BadActivate);

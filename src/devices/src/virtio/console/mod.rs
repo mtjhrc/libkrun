@@ -3,14 +3,11 @@ mod event_handler;
 
 pub use self::defs::uapi::VIRTIO_ID_CONSOLE as TYPE_CONSOLE;
 pub use self::device::Console;
+pub use self::device::PortDescription;
 
 mod defs {
     pub const CONSOLE_DEV_ID: &str = "virtio_console";
-    // only adding additional stdin for now
-    pub const NUM_PORTS: usize = 1;
-    // 2 CONTROL queues and rx and tx queue for each port
-    pub const NUM_QUEUES: usize = 2 + NUM_PORTS * 2;
-    pub const QUEUE_SIZES: &[u16] = &[256; NUM_QUEUES];
+    pub const QUEUE_SIZE: u16 = 256;
 
     pub mod uapi {
         /// The device conforms to the virtio spec version 1.0.

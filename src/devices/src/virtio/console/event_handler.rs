@@ -1,10 +1,12 @@
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 
-use crate::virtio::console::device::{VirtioConsoleControl, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX, PortStatus};
+use crate::virtio::console::defs::control_event::VIRTIO_CONSOLE_PORT_OPEN;
+use crate::virtio::console::device::{
+    PortStatus, VirtioConsoleControl, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX,
+};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
-use crate::virtio::console::defs::control_event::VIRTIO_CONSOLE_PORT_OPEN;
 
 use super::device::{get_win_size, Console, RXQ_INDEX, TXQ_INDEX};
 use crate::virtio::device::VirtioDevice;
@@ -34,18 +36,15 @@ impl Console {
         }
     }
 
-    pub(crate) fn handle_input(&mut self, event: &EpollEvent) {
-      //  debug!("console: input event");
-        let event_set = event.event_set();
-
-        match self.port_statuses[0] {
+    pub(crate) fn handle_input(&mut self, event_set: &EventSet, port_id: usize) {
+        match self.ports[port_id].status {
             PortStatus::NotReady => {
                 log::trace!("Is this even a valid/reachable state?")
             }
             PortStatus::Ready { opened: true } => {
                 if event_set.contains(EventSet::IN) {
                     let mut out = [0u8; 64];
-                    let count = self.input.read(&mut out).unwrap();
+                    let count = self.ports[port_id].input.as_mut().unwrap().read(&mut out).unwrap();
                     self.in_buffer.extend(&out[..count]);
 
                     if self.process_rx() {
@@ -54,7 +53,7 @@ impl Console {
                 }
 
                 if event_set.contains(EventSet::HANG_UP) {
-                    self.port_statuses[0] = PortStatus::Ready { opened: false };
+                    self.ports[port_id].status = PortStatus::Ready { opened: false };
                     self.push_control_cmd(VirtioConsoleControl {
                         id: 0,
                         event: VIRTIO_CONSOLE_PORT_OPEN,
@@ -64,11 +63,14 @@ impl Console {
             }
             PortStatus::Ready { opened: false } => {
                 // We don't have to do anything here I assume
+                // TODO: maybe we should close the input?
             }
         }
 
-
-        if !event_set.difference(EventSet::IN | EventSet::HANG_UP).is_empty() {
+        if !event_set
+            .difference(EventSet::IN | EventSet::HANG_UP)
+            .is_empty()
+        {
             warn!("console: input unexpected event {:?}", event_set);
             return;
         }
@@ -138,34 +140,30 @@ impl Subscriber for Console {
 
         let activate_evt = self.activate_evt.as_raw_fd();
         let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
-        let input = self.input.as_raw_fd();
-
+        let mut inputs = self.ports.iter().flat_map(|port| &port.input).enumerate();
         if self.is_activated() {
             let mut raise_irq = false;
-            match source {
-                _ if source == rxq => {
-                    raise_irq = self.read_queue_event(RXQ_INDEX, event) && self.process_rx()
-                }
-                _ if source == txq => {
-                    raise_irq = self.read_queue_event(TXQ_INDEX, event) && self.process_tx()
-                }
-                _ if source == control_txq => {
-                    raise_irq =
-                        self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
-                }
-                _ if source == control_rxq => {
-                    raise_irq =
-                        self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
-                }
-                _ if source == input => self.handle_input(event),
-                _ if source == activate_evt => {
-                    self.handle_activate_event(event_manager);
-                }
-                _ if source == sigwinch_evt => {
-                    self.handle_sigwinch_event(event);
-                }
-                _ => warn!("Unexpected console event received: {:?}", source),
+
+            if source == rxq {
+                raise_irq = self.read_queue_event(RXQ_INDEX, event) && self.process_rx()
+            } else if source == txq {
+                raise_irq = self.read_queue_event(TXQ_INDEX, event) && self.process_tx()
+            } else if source == control_txq {
+                raise_irq =
+                    self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
+            } else if source == control_rxq {
+                raise_irq =
+                    self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
+            } else if let Some((id, _)) = inputs.find(|(id, port)| port.as_raw_fd() == source) {
+                self.handle_input(&event.event_set(), id);
+            } else if source == activate_evt {
+                self.handle_activate_event(event_manager);
+            } else if source == sigwinch_evt {
+                self.handle_sigwinch_event(event);
+            } else {
+                warn!("Unexpected console event received: {:?}", source);
             }
+
             if raise_irq {
                 self.signal_used_queue().unwrap_or_default();
             }
@@ -178,18 +176,15 @@ impl Subscriber for Console {
     }
 
     fn interest_list(&self) -> Vec<EpollEvent> {
-        if self.interactive {
-            vec![
-                EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.input.as_raw_fd() as u64),
-            ]
-        } else {
-            vec![
-                EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
-            ]
-        }
+        let static_events = [EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64), EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64)];
+
+        //  TODO: pass in `interactive` flag for each port input
+        let port_events = self
+            .ports
+            .iter()
+            .flat_map(|port| &port.input)
+            .map(|input| EpollEvent::new(EventSet::IN, input.as_raw_fd() as u64));
+
+        static_events.into_iter().chain(port_events).collect()
     }
 }
-
