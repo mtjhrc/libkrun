@@ -1092,7 +1092,13 @@ fn attach_console_devices(
                 input: Some(Box::new(SerialStdin::get())),
                 output: Some(Box::new(io::stdout())),
             },
-        ]).unwrap(),
+            PortDescription {
+                console: false,
+                input: None,
+                output: Some(Box::new(io::stderr())),
+            },
+        ])
+        .unwrap(),
     ));
 
     if let Some(intc) = intc {

@@ -1,7 +1,6 @@
 use std::cmp;
 use std::collections::VecDeque;
-use std::io;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
@@ -12,20 +11,16 @@ use libc::TIOCGWINSZ;
 use utils::eventfd::EventFd;
 use vm_memory::{ByteValued, Bytes, GuestMemoryMmap, VolatileMemory};
 
-use super::super::super::legacy::ReadableFd;
 use super::super::{
     ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
     VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING,
 };
 use super::{defs, defs::control_event, defs::uapi};
 use crate::legacy::Gic;
-use crate::virtio::console::defs::control_event::{
-    VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD,
-};
+use crate::virtio::console::defs::control_event::{VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD, VIRTIO_CONSOLE_PORT_OPEN};
+use crate::virtio::console::port::{port_id_to_queue_idx, Port, PortStatus, QueueDirection};
+use crate::virtio::PortDescription;
 use crate::Error as DeviceError;
-
-pub(crate) const RXQ_INDEX: usize = 0;
-pub(crate) const TXQ_INDEX: usize = 1;
 
 pub(crate) const CONTROL_RXQ_INDEX: usize = 2;
 pub(crate) const CONTROL_TXQ_INDEX: usize = 3;
@@ -95,38 +90,6 @@ impl VirtioConsoleConfig {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub(crate) enum PortStatus {
-    NotReady,
-    Ready { opened: bool },
-}
-
-pub struct PortDescription {
-    /// If the value is true, port represents a console in the guest
-    pub console: bool,
-    pub input: Option<Box<dyn ReadableFd + Send>>,
-    pub output: Option<Box<dyn io::Write + Send>>,
-}
-
-pub(crate) struct Port {
-    pub(crate) status: PortStatus,
-    pub(crate) console: bool,
-    // It doesn't make sense for both of these to be None, so encode it better
-    pub(crate) input: Option<Box<dyn ReadableFd + Send>>,
-    pub(crate) output: Option<Box<dyn io::Write + Send>>,
-}
-
-impl Port {
-    fn new(description: PortDescription) -> Self {
-        Self {
-            status: PortStatus::NotReady,
-            console: description.console,
-            output: description.output,
-            input: description.input,
-        }
-    }
-}
-
 pub struct Console {
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
@@ -159,7 +122,7 @@ impl Console {
         let num_queues: usize = 2 + ports.len() * 2;
         let queues: Vec<VirtQueue> = vec![VirtQueue::new(defs::QUEUE_SIZE); num_queues];
 
-        let mut queue_events: Vec<EventFd> = (0..num_queues)
+        let queue_events: Vec<EventFd> = (0..num_queues)
             .map(|_| EventFd::new(utils::eventfd::EFD_NONBLOCK))
             .collect::<Result<_, _>>()
             .map_err(ConsoleError::EventFd)?;
@@ -302,11 +265,14 @@ impl Console {
                         "Device is ready: initialization {}",
                         if cmd.value == 1 { "ok" } else { "failed" }
                     );
-                    self.cmd_queue.push_back(VirtioConsoleControl {
-                        id: 0,
-                        event: VIRTIO_CONSOLE_PORT_ADD,
-                        value: 1,
-                    });
+
+                    for port_id in 0..self.ports.len() {
+                        self.cmd_queue.push_back(VirtioConsoleControl {
+                            id: port_id as u32,
+                            event: VIRTIO_CONSOLE_PORT_ADD,
+                            value: 0,
+                        });
+                    }
                 }
                 control_event::VIRTIO_CONSOLE_PORT_READY => {
                     if cmd.value != 1 {
@@ -314,10 +280,17 @@ impl Console {
                         continue;
                     }
                     self.ports[cmd.id as usize].status = PortStatus::Ready { opened: false };
+
                     if self.ports[cmd.id as usize].console {
                         self.cmd_queue.push_back(VirtioConsoleControl {
                             id: cmd.id,
                             event: VIRTIO_CONSOLE_CONSOLE_PORT,
+                            value: 1,
+                        });
+                    } else {  // lets start with all ports open for now
+                        self.cmd_queue.push_back(VirtioConsoleControl {
+                            id: cmd.id,
+                            event: VIRTIO_CONSOLE_PORT_OPEN,
                             value: 1,
                         });
                     }
@@ -356,7 +329,7 @@ impl Console {
         used_any
     }
 
-    pub(crate) fn process_rx(&mut self) -> bool {
+    pub(crate) fn process_rx(&mut self, port_id: usize) -> bool {
         //debug!("console: RXQ queue event");
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
@@ -367,8 +340,7 @@ impl Console {
         if self.in_buffer.is_empty() {
             return false;
         }
-
-        let queue = &mut self.queues[RXQ_INDEX];
+        let queue = &mut self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)];
         let mut used_any = false;
         while let Some(head) = queue.pop(mem) {
             let len = cmp::min(head.len, self.in_buffer.len() as u32);
@@ -391,7 +363,7 @@ impl Console {
         used_any
     }
 
-    pub(crate) fn process_tx(&mut self) -> bool {
+    pub(crate) fn process_tx(&mut self, port_id: usize) -> bool {
         //debug!("console: TXQ queue event");
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
@@ -405,12 +377,12 @@ impl Console {
             self.signal_config_update().unwrap();
         }
 
-        let queue = &mut self.queues[TXQ_INDEX];
+        let queue = &mut self.queues[port_id_to_queue_idx(QueueDirection::Tx, port_id)];
         let mut used_any = false;
         while let Some(head) = queue.pop(mem) {
-            // TODO unhardcode console output port
-            let output = &mut self.ports[0].output.as_mut().unwrap();
-
+            // TODO: figure out what to do if the port doesn't have output
+            let output = &mut self.ports[port_id].output.as_mut().unwrap();
+            log::trace!("Writing at port {port_id}");
             mem.write_to(head.addr, output, head.len as usize).unwrap();
             output.flush().unwrap();
 

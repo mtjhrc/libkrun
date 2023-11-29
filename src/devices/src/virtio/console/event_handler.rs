@@ -2,13 +2,12 @@ use std::io::Read;
 use std::os::unix::io::AsRawFd;
 
 use crate::virtio::console::defs::control_event::VIRTIO_CONSOLE_PORT_OPEN;
-use crate::virtio::console::device::{
-    PortStatus, VirtioConsoleControl, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX,
-};
+use crate::virtio::console::device::{VirtioConsoleControl, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX};
+use crate::virtio::console::port::{queue_idx_to_port_id, PortStatus, QueueDirection};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 
-use super::device::{get_win_size, Console, RXQ_INDEX, TXQ_INDEX};
+use super::device::{get_win_size, Console};
 use crate::virtio::device::VirtioDevice;
 
 impl Console {
@@ -44,10 +43,15 @@ impl Console {
             PortStatus::Ready { opened: true } => {
                 if event_set.contains(EventSet::IN) {
                     let mut out = [0u8; 64];
-                    let count = self.ports[port_id].input.as_mut().unwrap().read(&mut out).unwrap();
+                    let count = self.ports[port_id]
+                        .input
+                        .as_mut()
+                        .unwrap()
+                        .read(&mut out)
+                        .unwrap();
                     self.in_buffer.extend(&out[..count]);
 
-                    if self.process_rx() {
+                    if self.process_rx(port_id) {
                         self.signal_used_queue().unwrap();
                     }
                 }
@@ -88,7 +92,7 @@ impl Console {
             .subscriber(self.activate_evt.as_raw_fd())
             .unwrap();
 
-        for queue_index in [RXQ_INDEX, TXQ_INDEX, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX] {
+        for queue_index in 0..self.queues.len() {
             event_manager
                 .register(
                     self.queue_events[queue_index].as_raw_fd(),
@@ -132,8 +136,8 @@ impl Console {
 impl Subscriber for Console {
     fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager) {
         let source = event.fd();
-        let rxq = self.queue_events[RXQ_INDEX].as_raw_fd();
-        let txq = self.queue_events[TXQ_INDEX].as_raw_fd();
+        //let rxq = self.queue_events[RXQ_INDEX].as_raw_fd();
+        //let txq = self.queue_events[TXQ_INDEX].as_raw_fd();
 
         let control_rxq = self.queue_events[CONTROL_RXQ_INDEX].as_raw_fd();
         let control_txq = self.queue_events[CONTROL_TXQ_INDEX].as_raw_fd();
@@ -141,25 +145,29 @@ impl Subscriber for Console {
         let activate_evt = self.activate_evt.as_raw_fd();
         let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
         let mut inputs = self.ports.iter().flat_map(|port| &port.input).enumerate();
+
         if self.is_activated() {
             let mut raise_irq = false;
-
-            if source == rxq {
-                raise_irq = self.read_queue_event(RXQ_INDEX, event) && self.process_rx()
-            } else if source == txq {
-                raise_irq = self.read_queue_event(TXQ_INDEX, event) && self.process_tx()
-            } else if source == control_txq {
+            if source == control_txq {
                 raise_irq =
                     self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
             } else if source == control_rxq {
                 raise_irq =
                     self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
-            } else if let Some((id, _)) = inputs.find(|(id, port)| port.as_raw_fd() == source) {
-                self.handle_input(&event.event_set(), id);
+            } else if let Some((port_id, _)) = inputs.find(|(_id, port)| port.as_raw_fd() == source)
+            {
+                self.handle_input(&event.event_set(), port_id);
             } else if source == activate_evt {
                 self.handle_activate_event(event_manager);
             } else if source == sigwinch_evt {
                 self.handle_sigwinch_event(event);
+            } else if let Some(queue_index) = self.queue_events.iter().position(|fd| fd.as_raw_fd() == source) {
+                let (direction, port_id) = queue_idx_to_port_id(queue_index);
+                self.read_queue_event(queue_index, event);
+                match direction {
+                    QueueDirection::Rx => self.process_rx(port_id),
+                    QueueDirection::Tx => self.process_tx(port_id),
+                };
             } else {
                 warn!("Unexpected console event received: {:?}", source);
             }
@@ -176,7 +184,10 @@ impl Subscriber for Console {
     }
 
     fn interest_list(&self) -> Vec<EpollEvent> {
-        let static_events = [EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64), EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64)];
+        let static_events = [
+            EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
+            EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
+        ];
 
         //  TODO: pass in `interactive` flag for each port input
         let port_events = self
