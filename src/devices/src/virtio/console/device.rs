@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp, io};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::mem::size_of;
@@ -9,14 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use libc::TIOCGWINSZ;
 use utils::eventfd::EventFd;
-use vm_memory::{ByteValued, Bytes, GuestMemoryMmap, VolatileMemory};
+use vm_memory::{ByteValued, Bytes, GuestMemoryMmap, VolatileMemory, guest_memory, VolatileMemoryError, GuestMemoryError};
+use utils::epoll::EventSet;
 
 use super::super::{
     ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
     VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING,
 };
 use super::{defs, defs::control_event, defs::uapi};
-use crate::legacy::Gic;
+use crate::legacy::{Gic, ReadableFd};
 use crate::virtio::console::defs::control_event::{VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD, VIRTIO_CONSOLE_PORT_OPEN};
 use crate::virtio::console::port::{port_id_to_queue_idx, Port, PortStatus, QueueDirection};
 use crate::virtio::PortDescription;
@@ -242,6 +243,8 @@ impl Console {
         let queue = &mut self.queues[CONTROL_TXQ_INDEX];
         let mut used_any = false;
 
+        let mut ports_to_resume = Vec::new();
+
         while let Some(head) = queue.pop(mem) {
             let mut cmd = VirtioConsoleControl::default();
             used_any = true;
@@ -313,6 +316,11 @@ impl Console {
                         log::warn!("Driver signaled opened={} to port {} that was not ready, assuming the port is ready.",opened, cmd.id)
                     }
                     self.ports[cmd.id as usize].status = PortStatus::Ready { opened };
+
+                    // There could be pending input for this port...
+                    if opened {
+                        ports_to_resume.push(cmd.id);
+                    }
                 }
                 _ => log::warn!("Unknown console control event {:x}", cmd.event),
             }
@@ -326,7 +334,65 @@ impl Console {
             used_any |= control_processed;
         }
 
+        for port_id in ports_to_resume {
+            self.resume_rx(port_id as usize);
+        }
+
         used_any
+    }
+
+    pub(crate) fn push_control_cmd(&mut self, cmd: VirtioConsoleControl) {
+        self.cmd_queue.push_back(cmd);
+        if self.process_control_rx() {
+            self.signal_used_queue().unwrap();
+        }
+    }
+
+    //TODO: split between event_handler and device, and have more specific callbacks for example: handle_port_hang_up
+    pub(crate) fn handle_input(&mut self, event_set: &EventSet, port_id: usize) -> bool{
+        let mut raise_irq = false;
+
+        if !event_set
+            .difference(EventSet::IN | EventSet::HANG_UP | EventSet::READ_HANG_UP)
+            .is_empty()
+        {
+            warn!("console: input unexpected event {:?}", event_set);
+        }
+
+        match self.ports[port_id].status {
+            PortStatus::NotReady => {
+                log::trace!("Input event on port {port_id} but port is not ready");
+                self.ports[port_id].pending_rx = true;
+            },
+            PortStatus::Ready { opened: false } => {
+                log::trace!("Input event on port {port_id} but port is closed");
+            }
+            PortStatus::Ready { opened: true } => {
+                if event_set.contains(EventSet::IN) {
+                    raise_irq |= self.process_rx(port_id);
+                }
+
+                if event_set.intersects(EventSet::HANG_UP | EventSet::READ_HANG_UP) {
+                    self.ports[port_id].status = PortStatus::Ready { opened: false };
+                    self.push_control_cmd(VirtioConsoleControl {
+                        id: port_id as u32,
+                        event: VIRTIO_CONSOLE_PORT_OPEN,
+                        value: 0,
+                    });
+                    raise_irq = true;
+                }
+            },
+        }
+
+        raise_irq
+    }
+
+    pub(crate) fn resume_rx(&mut self, port_id: usize) -> bool {
+        if !self.ports[port_id].pending_rx || !matches!(self.ports[port_id].status, PortStatus::Ready{opened: true}) {
+            return false;
+        }
+        log::trace!("Resuming rx for port {port_id}");
+        self.process_rx(port_id)
     }
 
     pub(crate) fn process_rx(&mut self, port_id: usize) -> bool {
@@ -336,27 +402,31 @@ impl Console {
             // This should never happen, it's been already validated in the event handler.
             DeviceState::Inactive => unreachable!(),
         };
+        self.ports[port_id].pending_rx = true;
 
-        if self.in_buffer.is_empty() {
-            return false;
-        }
         let queue = &mut self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)];
         let mut used_any = false;
         while let Some(head) = queue.pop(mem) {
-            let len = cmp::min(head.len, self.in_buffer.len() as u32);
-            let source_slice = self.in_buffer.drain(..len as usize).collect::<Vec<u8>>();
-
-            if let Err(e) = mem.write_slice(&source_slice[..], head.addr) {
-                error!("Failed to write slice: {:?}", e);
-                queue.go_to_previous_position();
-                break;
-            }
-
-            queue.add_used(mem, head.index, len);
-            used_any = true;
-
-            if self.in_buffer.is_empty() {
-                break;
+            let result = self.ports[port_id].read_until_would_block(mem, head.addr, head.len as usize);
+            match result {
+                Ok(0) => {
+                    self.ports[port_id].pending_rx = false;
+                    queue.undo_pop();
+                    break;
+                }
+                Err(GuestMemoryError::IOError(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.ports[port_id].pending_rx = false;
+                    queue.undo_pop();
+                    break;
+                },
+                Ok(len) => {
+                    log::trace!("Wrote {len} bytes to port {port_id}");
+                    queue.add_used(mem, head.index, len as u32);
+                    used_any = true;
+                },
+                Err(e) => {
+                    log::error!("Failed to process_rx: {e:?}");
+                }
             }
         }
 

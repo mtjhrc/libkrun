@@ -1,3 +1,4 @@
+use std::io;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 
@@ -26,58 +27,6 @@ impl Console {
         }
 
         true
-    }
-
-    fn push_control_cmd(&mut self, cmd: VirtioConsoleControl) {
-        self.cmd_queue.push_back(cmd);
-        if self.process_control_rx() {
-            self.signal_used_queue().unwrap();
-        }
-    }
-
-    pub(crate) fn handle_input(&mut self, event_set: &EventSet, port_id: usize) {
-        match self.ports[port_id].status {
-            PortStatus::NotReady => {
-                log::trace!("Is this even a valid/reachable state?")
-            }
-            PortStatus::Ready { opened: true } => {
-                if event_set.contains(EventSet::IN) {
-                    let mut out = [0u8; 64];
-                    let count = self.ports[port_id]
-                        .input
-                        .as_mut()
-                        .unwrap()
-                        .read(&mut out)
-                        .unwrap();
-                    self.in_buffer.extend(&out[..count]);
-
-                    if self.process_rx(port_id) {
-                        self.signal_used_queue().unwrap();
-                    }
-                }
-
-                if event_set.contains(EventSet::HANG_UP) {
-                    self.ports[port_id].status = PortStatus::Ready { opened: false };
-                    self.push_control_cmd(VirtioConsoleControl {
-                        id: 0,
-                        event: VIRTIO_CONSOLE_PORT_OPEN,
-                        value: 0,
-                    })
-                }
-            }
-            PortStatus::Ready { opened: false } => {
-                // We don't have to do anything here I assume
-                // TODO: maybe we should close the input?
-            }
-        }
-
-        if !event_set
-            .difference(EventSet::IN | EventSet::HANG_UP)
-            .is_empty()
-        {
-            warn!("console: input unexpected event {:?}", event_set);
-            return;
-        }
     }
 
     fn handle_activate_event(&self, event_manager: &mut EventManager) {
@@ -146,40 +95,47 @@ impl Subscriber for Console {
         let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
         let mut inputs = self.ports.iter().flat_map(|port| &port.input).enumerate();
 
-        if self.is_activated() {
-            let mut raise_irq = false;
+        let mut raise_irq = false;
+
+        //TODO: where is the resume_tx net equivalent?
+        if let Some((port_id, _)) = inputs.find(|(_id, port)| port.as_raw_fd() == source)
+        {
+            log::trace!("Input on port {port_id}");
+            raise_irq = self.handle_input(&event.event_set(), port_id);
+        } else if self.is_activated() {
             if source == control_txq {
                 raise_irq =
                     self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
             } else if source == control_rxq {
                 raise_irq =
                     self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
-            } else if let Some((port_id, _)) = inputs.find(|(_id, port)| port.as_raw_fd() == source)
-            {
-                self.handle_input(&event.event_set(), port_id);
             } else if source == activate_evt {
                 self.handle_activate_event(event_manager);
             } else if source == sigwinch_evt {
                 self.handle_sigwinch_event(event);
-            } else if let Some(queue_index) = self.queue_events.iter().position(|fd| fd.as_raw_fd() == source) {
+            } else if let Some(queue_index) = self
+                .queue_events
+                .iter()
+                .position(|fd| fd.as_raw_fd() == source)
+            {
                 let (direction, port_id) = queue_idx_to_port_id(queue_index);
                 self.read_queue_event(queue_index, event);
                 match direction {
-                    QueueDirection::Rx => self.process_rx(port_id),
+                    QueueDirection::Rx => self.resume_rx(port_id),
                     QueueDirection::Tx => self.process_tx(port_id),
                 };
             } else {
                 warn!("Unexpected console event received: {:?}", source);
-            }
-
-            if raise_irq {
-                self.signal_used_queue().unwrap_or_default();
             }
         } else {
             warn!(
                 "console: The device is not yet activated. Spurious event received: {:?}",
                 source
             );
+        }
+
+        if raise_irq {
+            self.signal_used_queue().unwrap_or_default();
         }
     }
 
@@ -189,12 +145,16 @@ impl Subscriber for Console {
             EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
         ];
 
-        //  TODO: pass in `interactive` flag for each port input
+        // TODO: pass in `interactive` flag for each port input?
+        // Another alternative, lets have a trait with get_polling_fd() -> Option<Fd> implemented for each input?
+
         let port_events = self
             .ports
             .iter()
             .flat_map(|port| &port.input)
-            .map(|input| EpollEvent::new(EventSet::IN, input.as_raw_fd() as u64));
+            .map(|input| {
+                EpollEvent::new(EventSet::IN | EventSet::EDGE_TRIGGERED, input.as_raw_fd() as u64)
+            });
 
         static_events.into_iter().chain(port_events).collect()
     }
