@@ -6,7 +6,10 @@
 #[cfg(target_os = "macos")]
 use crossbeam_channel::unbounded;
 use std::fmt::{Display, Formatter};
+use std::fs::File;
 use std::io;
+use std::io::{IsTerminal, stdin};
+use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +18,7 @@ use super::{Error, Vmm};
 #[cfg(target_arch = "x86_64")]
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
-use devices::legacy::Gic;
+use devices::legacy::{Gic};
 use devices::legacy::Serial;
 #[cfg(feature = "net")]
 use devices::virtio::Net;
@@ -48,6 +51,7 @@ use arch::ArchMemoryInfo;
 use arch::InitrdConfig;
 #[cfg(feature = "tee")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
+use libc::{c_char, O_NONBLOCK, O_RDONLY, open};
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
@@ -257,13 +261,21 @@ impl SerialStdin {
     /// Returns a `SerialStdin` wrapper over `io::stdin`.
     pub fn get() -> Self {
         let stdin = io::stdin();
-        stdin.lock().set_raw_mode().unwrap();
+        {
+            let l = stdin.lock();
+            l.set_raw_mode().unwrap();
+            l.set_non_block(true).unwrap();
+        }
         SerialStdin(stdin)
     }
 
     pub fn restore() {
         let stdin = io::stdin();
-        stdin.lock().set_canon_mode().unwrap();
+        {
+            let l = stdin.lock();
+            l.set_canon_mode().unwrap();
+            l.set_non_block(false).unwrap();
+        }
     }
 }
 
@@ -278,8 +290,6 @@ impl AsRawFd for SerialStdin {
         self.0.as_raw_fd()
     }
 }
-
-impl devices::legacy::ReadableFd for SerialStdin {}
 
 impl VmmEventsObserver for SerialStdin {
     fn on_vmm_boot(&mut self) -> std::result::Result<(), utils::errno::Error> {
@@ -1085,19 +1095,40 @@ fn attach_console_devices(
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
-    let console = Arc::new(Mutex::new(
-        devices::virtio::Console::new(vec![
+    let f = {
+        let fd = unsafe { open(b"/tmp/krun-test\0".as_ptr() as *const c_char, O_RDONLY | O_NONBLOCK) };
+        if fd < 0 {
+            panic!("Couldn't open test file!");
+        }
+        unsafe {File::from_raw_fd(fd)}
+    };
+
+    // TODO: this behavior should be controlled by library calls
+    let ports = if stdin().is_terminal() {
+        vec![
             PortDescription {
                 console: true,
                 input: Some(Box::new(SerialStdin::get())),
                 output: Some(Box::new(io::stdout())),
+            }
+        ]
+    }else{
+        vec![
+            PortDescription {
+                console: true,
+                input: Some(Box::new(f)), //FIXME: should be some empty file
+                output: Some(Box::new(io::stdout())),
             },
             PortDescription {
                 console: false,
-                input: None,
-                output: Some(Box::new(io::stderr())),
-            },
-        ])
+                input: Some(Box::new(SerialStdin::get())),
+                output: None,
+            }
+        ]
+    };
+
+    let console = Arc::new(Mutex::new(
+        devices::virtio::Console::new(ports)
         .unwrap(),
     ));
 

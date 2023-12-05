@@ -37,6 +37,8 @@ pub(crate) struct Port {
     ///      2. The rx queue buffers got completely filled up before receiving before reading
     ///         the whole input.
     pub(crate) pending_rx: bool,
+    /// We need to send EOF, but do it after checking and processing pending_rx.
+    pub(crate) pending_eof: bool,
     // TODO: we probably also need pending output? But for that output needs to be non-blocking
     // It doesn't make sense for both of these to be None, so encode it better
     pub(crate) input: Option<Box<dyn ReadableFd + Send>>,
@@ -83,6 +85,7 @@ impl Port {
         Self {
             status: PortStatus::NotReady,
             pending_rx: false,
+            pending_eof: false,
             console: description.console,
             output: description.output,
             input: description.input,

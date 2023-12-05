@@ -153,7 +153,7 @@ impl Subscriber for Console {
             .iter()
             .flat_map(|port| &port.input)
             .map(|input| {
-                EpollEvent::new(EventSet::IN | EventSet::EDGE_TRIGGERED, input.as_raw_fd() as u64)
+                EpollEvent::new(EventSet::IN | EventSet::EDGE_TRIGGERED | EventSet::READ_HANG_UP | EventSet::HANG_UP, input.as_raw_fd() as u64)
             });
 
         static_events.into_iter().chain(port_events).collect()

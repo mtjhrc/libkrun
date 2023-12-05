@@ -58,6 +58,7 @@ const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
 // Run `rustc --explain E0225` for more details.
 /// Trait that composes the `std::io::Read` and `std::os::unix::io::AsRawFd` traits.
 pub trait ReadableFd: io::Read + AsRawFd {}
+impl<T> ReadableFd for T where T: io::Read + AsRawFd {}
 
 /// Emulates serial COM ports commonly seen on x86 I/O ports 0x3f8/0x2f8/0x3e8/0x2e8.
 ///

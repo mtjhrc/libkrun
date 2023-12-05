@@ -224,7 +224,7 @@ impl Console {
                 }
                 used_any = true;
                 queue.add_used(mem, head.index, head.len);
-                log::error!("Wrote {cmd:?} to guest");
+                log::trace!("Wrote {cmd:?} to guest");
                 self.cmd_queue.pop_front();
             } else {
                 log::error!("Failed to write {cmd:?} to guest");
@@ -349,7 +349,7 @@ impl Console {
     }
 
     //TODO: split between event_handler and device, and have more specific callbacks for example: handle_port_hang_up
-    pub(crate) fn handle_input(&mut self, event_set: &EventSet, port_id: usize) -> bool{
+    pub(crate) fn handle_input(&mut self, event_set: &EventSet, port_id: usize) -> bool {
         let mut raise_irq = false;
 
         if !event_set
@@ -361,13 +361,19 @@ impl Console {
 
         match self.ports[port_id].status {
             PortStatus::NotReady => {
-                log::trace!("Input event on port {port_id} but port is not ready");
-                self.ports[port_id].pending_rx = true;
-            },
+                log::trace!("Input event on port {port_id} but port is not ready: {:?}", event_set);
+                if event_set.contains(EventSet::IN) {
+                    self.ports[port_id].pending_rx = true;
+                }
+                if event_set.intersects(EventSet::HANG_UP | EventSet::READ_HANG_UP) {
+                    self.ports[port_id].pending_eof = true;
+                }
+            }
             PortStatus::Ready { opened: false } => {
-                log::trace!("Input event on port {port_id} but port is closed");
+                log::trace!("Input event on port {port_id} but port is closed: {:?}", event_set);
             }
             PortStatus::Ready { opened: true } => {
+                log::trace!("Event on opened port {port_id}");
                 if event_set.contains(EventSet::IN) {
                     raise_irq |= self.process_rx(port_id);
                 }
@@ -379,20 +385,37 @@ impl Console {
                         event: VIRTIO_CONSOLE_PORT_OPEN,
                         value: 0,
                     });
+                    // why not process tx here?
                     raise_irq = true;
                 }
-            },
+            }
         }
 
         raise_irq
     }
 
     pub(crate) fn resume_rx(&mut self, port_id: usize) -> bool {
-        if !self.ports[port_id].pending_rx || !matches!(self.ports[port_id].status, PortStatus::Ready{opened: true}) {
-            return false;
+        let mut raise_irq = false;
+
+        if let PortStatus::Ready { opened: true } = self.ports[port_id].status {
+            if self.ports[port_id].pending_rx {
+                log::trace!("Resuming rx for port {port_id}");
+                raise_irq |= self.process_rx(port_id);
+            }
+
+            if self.ports[port_id].pending_eof {
+                log::trace!("Resuming rx, got EOF for port {port_id}");
+                self.cmd_queue.push_back(VirtioConsoleControl {
+                    id: port_id as u32,
+                    event: VIRTIO_CONSOLE_PORT_OPEN,
+                    value: 0,
+                });
+                self.ports[port_id].pending_eof = false;
+                raise_irq |= self.process_control_tx();
+            }
         }
-        log::trace!("Resuming rx for port {port_id}");
-        self.process_rx(port_id)
+
+        raise_irq
     }
 
     pub(crate) fn process_rx(&mut self, port_id: usize) -> bool {
@@ -418,12 +441,12 @@ impl Console {
                     self.ports[port_id].pending_rx = false;
                     queue.undo_pop();
                     break;
-                },
+                }
                 Ok(len) => {
                     log::trace!("Wrote {len} bytes to port {port_id}");
                     queue.add_used(mem, head.index, len as u32);
                     used_any = true;
-                },
+                }
                 Err(e) => {
                     log::error!("Failed to process_rx: {e:?}");
                 }
