@@ -1107,6 +1107,7 @@ fn attach_console_devices(
     let ports = if stdin().is_terminal() {
         vec![
             PortDescription {
+                name: "".into(),
                 console: true,
                 input: Some(Box::new(SerialStdin::get())),
                 output: Some(Box::new(io::stdout())),
@@ -1115,11 +1116,13 @@ fn attach_console_devices(
     }else{
         vec![
             PortDescription {
+                name: "".into(),
                 console: true,
                 input: Some(Box::new(f)), //FIXME: should be some empty file
                 output: Some(Box::new(io::stdout())),
             },
             PortDescription {
+                name: "krun-stdin".into(),
                 console: false,
                 input: Some(Box::new(SerialStdin::get())),
                 output: None,

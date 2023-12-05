@@ -1,6 +1,7 @@
 //! See https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html#x1-2920002
 //! for port <-> virtio queue index mapping
 
+use std::borrow::Cow;
 use crate::legacy::ReadableFd;
 use std::fs::File;
 use std::io;
@@ -20,6 +21,7 @@ pub(crate) enum PortStatus {
 }
 
 pub struct PortDescription {
+    pub name: Cow<'static, str>,
     /// If the value is true, port represents a console in the guest
     pub console: bool,
     pub input: Option<Box<dyn ReadableFd + Send>>,
@@ -27,6 +29,7 @@ pub struct PortDescription {
 }
 
 pub(crate) struct Port {
+    pub(crate) name: Cow<'static, str>,
     pub(crate) status: PortStatus,
     pub(crate) console: bool,
     /// Last process_rx didn't fully finish processing input.
@@ -83,6 +86,7 @@ impl ReadVolatile for Port {
 impl Port {
     pub(crate) fn new(description: PortDescription) -> Self {
         Self {
+            name: description.name,
             status: PortStatus::NotReady,
             pending_rx: false,
             pending_eof: false,

@@ -1,16 +1,20 @@
-use std::{cmp, io};
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::io::Write;
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{cmp, io};
 
 use libc::TIOCGWINSZ;
-use utils::eventfd::EventFd;
-use vm_memory::{ByteValued, Bytes, GuestMemoryMmap, VolatileMemory, guest_memory, VolatileMemoryError, GuestMemoryError};
 use utils::epoll::EventSet;
+use utils::eventfd::EventFd;
+use vm_memory::{
+    guest_memory, ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap, VolatileMemory,
+    VolatileMemoryError,
+};
 
 use super::super::{
     ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
@@ -18,7 +22,10 @@ use super::super::{
 };
 use super::{defs, defs::control_event, defs::uapi};
 use crate::legacy::{Gic, ReadableFd};
-use crate::virtio::console::defs::control_event::{VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD, VIRTIO_CONSOLE_PORT_OPEN};
+use crate::virtio::console::defs::control_event::{
+    VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD, VIRTIO_CONSOLE_PORT_NAME,
+    VIRTIO_CONSOLE_PORT_OPEN,
+};
 use crate::virtio::console::port::{port_id_to_queue_idx, Port, PortStatus, QueueDirection};
 use crate::virtio::PortDescription;
 use crate::Error as DeviceError;
@@ -95,7 +102,6 @@ pub struct Console {
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
     pub(crate) ports: Vec<Port>,
-    pub(crate) cmd_queue: VecDeque<VirtioConsoleControl>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) interrupt_status: Arc<AtomicUsize>,
@@ -137,7 +143,6 @@ impl Console {
             queues,
             queue_events,
             ports,
-            cmd_queue: Default::default(),
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
             interrupt_status: Arc::new(AtomicUsize::new(0)),
@@ -206,50 +211,49 @@ impl Console {
         self.signal_config_update().unwrap();
     }
 
-    pub(crate) fn process_control_rx(&mut self) -> bool {
+    pub(crate) fn send_control_msg<M: ByteValued + Debug>(&mut self, msg: &M) {
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
             // This should never happen, it's been already validated in the event handler.
             DeviceState::Inactive => unreachable!(),
         };
         let queue = &mut self.queues[CONTROL_RXQ_INDEX];
-        let mut used_any = false;
 
-        while let Some(cmd) = self.cmd_queue.front() {
-            if let Some(head) = queue.pop(mem) {
-                // TODO: use mem.write_obj
-                if let Err(e) = mem.write_slice(cmd.as_slice(), head.addr) {
-                    log::error!("Failed to write VirtioConsoleControl cmd: {}", e);
-                    continue;
-                }
-                used_any = true;
-                queue.add_used(mem, head.index, head.len);
-                log::trace!("Wrote {cmd:?} to guest");
-                self.cmd_queue.pop_front();
-            } else {
-                log::error!("Failed to write {cmd:?} to guest");
+        if let Some(head) = queue.pop(mem) {
+            // TODO: use mem.write_obj
+            if let Err(e) = mem.write_slice(msg.as_slice(), head.addr) {
+                log::error!("Failed to write VirtioConsoleControl cmd: {}", e);
             }
+            queue.add_used(mem, head.index, head.len);
+            log::trace!("Wrote {msg:?} to guest");
+        } else {
+            log::error!("Failed to write {msg:?} to guest: no space in queue");
         }
+    }
 
-        used_any
+    pub(crate) fn process_control_rx(&mut self) -> bool {
+        false
     }
 
     pub(crate) fn process_control_tx(&mut self) -> bool {
-        let mem = match self.device_state {
-            DeviceState::Activated(ref mem) => mem,
-            // This should never happen, it's been already validated in the event handler.
-            DeviceState::Inactive => unreachable!(),
-        };
-        let queue = &mut self.queues[CONTROL_TXQ_INDEX];
+        macro_rules! get_mem {
+            () => {
+                match self.device_state {
+                    DeviceState::Activated(ref mem) => mem,
+                    // This should never happen, it's been already validated in the event handler.
+                    DeviceState::Inactive => unreachable!(),
+                }
+            }
+        }
         let mut used_any = false;
 
         let mut ports_to_resume = Vec::new();
 
-        while let Some(head) = queue.pop(mem) {
+        while let Some(head) = self.queues[CONTROL_TXQ_INDEX].pop(get_mem!()) {
             let mut cmd = VirtioConsoleControl::default();
             used_any = true;
-            let read_result = mem.read_slice(cmd.as_mut_slice(), head.addr);
-            queue.add_used(mem, head.index, head.len);
+            let read_result = get_mem!().read_slice(cmd.as_mut_slice(), head.addr);
+            self.queues[CONTROL_TXQ_INDEX].add_used( get_mem!(), head.index, head.len);
 
             if let Err(e) = read_result {
                 log::error!(
@@ -270,7 +274,7 @@ impl Console {
                     );
 
                     for port_id in 0..self.ports.len() {
-                        self.cmd_queue.push_back(VirtioConsoleControl {
+                        self.send_control_msg(&VirtioConsoleControl {
                             id: port_id as u32,
                             event: VIRTIO_CONSOLE_PORT_ADD,
                             value: 0,
@@ -285,13 +289,14 @@ impl Console {
                     self.ports[cmd.id as usize].status = PortStatus::Ready { opened: false };
 
                     if self.ports[cmd.id as usize].console {
-                        self.cmd_queue.push_back(VirtioConsoleControl {
+                        self.send_control_msg(&VirtioConsoleControl {
                             id: cmd.id,
                             event: VIRTIO_CONSOLE_CONSOLE_PORT,
                             value: 1,
                         });
-                    } else {  // lets start with all ports open for now
-                        self.cmd_queue.push_back(VirtioConsoleControl {
+                    } else {
+                        // lets start with all ports open for now
+                        self.send_control_msg(&VirtioConsoleControl {
                             id: cmd.id,
                             event: VIRTIO_CONSOLE_PORT_OPEN,
                             value: 1,
@@ -326,26 +331,11 @@ impl Console {
             }
         }
 
-        if !self.cmd_queue.is_empty() {
-            let control_processed = self.process_control_rx();
-            if !control_processed {
-                log::trace!("process_control_rx doesn't need interupt?");
-            }
-            used_any |= control_processed;
-        }
-
         for port_id in ports_to_resume {
             self.resume_rx(port_id as usize);
         }
 
         used_any
-    }
-
-    pub(crate) fn push_control_cmd(&mut self, cmd: VirtioConsoleControl) {
-        self.cmd_queue.push_back(cmd);
-        if self.process_control_rx() {
-            self.signal_used_queue().unwrap();
-        }
     }
 
     //TODO: split between event_handler and device, and have more specific callbacks for example: handle_port_hang_up
@@ -361,7 +351,10 @@ impl Console {
 
         match self.ports[port_id].status {
             PortStatus::NotReady => {
-                log::trace!("Input event on port {port_id} but port is not ready: {:?}", event_set);
+                log::trace!(
+                    "Input event on port {port_id} but port is not ready: {:?}",
+                    event_set
+                );
                 if event_set.contains(EventSet::IN) {
                     self.ports[port_id].pending_rx = true;
                 }
@@ -370,7 +363,10 @@ impl Console {
                 }
             }
             PortStatus::Ready { opened: false } => {
-                log::trace!("Input event on port {port_id} but port is closed: {:?}", event_set);
+                log::trace!(
+                    "Input event on port {port_id} but port is closed: {:?}",
+                    event_set
+                );
             }
             PortStatus::Ready { opened: true } => {
                 log::trace!("Event on opened port {port_id}");
@@ -380,7 +376,7 @@ impl Console {
 
                 if event_set.intersects(EventSet::HANG_UP | EventSet::READ_HANG_UP) {
                     self.ports[port_id].status = PortStatus::Ready { opened: false };
-                    self.push_control_cmd(VirtioConsoleControl {
+                    self.send_control_msg(&VirtioConsoleControl {
                         id: port_id as u32,
                         event: VIRTIO_CONSOLE_PORT_OPEN,
                         value: 0,
@@ -405,7 +401,7 @@ impl Console {
 
             if self.ports[port_id].pending_eof {
                 log::trace!("Resuming rx, got EOF for port {port_id}");
-                self.cmd_queue.push_back(VirtioConsoleControl {
+                self.send_control_msg(&VirtioConsoleControl {
                     id: port_id as u32,
                     event: VIRTIO_CONSOLE_PORT_OPEN,
                     value: 0,
@@ -430,7 +426,8 @@ impl Console {
         let queue = &mut self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)];
         let mut used_any = false;
         while let Some(head) = queue.pop(mem) {
-            let result = self.ports[port_id].read_until_would_block(mem, head.addr, head.len as usize);
+            let result =
+                self.ports[port_id].read_until_would_block(mem, head.addr, head.len as usize);
             match result {
                 Ok(0) => {
                     self.ports[port_id].pending_rx = false;
