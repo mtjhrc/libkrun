@@ -30,6 +30,8 @@ mod linux;
 use crate::linux::vstate;
 #[cfg(target_os = "macos")]
 mod macos;
+mod vm_log;
+
 #[cfg(target_os = "macos")]
 use macos::vstate;
 

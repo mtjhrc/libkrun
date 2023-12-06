@@ -63,6 +63,7 @@ use vm_memory::Bytes;
 #[cfg(target_os = "linux")]
 use vm_memory::GuestMemory;
 use vm_memory::{mmap::MmapRegion, GuestAddress, GuestMemoryMmap};
+use crate::vm_log::VMLog;
 
 /// Errors associated with starting the instance.
 #[derive(Debug)]
@@ -1126,7 +1127,7 @@ fn attach_console_devices(
             output: if stdout().is_terminal() {
                 Some(Box::new(stdout()))
             } else {
-                Some(Box::new(stdout_logger))
+                Some(Box::new(VMLog::new()))
             },
         });
 
