@@ -756,6 +756,50 @@ void clock_worker()
 }
 #endif
 
+
+int setup_redirects()
+{
+    DIR *ports_dir = opendir("/sys/class/virtio-ports");
+    if (ports_dir == NULL) {
+        printf("Unable to open ports directory!\n");
+        return -4;
+    }
+
+    char path[2048];
+    char name_buf[1024];
+
+    struct dirent *entry = NULL;
+    while ((entry=readdir(ports_dir))) {
+        char* port_identifier = entry->d_name;
+        int result_len = snprintf(path, sizeof(path), "/sys/class/virtio-ports/%s/name", port_identifier);
+
+        // result was truncated
+        if (result_len > sizeof(name_buf) - 1) {
+            printf("Path buffer too small");
+            return -1;
+        }
+
+        FILE *port_name_file = fopen(path, "r");
+        if (port_name_file == NULL) {
+            continue;
+        }
+
+        char *port_name = fgets(name_buf, sizeof(name_buf), port_name_file);
+        fclose(port_name_file);
+        if (port_name != NULL && strcmp(port_name, "krun-stdin\n") == 0) {
+            // if previous snprintf didn't fail, this one cannot fail either,
+            // as the buffer is the same and path is shorter
+            //printf("Redirect stdin using %s\n", port_identifier);
+            snprintf(path, sizeof(path), "/dev/%s", port_identifier);
+            freopen(path, "r", stdin);
+            break;
+        }
+    }
+
+    closedir(ports_dir);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct ifreq ifr;
@@ -847,11 +891,13 @@ int main(int argc, char **argv)
 		clock_worker();
 	}
 #endif
-    //freopen("/dev/vport2p1", "r", stdin);
+    if (setup_redirects() < 0) {
+       exit(-4);
+    }
 
 	if (execvp(exec_argv[0], exec_argv) < 0) {
 		printf("Couldn't execute '%s' inside the vm: %s\n", exec_argv[0], strerror(errno));
-		exit(-3);
+		exit(-4);
 	}
 
 	return 0;
