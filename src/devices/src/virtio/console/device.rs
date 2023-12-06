@@ -7,6 +7,7 @@ use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{cmp, io};
+use std::borrow::Cow;
 
 use libc::TIOCGWINSZ;
 use utils::epoll::EventSet;
@@ -211,7 +212,7 @@ impl Console {
         self.signal_config_update().unwrap();
     }
 
-    pub(crate) fn send_control_msg<M: ByteValued + Debug>(&mut self, msg: &M) {
+    pub(crate) fn send_control_tx_data(&mut self, data: &[u8]) {
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
             // This should never happen, it's been already validated in the event handler.
@@ -220,15 +221,17 @@ impl Console {
         let queue = &mut self.queues[CONTROL_RXQ_INDEX];
 
         if let Some(head) = queue.pop(mem) {
-            // TODO: use mem.write_obj
-            if let Err(e) = mem.write_slice(msg.as_slice(), head.addr) {
-                log::error!("Failed to write VirtioConsoleControl cmd: {}", e);
+            if let Err(e) = mem.write_slice(data, head.addr) {
+                log::error!("Failed to write to tq_queue: {}", e);
             }
-            queue.add_used(mem, head.index, head.len);
-            log::trace!("Wrote {msg:?} to guest");
+            queue.add_used(mem, head.index, data.len() as u32);
         } else {
-            log::error!("Failed to write {msg:?} to guest: no space in queue");
+            log::error!("Failed to write to tx_queue: no space in queue");
         }
+    }
+
+    pub(crate) fn send_control_tx_cmd(&mut self, msg: &VirtioConsoleControl) {
+        self.send_control_tx_data(msg.as_slice());
     }
 
     pub(crate) fn process_control_rx(&mut self) -> bool {
@@ -253,7 +256,7 @@ impl Console {
             let mut cmd = VirtioConsoleControl::default();
             used_any = true;
             let read_result = get_mem!().read_slice(cmd.as_mut_slice(), head.addr);
-            self.queues[CONTROL_TXQ_INDEX].add_used( get_mem!(), head.index, head.len);
+            self.queues[CONTROL_TXQ_INDEX].add_used(get_mem!(), head.index, head.len);
 
             if let Err(e) = read_result {
                 log::error!(
@@ -274,7 +277,7 @@ impl Console {
                     );
 
                     for port_id in 0..self.ports.len() {
-                        self.send_control_msg(&VirtioConsoleControl {
+                        self.send_control_tx_cmd(&VirtioConsoleControl {
                             id: port_id as u32,
                             event: VIRTIO_CONSOLE_PORT_ADD,
                             value: 0,
@@ -289,18 +292,35 @@ impl Console {
                     self.ports[cmd.id as usize].status = PortStatus::Ready { opened: false };
 
                     if self.ports[cmd.id as usize].console {
-                        self.send_control_msg(&VirtioConsoleControl {
+                        self.send_control_tx_cmd(&VirtioConsoleControl {
                             id: cmd.id,
                             event: VIRTIO_CONSOLE_CONSOLE_PORT,
                             value: 1,
                         });
                     } else {
                         // lets start with all ports open for now
-                        self.send_control_msg(&VirtioConsoleControl {
+                        self.send_control_tx_cmd(&VirtioConsoleControl {
                             id: cmd.id,
                             event: VIRTIO_CONSOLE_PORT_OPEN,
                             value: 1,
                         });
+                    }
+
+                    if !self.ports[cmd.id as usize].name.is_empty() {
+                        let mut msg: Vec<u8> = Vec::new();
+
+                        msg.extend_from_slice(VirtioConsoleControl {
+                            id: cmd.id,
+                            event: VIRTIO_CONSOLE_PORT_NAME,
+                            value: 1, // Unspecified/unused in the spec, lets use the same value as QEMU.
+                        }.as_slice());
+
+                        // The spec says the name shouldn't be NUL terminated.
+                        // QEMU seems to NUL-terminate it, anyway.
+                        // The guest kernel works either way, but we don't NUL-terminate it and follow
+                        // the spec.
+                        msg.extend(self.ports[cmd.id as usize].name.as_bytes());
+                        self.send_control_tx_data(&msg)
                     }
                 }
                 control_event::VIRTIO_CONSOLE_PORT_OPEN => {
@@ -376,7 +396,7 @@ impl Console {
 
                 if event_set.intersects(EventSet::HANG_UP | EventSet::READ_HANG_UP) {
                     self.ports[port_id].status = PortStatus::Ready { opened: false };
-                    self.send_control_msg(&VirtioConsoleControl {
+                    self.send_control_tx_cmd(&VirtioConsoleControl {
                         id: port_id as u32,
                         event: VIRTIO_CONSOLE_PORT_OPEN,
                         value: 0,
@@ -401,7 +421,7 @@ impl Console {
 
             if self.ports[port_id].pending_eof {
                 log::trace!("Resuming rx, got EOF for port {port_id}");
-                self.send_control_msg(&VirtioConsoleControl {
+                self.send_control_tx_cmd(&VirtioConsoleControl {
                     id: port_id as u32,
                     event: VIRTIO_CONSOLE_PORT_OPEN,
                     value: 0,

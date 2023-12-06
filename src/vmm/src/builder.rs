@@ -1111,14 +1111,20 @@ fn attach_console_devices(
                 console: true,
                 input: Some(Box::new(SerialStdin::get())),
                 output: Some(Box::new(io::stdout())),
+            },
+            PortDescription {
+                name: "krun-test".into(),
+                console: false,
+                input: Some(Box::new(f)),
+                output: None,
             }
         ]
-    }else{
+    }else{ // Input is piped in!
         vec![
             PortDescription {
                 name: "".into(),
                 console: true,
-                input: Some(Box::new(f)), //FIXME: should be some empty file
+                input: Some(Box::new(f)), // TODO: should be None
                 output: Some(Box::new(io::stdout())),
             },
             PortDescription {
