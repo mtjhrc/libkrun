@@ -105,6 +105,10 @@ impl Port {
     where
         M: GuestMemory + ?Sized,
     {
+        if self.input.is_none() {
+            println!("DEBUG! attempted to read from port '{}'",self.name);
+            return Ok(0)
+        }
         let mut buf = vec![0; count];
         let bytes_read = self.input.as_mut().unwrap().read(&mut buf[..]).map_err(GuestMemoryError::IOError)?;
         mem.write(&mut buf[..bytes_read], addr)

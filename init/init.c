@@ -757,6 +757,23 @@ void clock_worker()
 #endif
 
 
+int reopen_fd(int fd, char *path, int flags) {
+    int newfd = open(path,flags);
+    if (newfd < 0) {
+        printf("Failed to open '%s': %s\n", path,strerror(errno));
+        return -1;
+    }
+
+    close(fd);
+    if (dup2(newfd, fd) < 0) {
+        perror("dup2");
+        close(newfd);
+        return -1;
+    }
+    close(newfd);
+    return 0;
+}
+
 int setup_redirects()
 {
     DIR *ports_dir = opendir("/sys/class/virtio-ports");
@@ -786,13 +803,20 @@ int setup_redirects()
 
         char *port_name = fgets(name_buf, sizeof(name_buf), port_name_file);
         fclose(port_name_file);
+        printf("Have port %s %s", port_identifier, port_name);
+        fflush(stdout);
+
         if (port_name != NULL && strcmp(port_name, "krun-stdin\n") == 0) {
             // if previous snprintf didn't fail, this one cannot fail either,
             // as the buffer is the same and path is shorter
-            //printf("Redirect stdin using %s\n", port_identifier);
             snprintf(path, sizeof(path), "/dev/%s", port_identifier);
-            freopen(path, "r", stdin);
-            break;
+            reopen_fd(STDIN_FILENO, path, O_RDONLY);
+        }else if (port_name != NULL && strcmp(port_name, "krun-stdout\n") == 0) {
+            snprintf(path, sizeof(path), "/dev/%s", port_identifier);
+            reopen_fd(STDOUT_FILENO, path, O_WRONLY);
+        } else if (port_name != NULL  && strcmp(port_name, "krun-stderr\n") == 0) {
+            snprintf(path, sizeof(path), "/dev/%s", port_identifier);
+            reopen_fd(STDERR_FILENO, path, O_WRONLY);
         }
     }
 

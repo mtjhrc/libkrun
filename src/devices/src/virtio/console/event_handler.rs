@@ -93,12 +93,15 @@ impl Subscriber for Console {
 
         let activate_evt = self.activate_evt.as_raw_fd();
         let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
-        let mut inputs = self.ports.iter().flat_map(|port| &port.input).enumerate();
 
         let mut raise_irq = false;
 
         //TODO: where is the resume_tx net equivalent?
-        if let Some((port_id, _)) = inputs.find(|(_id, port)| port.as_raw_fd() == source)
+        if let Some((port_id, _)) = self
+            .ports
+            .iter()
+            .enumerate()
+            .find(|(id, port)| port.input.as_ref().is_some_and(|port| port.as_raw_fd() == source))
         {
             log::trace!("Input on port {port_id}");
             raise_irq = self.handle_input(&event.event_set(), port_id);
@@ -148,13 +151,15 @@ impl Subscriber for Console {
         // TODO: pass in `interactive` flag for each port input?
         // Another alternative, lets have a trait with get_polling_fd() -> Option<Fd> implemented for each input?
 
-        let port_events = self
-            .ports
-            .iter()
-            .flat_map(|port| &port.input)
-            .map(|input| {
-                EpollEvent::new(EventSet::IN | EventSet::EDGE_TRIGGERED | EventSet::READ_HANG_UP | EventSet::HANG_UP, input.as_raw_fd() as u64)
-            });
+        let port_events = self.ports.iter().flat_map(|port| &port.input).map(|input| {
+            EpollEvent::new(
+                EventSet::IN
+                    | EventSet::EDGE_TRIGGERED
+                    | EventSet::READ_HANG_UP
+                    | EventSet::HANG_UP,
+                input.as_raw_fd() as u64,
+            )
+        });
 
         static_events.into_iter().chain(port_events).collect()
     }
