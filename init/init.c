@@ -803,8 +803,6 @@ int setup_redirects()
 
         char *port_name = fgets(name_buf, sizeof(name_buf), port_name_file);
         fclose(port_name_file);
-        printf("Have port %s %s", port_identifier, port_name);
-        fflush(stdout);
 
         if (port_name != NULL && strcmp(port_name, "krun-stdin\n") == 0) {
             // if previous snprintf didn't fail, this one cannot fail either,
