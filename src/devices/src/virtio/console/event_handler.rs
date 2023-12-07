@@ -104,10 +104,10 @@ impl Subscriber for Console {
             raise_irq = self.handle_input(&event.event_set(), port_id);
         } else if self.is_activated() {
             if source == control_txq {
-                raise_irq =
+                raise_irq |=
                     self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
             } else if source == control_rxq {
-                raise_irq =
+                raise_irq |=
                     self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
             } else if source == activate_evt {
                 self.handle_activate_event(event_manager);
@@ -121,8 +121,8 @@ impl Subscriber for Console {
                 let (direction, port_id) = queue_idx_to_port_id(queue_index);
                 self.read_queue_event(queue_index, event);
                 match direction {
-                    QueueDirection::Rx => self.resume_rx(port_id),
-                    QueueDirection::Tx => self.process_tx(port_id),
+                    QueueDirection::Rx => raise_irq |= self.resume_rx(port_id),
+                    QueueDirection::Tx => raise_irq |= self.process_tx(port_id),
                 };
             } else {
                 warn!("Unexpected console event received: {:?}", source);
