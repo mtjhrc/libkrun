@@ -4,7 +4,7 @@ mod port;
 
 pub use self::defs::uapi::VIRTIO_ID_CONSOLE as TYPE_CONSOLE;
 pub use self::device::Console;
-pub use self::port::{PortDescription};
+pub use self::port::PortDescription;
 
 mod defs {
     pub const CONSOLE_DEV_ID: &str = "virtio_console";

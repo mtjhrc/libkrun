@@ -1,6 +1,4 @@
-use std::borrow::Cow;
-use std::io::{LineWriter, Write};
-use std::str::Utf8Error;
+use std::io::{Write};
 
 // Utility to relay log from the VM (the kernel boot log and messages from init)
 // to the rust log
@@ -15,7 +13,10 @@ impl VMLog {
     }
 
     fn force_flush(&mut self) {
-        log::debug!("[guest; (missing newline)]: {}",  String::from_utf8_lossy(&self.buf));
+        log::debug!(
+            "[guest; (missing newline)]: {}",
+            String::from_utf8_lossy(&self.buf)
+        );
         self.buf.clear();
     }
 }

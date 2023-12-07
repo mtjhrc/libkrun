@@ -1,20 +1,17 @@
-use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::io::Write;
-use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{cmp, io};
-use std::borrow::Cow;
+use std::mem::size_of;
 
 use libc::TIOCGWINSZ;
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
 use vm_memory::{
-    guest_memory, ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap, VolatileMemory,
-    VolatileMemoryError,
+    ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap, VolatileMemory,
 };
 
 use super::super::{
@@ -22,7 +19,7 @@ use super::super::{
     VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING,
 };
 use super::{defs, defs::control_event, defs::uapi};
-use crate::legacy::{Gic, ReadableFd};
+use crate::legacy::{Gic};
 use crate::virtio::console::defs::control_event::{
     VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD, VIRTIO_CONSOLE_PORT_NAME,
     VIRTIO_CONSOLE_PORT_OPEN,
@@ -83,6 +80,20 @@ pub struct VirtioConsoleControl {
 // but NOTE, that we rely on CPU being little endian, for the values to be correct
 unsafe impl ByteValued for VirtioConsoleControl {}
 
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(C, packed)]
+pub struct VirtioConsoleResize {
+    // The order of these fields in the kernel and in the spec do not match,
+    // the kernel does not follow the spec!
+    // So lets use
+    rows: u16,
+    cols: u16,
+}
+
+// Safe because it only has data and has no implicit padding.
+// but NOTE, that we rely on CPU being little endian, for the values to be correct
+unsafe impl ByteValued for VirtioConsoleResize {}
+
 impl VirtioConsoleConfig {
     pub fn new(cols: u16, rows: u16, max_nr_ports: u32) -> Self {
         VirtioConsoleConfig {
@@ -110,7 +121,6 @@ pub struct Console {
     pub(crate) activate_evt: EventFd,
     pub(crate) sigwinch_evt: EventFd,
     pub(crate) device_state: DeviceState,
-    pub(crate) in_buffer: VecDeque<u8>,
     config: VirtioConsoleConfig,
     configured: bool,
     pub(crate) interactive: bool,
@@ -123,7 +133,7 @@ pub struct Console {
 impl Console {
     pub fn new(ports: Vec<PortDescription>) -> super::Result<Console> {
         assert!(
-            ports.len() >= 1,
+            !ports.is_empty(),
             "Creating console device without any ports is currently not supported!"
         );
         // 2 control queues, 2 queues for each port (each port always has an input and output queue)
@@ -154,7 +164,6 @@ impl Console {
             sigwinch_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(ConsoleError::EventFd)?,
             device_state: DeviceState::Inactive,
-            in_buffer: VecDeque::new(),
             config,
             configured: false,
             interactive: true,
@@ -209,7 +218,13 @@ impl Console {
     pub fn update_console_size(&mut self, cols: u16, rows: u16) {
         debug!("update_console_size: {} {}", cols, rows);
         self.config.update_console_size(cols, rows);
-        self.signal_config_update().unwrap();
+
+        for port_id in 0..self.ports.len() {
+            if self.ports[port_id].console {
+                self.send_control_tx_resize(port_id as u32, &VirtioConsoleResize { cols, rows })
+            }
+            self.signal_used_queue().unwrap_or_default();
+        }
     }
 
     pub(crate) fn send_control_tx_data(&mut self, data: &[u8]) {
@@ -234,6 +249,21 @@ impl Console {
         self.send_control_tx_data(msg.as_slice());
     }
 
+    pub(crate) fn send_control_tx_resize(&mut self, port_id: u32, new_size: &VirtioConsoleResize) {
+        let resize_cmd = VirtioConsoleControl {
+            id: port_id,
+            event: control_event::VIRTIO_CONSOLE_RESIZE,
+            value: 0,
+        };
+
+        const SIZE_1: usize = size_of::<VirtioConsoleControl>();
+        const SIZE_2: usize = size_of::<VirtioConsoleResize>();
+        let mut data = [0u8; SIZE_1 + SIZE_2];
+        data[..SIZE_1].copy_from_slice(resize_cmd.as_slice());
+        data[SIZE_1..].copy_from_slice(new_size.as_slice());
+        self.send_control_tx_data(data.as_slice());
+    }
+
     pub(crate) fn process_control_rx(&mut self) -> bool {
         false
     }
@@ -246,7 +276,7 @@ impl Console {
                     // This should never happen, it's been already validated in the event handler.
                     DeviceState::Inactive => unreachable!(),
                 }
-            }
+            };
         }
         let mut used_any = false;
 
@@ -309,11 +339,14 @@ impl Console {
                     if !self.ports[cmd.id as usize].name.is_empty() {
                         let mut msg: Vec<u8> = Vec::new();
 
-                        msg.extend_from_slice(VirtioConsoleControl {
-                            id: cmd.id,
-                            event: VIRTIO_CONSOLE_PORT_NAME,
-                            value: 1, // Unspecified/unused in the spec, lets use the same value as QEMU.
-                        }.as_slice());
+                        msg.extend_from_slice(
+                            VirtioConsoleControl {
+                                id: cmd.id,
+                                event: VIRTIO_CONSOLE_PORT_NAME,
+                                value: 1, // Unspecified/unused in the spec, lets use the same value as QEMU.
+                            }
+                            .as_slice(),
+                        );
 
                         // The spec says the name shouldn't be NUL terminated.
                         // QEMU seems to NUL-terminate it, anyway.

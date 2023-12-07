@@ -1,17 +1,16 @@
 //! See https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html#x1-2920002
 //! for port <-> virtio queue index mapping
 
-use std::borrow::Cow;
 use crate::legacy::ReadableFd;
-use std::fs::File;
+use std::borrow::Cow;
+
 use std::io;
-use std::io::ErrorKind::WouldBlock;
+
 use std::io::Read;
-use vm_memory::bitmap::BitmapSlice;
-use vm_memory::volatile_memory::Error;
+
+
 use vm_memory::{
-    guest_memory, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryRegion,
-    VolatileMemoryError, VolatileSlice,
+    Bytes, GuestAddress, GuestMemory, GuestMemoryError,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -106,11 +105,16 @@ impl Port {
         M: GuestMemory + ?Sized,
     {
         if self.input.is_none() {
-            println!("DEBUG! attempted to read from port '{}'",self.name);
-            return Ok(0)
+            println!("DEBUG! attempted to read from port '{}'", self.name);
+            return Ok(0);
         }
         let mut buf = vec![0; count];
-        let bytes_read = self.input.as_mut().unwrap().read(&mut buf[..]).map_err(GuestMemoryError::IOError)?;
+        let bytes_read = self
+            .input
+            .as_mut()
+            .unwrap()
+            .read(&mut buf[..])
+            .map_err(GuestMemoryError::IOError)?;
         mem.write(&mut buf[..bytes_read], addr)
     }
     /*

@@ -1,10 +1,8 @@
-use std::io;
-use std::io::Read;
 use std::os::unix::io::AsRawFd;
 
-use crate::virtio::console::defs::control_event::VIRTIO_CONSOLE_PORT_OPEN;
-use crate::virtio::console::device::{VirtioConsoleControl, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX};
-use crate::virtio::console::port::{queue_idx_to_port_id, PortStatus, QueueDirection};
+
+use crate::virtio::console::device::{CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX};
+use crate::virtio::console::port::{queue_idx_to_port_id, QueueDirection};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 
@@ -97,12 +95,11 @@ impl Subscriber for Console {
         let mut raise_irq = false;
 
         //TODO: where is the resume_tx net equivalent?
-        if let Some((port_id, _)) = self
-            .ports
-            .iter()
-            .enumerate()
-            .find(|(id, port)| port.input.as_ref().is_some_and(|port| port.as_raw_fd() == source))
-        {
+        if let Some((port_id, _)) = self.ports.iter().enumerate().find(|(_id, port)| {
+            port.input
+                .as_ref()
+                .is_some_and(|port| port.as_raw_fd() == source)
+        }) {
             log::trace!("Input on port {port_id}");
             raise_irq = self.handle_input(&event.event_set(), port_id);
         } else if self.is_activated() {
