@@ -1,25 +1,23 @@
 use std::fmt::Debug;
 use std::io::Write;
+use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{cmp, io};
-use std::mem::size_of;
 
 use libc::TIOCGWINSZ;
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
-use vm_memory::{
-    ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap, VolatileMemory,
-};
+use vm_memory::{ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap, VolatileMemory};
 
 use super::super::{
     ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
     VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING,
 };
 use super::{defs, defs::control_event, defs::uapi};
-use crate::legacy::{Gic};
+use crate::legacy::Gic;
 use crate::virtio::console::defs::control_event::{
     VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_PORT_ADD, VIRTIO_CONSOLE_PORT_NAME,
     VIRTIO_CONSOLE_PORT_OPEN,
@@ -493,7 +491,7 @@ impl Console {
                     break;
                 }
                 Ok(len) => {
-                    log::trace!("Wrote {len} bytes to port {port_id}");
+                    log::trace!("Rx {len} bytes to port {port_id}");
                     queue.add_used(mem, head.index, len as u32);
                     used_any = true;
                 }
@@ -525,8 +523,8 @@ impl Console {
         while let Some(head) = queue.pop(mem) {
             // TODO: figure out what to do if the port doesn't have output
             let output = &mut self.ports[port_id].output.as_mut().unwrap();
-            log::trace!("Writing at port {port_id}");
-            mem.write_to(head.addr, output, head.len as usize).unwrap();
+            let num_bytes = mem.write_to(head.addr, output, head.len as usize).unwrap();
+            log::trace!("Tx from port {port_id} {num_bytes} bytes");
             output.flush().unwrap();
 
             queue.add_used(mem, head.index, head.len);
