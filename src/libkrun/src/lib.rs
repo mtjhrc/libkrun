@@ -4,12 +4,14 @@ extern crate log;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::env;
+use std::{env, io};
 use std::ffi::CStr;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
+use std::fs::{File, OpenOptions};
 #[cfg(feature = "net")]
 use std::os::fd::RawFd;
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(not(feature = "tee"))]
 use std::path::Path;
 #[cfg(feature = "tee")]
@@ -20,8 +22,9 @@ use std::sync::Mutex;
 
 #[cfg(feature = "tee")]
 use devices::virtio::CacheType;
-use env_logger::Env;
+use env_logger::{Env, Target};
 use libc::{c_char, c_int, size_t};
+use log::LevelFilter;
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
 use vmm::resources::VmResources;
@@ -240,7 +243,19 @@ pub extern "C" fn krun_set_log_level(level: u32) -> i32 {
         4 => "debug",
         _ => "trace",
     };
-    env_logger::Builder::from_env(Env::default().default_filter_or(log_level)).init();
+    /*
+    let fd = unsafe { libc::open(b"/tmp/krun-log".as_ptr() as *const c_char, libc::O_WRONLY | libc::O_NONBLOCK)};
+    if (fd < 0) {
+        panic!("Failed to open /tmp/krun-log")
+    */
+    // env_logger::Target::Pipe(Box::new(OpenOptions::new().write(true).append(true).custom_flags(libc::O_NONBLOCK).open("/tmp/krun-log").unwrap()));
+
+    env_logger::Builder::new()
+        .filter(Some("devices::virtio::console"), LevelFilter::Trace).target(Target::Stderr)
+        .init();
+    //log::trace!("hellooooooooo?");
+    //println!("print works though?");
+    //println!("krun was here");
     KRUN_SUCCESS
 }
 

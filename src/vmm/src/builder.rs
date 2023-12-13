@@ -6,7 +6,7 @@
 #[cfg(target_os = "macos")]
 use crossbeam_channel::unbounded;
 use std::fmt::{Display, Formatter};
-use std::io;
+use std::{io, mem};
 use std::io::{stderr, stdin, stdout, IsTerminal};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
@@ -50,6 +50,7 @@ use arch::ArchMemoryInfo;
 use arch::InitrdConfig;
 #[cfg(feature = "tee")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
+use libc::fcntl;
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
@@ -1095,7 +1096,6 @@ fn attach_console_devices(
     intc: Option<Arc<Mutex<Gic>>>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
-
     let ports = {
         let mut ports = Vec::new();
 
@@ -1116,10 +1116,12 @@ fn attach_console_devices(
         });
 
         if !stdin().is_terminal() {
+            // FIXME non-blocking hack!
+            mem::forget(SerialStdin::get());
             ports.push(PortDescription {
                 name: "krun-stdin".into(),
                 console: false,
-                input: Some(Box::new(io::stdin())),
+                input: Some(Box::new(stdin())),
                 output: None,
             });
         }

@@ -1,5 +1,6 @@
 use std::fmt::Debug;
-use std::io::Write;
+use std::io::{stderr, stdin, stdout, Write};
+use std::io::IsTerminal;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -132,6 +133,13 @@ pub struct Console {
 
 impl Console {
     pub fn new(ports: Vec<PortDescription>) -> super::Result<Console> {
+        log::trace!(
+            "isatty? stdin={} stdout={} stderr={}",
+            stdin().is_terminal(),
+            stdout().is_terminal(),
+            stderr().is_terminal()
+        );
+
         assert!(
             !ports.is_empty(),
             "Creating console device without any ports is currently not supported!"
@@ -345,7 +353,7 @@ impl Console {
                                 event: VIRTIO_CONSOLE_PORT_NAME,
                                 value: 1, // Unspecified/unused in the spec, lets use the same value as QEMU.
                             }
-                            .as_slice(),
+                                .as_slice(),
                         );
 
                         // The spec says the name shouldn't be NUL terminated.
@@ -493,7 +501,7 @@ impl Console {
                     break;
                 }
                 Ok(len) => {
-                    log::trace!("Wrote {len} bytes to port {port_id}");
+                    log::trace!("Rx {len} bytes to port {port_id}");
                     queue.add_used(mem, head.index, len as u32);
                     used_any = true;
                 }
@@ -525,8 +533,8 @@ impl Console {
         while let Some(head) = queue.pop(mem) {
             // TODO: figure out what to do if the port doesn't have output
             let output = &mut self.ports[port_id].output.as_mut().unwrap();
-            log::trace!("Writing at port {port_id}");
-            mem.write_to(head.addr, output, head.len as usize).unwrap();
+            let num_bytes = mem.write_to(head.addr, output, head.len as usize).unwrap();
+            log::trace!("Tx from port {port_id} {num_bytes} bytes");
             output.flush().unwrap();
 
             queue.add_used(mem, head.index, head.len);

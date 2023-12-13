@@ -109,12 +109,14 @@ impl Port {
             return Ok(0);
         }
         let mut buf = vec![0; count];
+        log::trace!("before read");
         let bytes_read = self
             .input
             .as_mut()
             .unwrap()
             .read(&mut buf[..])
             .map_err(GuestMemoryError::IOError)?;
+        log::trace!("after read!");
         mem.write(&mut buf[..bytes_read], addr)
     }
     /*
