@@ -1119,7 +1119,7 @@ fn attach_console_devices(
             ports.push(PortDescription {
                 name: "krun-stdin".into(),
                 console: false,
-                input: Some(Box::new(io::stdin())),
+                input: Some(Box::new(SerialStdin::get())),
                 output: None,
             });
         }
