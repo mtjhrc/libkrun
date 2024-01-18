@@ -1048,20 +1048,11 @@ fn attach_console_devices(
         log::error!("Failed to set terminal to raw mode: {e}")
     }
 
-    let mut ports = vec![PortDescription::Console {
-        input: if stdin_is_terminal {
-            Some(PortInput::stdin().unwrap())
-        } else {
-            None
-        },
-        // TODO: redirect to rust-log if stdout is not a terminal
-        output: if stdout_is_terminal {
-            Some(PortOutput::stdout().unwrap())
-        } else {
-            None
-        },
+    let ports = vec![PortDescription::Console {
+        input: Some(PortInput::stdin().unwrap()),
+        output: Some(PortOutput::stdout().unwrap()),
     }];
-
+    /*
     if !stdin_is_terminal {
         ports.push(PortDescription::InputPipe {
             name: "krun-stdin".into(),
@@ -1074,7 +1065,7 @@ fn attach_console_devices(
             name: "krun-stdout".into(),
             output: PortOutput::stdout().unwrap(),
         })
-    };
+    };*/
     //TODO: same for stderr
 
     let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));

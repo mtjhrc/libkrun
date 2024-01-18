@@ -1,6 +1,7 @@
 use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 
+
 use crate::virtio::console::device::{CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX};
 use crate::virtio::console::port_queue_mapping::{queue_idx_to_port_id, QueueDirection};
 use polly::event_manager::{EventManager, Subscriber};
@@ -27,11 +28,17 @@ impl Console {
         true
     }
 
-    fn handle_port_queue_event(&mut self, queue_index: usize) -> bool {
+    fn notify_port_queue_event(&mut self, queue_index: usize) {
         let (direction, port_id) = queue_idx_to_port_id(queue_index);
         match direction {
-            QueueDirection::Rx => self.resume_rx(port_id),
-            QueueDirection::Tx => self.resume_tx(port_id),
+            QueueDirection::Rx => {
+                log::trace!("Notify rx (queue event)");
+                self.ports[port_id].notify_rx()
+            },
+            QueueDirection::Tx => {
+                log::trace!("Notify tx (queue event)");
+                self.ports[port_id].notify_tx()
+            },
         }
     }
 
@@ -91,7 +98,7 @@ impl Console {
         self.ports
             .iter()
             .enumerate()
-            .find(|(_port_id, port)| port.input_rawfd() == Some(source))
+            .find(|(_port_id, port)| port.input_fd() == Some(source))
             .map(|(port_id, _)| port_id)
     }
 
@@ -99,7 +106,7 @@ impl Console {
         self.ports
             .iter()
             .enumerate()
-            .find(|(_port_id, port)| port.output_rawfd() == Some(source))
+            .find(|(_port_id, port)| port.output_fd() == Some(source))
             .map(|(port_id, _)| port_id)
     }
 }
@@ -116,19 +123,14 @@ impl Subscriber for Console {
 
         let mut raise_irq = false;
 
-        if let Some(port_id) = self.port_id_of_input(source) {
-            let has_input = event.event_set().contains(EventSet::IN);
-            let has_eof = event
-                .event_set()
-                .intersects(EventSet::HANG_UP | EventSet::READ_HANG_UP);
-            raise_irq |= self.handle_input(port_id, has_input, has_eof)
-        } else if let Some(port_id) = self.port_id_of_output(source) {
-            let has_eof = event
-                .event_set()
-                .intersects(EventSet::HANG_UP | EventSet::READ_HANG_UP);
-            raise_irq |= self.handle_output(port_id, has_eof)
-        } else if self.is_activated() {
-            if source == control_txq {
+        if self.is_activated() {
+            if let Some(port_id) = self.port_id_of_input(source) {
+                log::trace!("Notify rx (source)");
+                self.ports[port_id].notify_rx();
+            } else if let Some(port_id) = self.port_id_of_output(source) {
+                log::trace!("Notify tx (source)");
+                self.ports[port_id].notify_tx();
+            } else if source == control_txq {
                 raise_irq |=
                     self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
             } else if source == control_rxq {
@@ -140,8 +142,8 @@ impl Subscriber for Console {
                 .iter()
                 .position(|fd| fd.as_raw_fd() == source)
             {
-                raise_irq |= self.read_queue_event(queue_index, event)
-                    && self.handle_port_queue_event(queue_index)
+                raise_irq |= self.read_queue_event(queue_index, event);
+                self.notify_port_queue_event(queue_index);
             } else if source == activate_evt {
                 self.handle_activate_event(event_manager);
             } else if source == sigwinch_evt {
@@ -155,9 +157,8 @@ impl Subscriber for Console {
                 source
             );
         }
-
         if raise_irq {
-            self.signal_used_queue().unwrap_or_default();
+            self.irq.signal_used_queue();
         }
     }
 
@@ -170,13 +171,13 @@ impl Subscriber for Console {
         let in_port_events = self
             .ports
             .iter()
-            .filter_map(|port| port.input_rawfd())
-            .map(|fd| EpollEvent::new(EventSet::IN | EventSet::EDGE_TRIGGERED, fd as u64));
+            .filter_map(|port| port.input_fd())
+            .map(|fd| EpollEvent::new(EventSet::IN, fd as u64));
 
         let out_port_events = self
             .ports
             .iter()
-            .filter_map(|port| port.output_rawfd())
+            .filter_map(|port| port.output_fd())
             .map(|fd| EpollEvent::new(EventSet::OUT | EventSet::EDGE_TRIGGERED, fd as u64));
 
         static_events

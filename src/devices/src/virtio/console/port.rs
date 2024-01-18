@@ -2,17 +2,19 @@
 //! for port <-> virtio queue index mapping
 
 use std::borrow::Cow;
-use std::io;
+
 
 use std::os::fd::{AsRawFd, RawFd};
 
 use crate::virtio::console::device::PortDescription;
-use crate::virtio::console::port_io::{PortInput, PortOutput};
+
 use crate::virtio::Queue;
 use vm_memory::{
-    Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile,
-    VolatileMemoryError, WriteVolatile,
+    GuestMemoryMmap,
 };
+use crate::virtio::console::irq_signaler::IRQSignaler;
+use crate::virtio::console::port_rx::{PortRx};
+use crate::virtio::console::port_tx::PortTx;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum PortStatus {
@@ -20,22 +22,15 @@ pub(crate) enum PortStatus {
     Ready { opened: bool },
 }
 
-struct UnfinishedDescriptorChain {
-    addr: GuestAddress,
-    len: u32,
-    index: u16,
-}
-
 pub(crate) struct Port {
     /// Empty if no name given
-    pub(crate) name: Cow<'static, str>,
-    pub(crate) status: PortStatus,
-    pub(crate) input: Option<PortInput>,
-    pub(crate) pending_input: bool,
-    pub(crate) pending_eof: bool,
-    pub(crate) output: Option<PortOutput>,
-    unfinished_output: Option<UnfinishedDescriptorChain>,
-    pub(crate) represents_console: bool,
+    name: Cow<'static, str>,
+    status: PortStatus,
+    represents_console: bool,
+    input_fd: Option<RawFd>,
+    output_fd: Option<RawFd>,
+    rx: PortRx,
+    tx: PortTx,
 }
 
 impl Port {
@@ -45,47 +40,62 @@ impl Port {
                 name: "".into(),
                 represents_console: true,
                 status: PortStatus::NotReady,
-                input,
-                pending_input: false,
-                pending_eof: false,
-                output,
-                unfinished_output: None,
+                input_fd: input.as_ref().map(AsRawFd::as_raw_fd),
+                output_fd: output.as_ref().map(AsRawFd::as_raw_fd),
+                rx: PortRx::new(input.unwrap()), //TODO
+                tx: PortTx::new(output.unwrap())
             },
-            PortDescription::InputPipe { name, input } => Self {
+            /*PortDescription::InputPipe { name, input } => Self {
                 name,
+                represents_console: false,
                 status: PortStatus::NotReady,
                 input: Some(input),
-                pending_input: false,
-                pending_eof: false,
                 output: None,
-                represents_console: false,
-                unfinished_output: None,
             },
             PortDescription::OutputPipe { name, output } => Self {
                 name,
+                represents_console: false,
                 status: PortStatus::NotReady,
                 input: None,
-                pending_input: false,
-                pending_eof: false,
                 output: Some(output),
-                represents_console: false,
-                unfinished_output: None,
-            },
+            },*/
         }
     }
 
-    pub fn input_rawfd(&self) -> Option<RawFd> {
-        self.input.as_ref().map(|inp| inp.as_raw_fd())
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    pub fn output_rawfd(&self) -> Option<RawFd> {
-        self.output.as_ref().map(|out| out.as_raw_fd())
+    pub fn is_console(&self) -> bool {
+        self.represents_console
     }
 
-    pub fn has_pending_output(&self) -> bool {
-        self.unfinished_output.is_some()
+    pub fn input_fd(&self) -> Option<RawFd> {
+        self.input_fd
     }
 
+    pub fn output_fd(&self) -> Option<RawFd> {
+        self.output_fd
+    }
+
+    pub fn notify_rx(&self) {
+        self.rx.notify()
+    }
+
+    pub fn notify_tx(&self) {
+        self.tx.notify();
+    }
+
+    pub fn on_ready(&mut self) {
+        self.status = PortStatus::Ready {opened: false}
+    }
+
+    pub fn on_open(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, tx_queue: Queue, irq_signaler: IRQSignaler) {
+        self.status = PortStatus::Ready {opened: true};
+        self.rx.start(mem.clone(), rx_queue, irq_signaler.clone());
+        self.tx.start(mem, tx_queue, irq_signaler);
+    }
+    /*
     pub fn process_rx(&mut self, mem: &GuestMemoryMmap, queue: &mut Queue) -> bool {
         let mut raise_irq = false;
 
@@ -96,6 +106,7 @@ impl Port {
         while let Some(head) = queue.pop(mem) {
             let result = mem.try_access(head.len as usize, head.addr, |_, len, addr, region| {
                 let mut target = region.get_slice(addr, len).unwrap();
+                log::trace!("read {{");
                 let result = input.read_volatile(&mut target);
                 log::trace!("}} read");
                 match result {
@@ -195,5 +206,5 @@ impl Port {
         }
 
         raise_irq
-    }
+    }*/
 }

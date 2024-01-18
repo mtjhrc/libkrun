@@ -1,71 +1,59 @@
 use crate::virtio::console::irq_signaler::IRQSignaler;
-use crate::virtio::console::port::PortStatus;
+
 use crate::virtio::{PortInput, Queue};
-use polly::event_manager::{EventManager, Subscriber};
-use std::os::fd::{AsRawFd, RawFd};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::{JoinHandle, Thread};
-use std::{io, thread};
+
+
+
+use std::thread::{JoinHandle};
+use std::{io, mem, thread};
 use vm_memory::{
     GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
 };
 
-pub struct PortRxArgs {
-    pub mem: GuestMemoryMmap,
-    pub queue: Queue,
-    pub input: PortInput,
-    pub irq_signaler: IRQSignaler,
-}
-
-pub(crate) enum PortRx {
+enum State {
+    Stopped {
+        input: PortInput,
+    },
+    Starting,
     Running {
-        input_fd: RawFd,
         thread: JoinHandle<()>,
     },
-    Stopped {
-        args: PortRxArgs,
-    },
+}
+
+pub struct PortRx {
+    state: State,
 }
 
 impl PortRx {
-    pub fn new(args: PortRxArgs) -> Self {
-        Self::Stopped { args }
-    }
-
-    pub fn input_raw_fd(&self) -> RawFd {
-        match self {
-            PortRx::Running { input_fd, .. } => *input_fd,
-            PortRx::Stopped { args } => args.input.as_raw_fd(),
+    pub fn new(input: PortInput) -> Self {
+        Self {
+            state: State::Stopped { input }
         }
     }
 
-    pub fn start(&mut self) {
-        match *self {
-            Self::Running { .. } => panic!("Already running!"),
-            Self::Stopped { args } => {
-                let input_fd = args.input.as_raw_fd();
-                let thread = thread::spawn(|| run(args));
-                *self = Self::Running { input_fd, thread }
+    pub fn start(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, irq_signaler: IRQSignaler) {
+        let old_state = mem::replace(&mut self.state, State::Starting);
+        self.state = match old_state {
+            State::Starting | State::Running {.. } => panic!("Already running!"),
+            State::Stopped {input} => {
+                let thread = thread::spawn(|| process_rx(mem, rx_queue, irq_signaler, input));
+                State::Running {
+                    thread
+                }
             }
-        }
+        };
     }
 
     pub fn notify(&self) {
-        match self {
-            Self::Running { thread, .. } => thread.thread().unpark(),
-            Self::Stopped { .. } => (),
+        match &self.state {
+            State::Running { thread, .. } => thread.thread().unpark(),
+            State::Starting | State::Stopped { .. } => (),
         }
     }
 }
 
-fn run(args: PortRxArgs) {
-    let PortRxArgs {
-        ref mem,
-        mut queue,
-        mut input,
-        irq_signaler,
-    } = args;
-
+fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler, mut input: PortInput) {
+    let mem = &mem;
     loop {
         let head = loop {
             match queue.pop(mem) {
@@ -77,8 +65,7 @@ fn run(args: PortRxArgs) {
             }
         };
 
-        let result = self
-            .mem
+        let result = mem
             .try_access(head.len as usize, head.addr, |_, len, addr, region| {
                 let mut target = region.get_slice(addr, len).unwrap();
                 let result = input.read_volatile(&mut target);

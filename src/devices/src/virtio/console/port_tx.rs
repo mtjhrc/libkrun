@@ -1,18 +1,16 @@
 use crate::virtio::console::irq_signaler::IRQSignaler;
 
-use crate::virtio::{PortInput, Queue};
+use crate::virtio::{PortInput, PortOutput, Queue};
 
 
 
 use std::thread::{JoinHandle};
 use std::{io, mem, thread};
-use vm_memory::{
-    GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
-};
+use vm_memory::{Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError, WriteVolatile};
 
 enum State {
     Stopped {
-        input: PortInput,
+        output: PortOutput,
     },
     Starting,
     Running {
@@ -20,23 +18,23 @@ enum State {
     },
 }
 
-pub struct PortRx {
+pub struct PortTx {
     state: State,
 }
 
-impl PortRx {
-    pub fn new(input: PortInput) -> Self {
+impl PortTx {
+    pub fn new(output: PortOutput) -> Self {
         Self {
-            state: State::Stopped { input }
+            state: State::Stopped { output }
         }
     }
 
-    pub fn start(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, irq_signaler: IRQSignaler) {
+    pub fn start(&mut self, mem: GuestMemoryMmap, tx_queue: Queue, irq_signaler: IRQSignaler) {
         let old_state = mem::replace(&mut self.state, State::Starting);
         self.state = match old_state {
             State::Starting | State::Running {.. } => panic!("Already running!"),
-            State::Stopped {input} => {
-                let thread = thread::spawn(|| process_rx(mem, rx_queue, irq_signaler, input));
+            State::Stopped {output} => {
+                let thread = thread::spawn(|| process_tx(mem, tx_queue, irq_signaler, output));
                 State::Running {
                     thread
                 }
@@ -46,54 +44,64 @@ impl PortRx {
 
     pub fn notify(&self) {
         match &self.state {
-            State::Running { thread, .. } => thread.thread().unpark(),
+            State::Running { thread, .. } => {
+                thread.thread().unpark()
+            },
             State::Starting | State::Stopped { .. } => (),
         }
     }
 }
 
-fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler, mut input: PortInput) {
+fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut output: PortOutput) {
     let mem = &mem;
     loop {
         let head = loop {
             match queue.pop(mem) {
                 Some(chain) => break chain,
                 None => {
-                    irq_signaler.signal_used_queue();
+                    irq.signal_used_queue();
+                    log::trace!("Tx parking (queue empty)");
                     thread::park()
                 }
             }
         };
 
-        let result = mem
-            .try_access(head.len as usize, head.addr, |_, len, addr, region| {
-                let mut target = region.get_slice(addr, len).unwrap();
-                let result = input.read_volatile(&mut target);
-                match result {
-                    Ok(n) => Ok(n),
+        let result = mem.try_access(head.len as usize, head.addr, |_, len, addr, region| {
+            let src = region.get_slice(addr, len).unwrap();
+
+            /*{
+                let mut buf = Vec::new();
+                buf.write_volatile(&src).unwrap();
+                log::trace!("Tx '{}'", String::from_utf8_lossy(&buf))
+            }*/
+
+            loop {
+                match output.write_volatile(&src) {
+                    // try_access seem to handle partial write for us (we will be invoked again with an offset)
+                    Ok(n) => break Ok(n),
                     // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
                     Err(VolatileMemoryError::IOError(e))
-                        if e.kind() == io::ErrorKind::WouldBlock =>
-                    {
-                        Ok(0)
+                    if e.kind() == io::ErrorKind::WouldBlock => {
+                        log::trace!("Tx parking (would block)");
+                        irq.signal_used_queue();
+                        thread::park()
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => break Err(e.into()),
                 }
-            });
+            }
+        });
 
         match result {
             Ok(0) => {
-                log::trace!("Rx EOF/WouldBlock");
+                log::trace!("Tx EOF/WouldBlock");
                 queue.undo_pop();
-                irq_signaler.signal_used_queue();
-                thread::park();
             }
-            Ok(len) => {
-                log::trace!("Rx {len} bytes");
-                queue.add_used(mem, head.index, len as u32);
+            Ok(n) => {
+                log::trace!("Tx {n}/{len}", len = head.len);
+                queue.add_used(mem, head.index, head.len)
             }
             Err(e) => {
-                log::error!("Failed to read: {e:?}")
+                log::error!("Failed to write output: {e}");
             }
         }
     }

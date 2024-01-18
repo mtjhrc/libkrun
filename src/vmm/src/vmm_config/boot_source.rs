@@ -22,7 +22,7 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodu
 
 #[cfg(feature = "amd-sev")]
 pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodules console=hvc0 \
-                                          root=/dev/vda rw quiet no-kvmapf";
+                                          root=/dev/vda rw no-kvmapf irqpoll";
 #[cfg(target_os = "macos")]
 pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodules console=hvc0 \
                                           rootfstype=virtiofs rw quiet no-kvmapf";

@@ -269,7 +269,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Add,
-                event_fd_1.as_raw_fd() as i32,
+                event_fd_1.as_raw_fd(),
                 &event_1
             )
             .is_ok());
@@ -278,7 +278,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Add,
-                event_fd_1.as_raw_fd() as i32,
+                event_fd_1.as_raw_fd(),
                 &event_1
             )
             .is_err());
@@ -288,7 +288,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Add,
-                event_fd_2.as_raw_fd() as i32,
+                event_fd_2.as_raw_fd(),
                 // For this fd, we want an Event instance that has `data` field set to other
                 // value than the value of the fd and `events` without EPOLLIN type set.
                 &EpollEvent::new(EventSet::OUT, 10)
@@ -303,7 +303,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Add,
-                event_fd_3.as_raw_fd() as i32,
+                event_fd_3.as_raw_fd(),
                 &event_3
             )
             .is_ok());
@@ -343,7 +343,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Modify,
-                event_fd_1.as_raw_fd() as i32,
+                event_fd_1.as_raw_fd(),
                 &event_1
             )
             .is_ok());
@@ -353,7 +353,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Modify,
-                event_fd_4.as_raw_fd() as i32,
+                event_fd_4.as_raw_fd(),
                 &EpollEvent::default()
             )
             .is_err());
@@ -371,7 +371,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Modify,
-                event_fd_1.as_raw_fd() as i32,
+                event_fd_1.as_raw_fd(),
                 &EpollEvent::default()
             )
             .is_ok());
@@ -386,7 +386,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Delete,
-                event_fd_2.as_raw_fd() as i32,
+                event_fd_2.as_raw_fd(),
                 &EpollEvent::default()
             )
             .is_ok());
@@ -404,7 +404,7 @@ mod tests {
         assert!(epoll
             .ctl(
                 ControlOperation::Delete,
-                event_fd_4.as_raw_fd() as i32,
+                event_fd_4.as_raw_fd(),
                 &EpollEvent::default()
             )
             .is_err());

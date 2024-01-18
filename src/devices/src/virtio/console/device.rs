@@ -1,10 +1,8 @@
-use std::borrow::Cow;
 use std::cmp;
 use std::io::Write;
 use std::mem::{size_of, size_of_val};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::result;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use libc::TIOCGWINSZ;
@@ -13,20 +11,18 @@ use vm_memory::{ByteValued, Bytes, GuestMemoryMmap};
 
 use super::super::{
     ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
-    VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING,
 };
 use super::{defs, defs::control_event, defs::uapi};
 use crate::legacy::Gic;
-use crate::virtio::console::console_control::{
-    ConsoleControlSender, VirtioConsoleControl, VirtioConsoleResize,
-};
+use crate::virtio::console::console_control::{ConsoleControlSender, VirtioConsoleControl};
 use crate::virtio::console::defs::QUEUE_SIZE;
-use crate::virtio::console::port::{Port, PortStatus};
+use crate::virtio::console::port::Port;
 use crate::virtio::console::port_queue_mapping::{
     num_queues, port_id_to_queue_idx, QueueDirection,
 };
 use crate::virtio::{PortInput, PortOutput};
-use crate::Error as DeviceError;
+
+use crate::virtio::console::irq_signaler::IRQSignaler;
 
 pub(crate) const CONTROL_RXQ_INDEX: usize = 2;
 pub(crate) const CONTROL_TXQ_INDEX: usize = 3;
@@ -82,19 +78,20 @@ impl VirtioConsoleConfig {
 }
 
 pub struct Console {
+    pub(crate) device_state: DeviceState,
+    pub(crate) irq: IRQSignaler,
+    pub(crate) ports: Vec<Port>,
+
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
-    pub(crate) ports: Vec<Port>,
+
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
-    pub(crate) interrupt_status: Arc<AtomicUsize>,
-    pub(crate) interrupt_evt: EventFd,
+
     pub(crate) activate_evt: EventFd,
     pub(crate) sigwinch_evt: EventFd,
-    pub(crate) device_state: DeviceState,
+
     config: VirtioConsoleConfig,
-    intc: Option<Arc<Mutex<Gic>>>,
-    irq_line: Option<u32>,
 }
 
 pub enum PortDescription {
@@ -102,31 +99,18 @@ pub enum PortDescription {
         input: Option<PortInput>,
         output: Option<PortOutput>,
     },
-    InputPipe {
+    /*InputPipe {
         name: Cow<'static, str>,
         input: PortInput,
     },
     OutputPipe {
         name: Cow<'static, str>,
         output: PortOutput,
-    },
-}
-
-#[macro_export]
-macro_rules! get_mem {
-    ($self:tt) => {
-        match $self.device_state {
-            DeviceState::Activated(ref mem) => mem,
-            // This should never happen, it's been already validated in the event handler.
-            DeviceState::Inactive => unreachable!(),
-        }
-    };
+    },*/
 }
 
 impl Console {
-    pub fn new(port_descriptions: Vec<PortDescription>) -> super::Result<Console> {
-        let ports: Vec<Port> = port_descriptions.into_iter().map(Port::new).collect();
-
+    pub fn new(ports: Vec<PortDescription>) -> super::Result<Console> {
         let num_queues = num_queues(ports.len());
         let queues = vec![VirtQueue::new(QUEUE_SIZE); num_queues];
 
@@ -138,27 +122,23 @@ impl Console {
 
         let (cols, rows) = get_win_size();
         let config = VirtioConsoleConfig::new(cols, rows, ports.len() as u32);
-
+        let ports = ports.into_iter().map(Port::new).collect();
         Ok(Console {
+            irq: IRQSignaler::new(),
+            ports,
             queues,
             queue_events,
-            ports,
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
-            interrupt_status: Arc::new(AtomicUsize::new(0)),
-            interrupt_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(ConsoleError::EventFd)?,
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(ConsoleError::EventFd)?,
             sigwinch_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(ConsoleError::EventFd)?,
             device_state: DeviceState::Inactive,
             config,
-            intc: None,
-            irq_line: None,
         })
     }
-
+    /*
     pub fn handle_input(&mut self, port_id: usize, has_input: bool, has_eof: bool) -> bool {
         let mut raise_irq = false;
 
@@ -221,6 +201,7 @@ impl Console {
         self.ports[port_id].output = None;
     }
 
+
     pub fn handle_output(&mut self, port_id: usize, has_eof: bool) -> bool {
         let mut raise_irq = false;
         match self.ports[port_id].status {
@@ -251,62 +232,34 @@ impl Console {
     pub fn resume_tx(&mut self, port_id: usize) -> bool {
         self.handle_output(port_id, self.ports[port_id].pending_eof)
     }
+    */
 
     pub fn id(&self) -> &str {
         defs::CONSOLE_DEV_ID
     }
 
     pub fn set_intc(&mut self, intc: Arc<Mutex<Gic>>) {
-        self.intc = Some(intc);
+        self.irq.set_intc(intc)
     }
 
     pub fn get_sigwinch_fd(&self) -> RawFd {
         self.sigwinch_evt.as_raw_fd()
     }
 
-    /// Signal the guest driver that we've used some virtio buffers that it had previously made
-    /// available.
-    pub fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
-        debug!("console: raising IRQ");
-        self.interrupt_status
-            .fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
-        if let Some(intc) = &self.intc {
-            intc.lock().unwrap().set_irq(self.irq_line.unwrap());
-            Ok(())
-        } else {
-            self.interrupt_evt.write(1).map_err(|e| {
-                error!("Failed to signal used queue: {:?}", e);
-                DeviceError::FailedSignalingUsedQueue(e)
-            })
-        }
-    }
-
-    pub fn signal_config_update(&self) -> result::Result<(), DeviceError> {
-        debug!("console: raising IRQ for config update");
-        self.interrupt_status
-            .fetch_or(VIRTIO_MMIO_INT_CONFIG as usize, Ordering::SeqCst);
-        self.interrupt_evt.write(1).map_err(|e| {
-            error!("Failed to signal used queue: {:?}", e);
-            DeviceError::FailedSignalingUsedQueue(e)
-        })
-    }
-
     pub fn update_console_size(&mut self, cols: u16, rows: u16) {
         debug!("update_console_size: {} {}", cols, rows);
         self.config.update_console_size(cols, rows);
-        ConsoleControlSender::new(&mut self.queues[CONTROL_RXQ_INDEX]).send_console_resize(
+        /*ConsoleControlSender::new(&mut self.queues[CONTROL_RXQ_INDEX]).send_console_resize(
             get_mem!(self),
             0,
             &VirtioConsoleResize { rows, cols },
-        );
-        self.signal_config_update().unwrap();
+        );*/
+        self.irq.signal_config_update()
     }
 
     pub(crate) fn process_control_tx(&mut self) -> bool {
-        let mem = match self.device_state {
-            DeviceState::Activated(ref mem) => mem,
-            // This should never happen, it's been already validated in the event handler.
-            DeviceState::Inactive => unreachable!(),
+        let DeviceState::Activated(ref mem) = self.device_state else {
+            unreachable!()
         };
 
         let (rx_queue, tx_queue) =
@@ -314,7 +267,7 @@ impl Console {
         let mut control = ConsoleControlSender::new(rx_queue);
         let mut send_irq = false;
 
-        let mut ports_to_resume: Vec<u32> = Vec::new();
+        let mut ports_to_resume = Vec::new();
 
         while let Some(head) = tx_queue.pop(mem) {
             send_irq = true;
@@ -348,15 +301,15 @@ impl Console {
                         log::error!("Port initialization failed: {:?}", cmd);
                         continue;
                     }
-                    self.ports[cmd.id as usize].status = PortStatus::Ready { opened: false };
-                    if self.ports[cmd.id as usize].represents_console {
+                    self.ports[cmd.id as usize].on_ready();
+                    if self.ports[cmd.id as usize].is_console() {
                         control.send_mark_console_port(mem, cmd.id);
                     } else {
                         // lets start with all ports open for now
                         control.send_port_open(mem, cmd.id, true)
                     }
 
-                    let name = &self.ports[cmd.id as usize].name;
+                    let name = self.ports[cmd.id as usize].name();
                     if !name.is_empty() {
                         control.send_port_name(mem, cmd.id, name)
                     }
@@ -375,21 +328,36 @@ impl Console {
                         }
                     };
 
-                    if self.ports[cmd.id as usize].status == PortStatus::NotReady {
-                        log::warn!("Driver signaled opened={} to port {} that was not ready, assuming the port is ready.",opened, cmd.id)
+                    if !opened {
+                        log::trace!("Closed port not implemented!");
+                        continue;
                     }
-                    self.ports[cmd.id as usize].status = PortStatus::Ready { opened };
+
+                    ports_to_resume.push(cmd.id as usize);
+
+                    /*
+                    if ports[cmd.id as usize].status == PortStatus::NotReady {
+                        log::warn!("Driver signaled opened={} to port {} that was not ready, assuming the port is ready.",opened, cmd.id)
+                    }*/
+                    //self.ports[cmd.id as usize].status = PortStatus::Ready { opened };
                     // There could be pending input on the given port, so lets try to process it
+
+                    /*
                     if opened {
                         ports_to_resume.push(cmd.id);
-                    }
+                    }*/
                 }
                 _ => log::warn!("Unknown console control event {:x}", cmd.event),
             }
         }
 
         for port_id in ports_to_resume {
-            send_irq |= self.resume_rx(port_id as usize);
+            self.ports[port_id].on_open(
+                mem.clone(),
+                self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)].clone(),
+                self.queues[port_id_to_queue_idx(QueueDirection::Tx, port_id)].clone(),
+                self.irq.clone(),
+            );
         }
 
         send_irq
@@ -426,15 +394,15 @@ impl VirtioDevice for Console {
     }
 
     fn interrupt_evt(&self) -> &EventFd {
-        &self.interrupt_evt
+        self.irq.interrupt_evt()
     }
 
     fn interrupt_status(&self) -> Arc<AtomicUsize> {
-        self.interrupt_status.clone()
+        self.irq.interrupt_status()
     }
 
     fn set_irq_line(&mut self, irq: u32) {
-        self.irq_line = Some(irq);
+        self.irq.set_irq_line(irq)
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
@@ -461,7 +429,7 @@ impl VirtioDevice for Console {
 
     fn activate(&mut self, mem: GuestMemoryMmap) -> ActivateResult {
         if self.activate_evt.write(1).is_err() {
-            error!("Cannot write to activate_evt",);
+            error!("Cannot write to activate_evt");
             return Err(ActivateError::BadActivate);
         }
 
