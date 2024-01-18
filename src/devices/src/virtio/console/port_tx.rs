@@ -2,22 +2,19 @@ use crate::virtio::console::irq_signaler::IRQSignaler;
 
 use crate::virtio::{PortInput, PortOutput, Queue};
 
-
-
-use std::thread::{JoinHandle};
-use std::{io, mem, thread};
-use std::os::fd::AsRawFd;
 use nix::poll::{poll, PollFd, PollFlags};
-use vm_memory::{Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError, WriteVolatile};
+use std::os::fd::AsRawFd;
+use std::thread::JoinHandle;
+use std::{io, mem, thread};
+use vm_memory::{
+    Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
+    WriteVolatile,
+};
 
 enum State {
-    Stopped {
-        output: PortOutput,
-    },
+    Stopped { output: PortOutput },
     Starting,
-    Running {
-        thread: JoinHandle<()>,
-    },
+    Running { thread: JoinHandle<()> },
 }
 
 pub struct PortTx {
@@ -27,28 +24,24 @@ pub struct PortTx {
 impl PortTx {
     pub fn new(output: PortOutput) -> Self {
         Self {
-            state: State::Stopped { output }
+            state: State::Stopped { output },
         }
     }
 
     pub fn start(&mut self, mem: GuestMemoryMmap, tx_queue: Queue, irq_signaler: IRQSignaler) {
         let old_state = mem::replace(&mut self.state, State::Starting);
         self.state = match old_state {
-            State::Starting | State::Running {.. } => panic!("Already running!"),
-            State::Stopped {output} => {
+            State::Starting | State::Running { .. } => panic!("Already running!"),
+            State::Stopped { output } => {
                 let thread = thread::spawn(|| process_tx(mem, tx_queue, irq_signaler, output));
-                State::Running {
-                    thread
-                }
+                State::Running { thread }
             }
         };
     }
 
     pub fn notify(&self) {
         match &self.state {
-            State::Running { thread, .. } => {
-                thread.thread().unpark()
-            },
+            State::Running { thread, .. } => thread.thread().unpark(),
             State::Starting | State::Stopped { .. } => (),
         }
     }
@@ -73,43 +66,51 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
             }
         };
 
-        let result = mem.try_access(head.len as usize, head.addr, |_, len, addr, region| {
-            let src = region.get_slice(addr, len).unwrap();
+        let head_index = head.index;
+        let mut bytes_written = 0;
 
-            /*{
-                let mut buf = Vec::new();
-                buf.write_volatile(&src).unwrap();
-                log::trace!("Tx '{}'", String::from_utf8_lossy(&buf))
-            }*/
+        'chain_loop:
+        for chain in head.into_iter().readable() {
+            log::trace!("tx chain: {:?} {:?}", chain.addr, chain.len);
+            let result = mem.try_access(chain.len as usize, chain.addr, |_, len, addr, region| {
+                let src = region.get_slice(addr, len).unwrap();
 
-            loop {
-                match output.write_volatile(&src) {
-                    // try_access seem to handle partial write for us (we will be invoked again with an offset)
-                    Ok(n) => break Ok(n),
-                    // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
-                    Err(VolatileMemoryError::IOError(e))
-                    if e.kind() == io::ErrorKind::WouldBlock => {
-                        log::trace!("Tx wait for output (would block)");
-                        wait_for_output()
+                loop {
+                    match output.write_volatile(&src) {
+                        // try_access seem to handle partial write for us (we will be invoked again with an offset)
+                        Ok(n) => break Ok(n),
+                        // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
+                        Err(VolatileMemoryError::IOError(e))
+                            if e.kind() == io::ErrorKind::WouldBlock =>
+                        {
+                            log::trace!("Tx wait for output (would block)");
+                            wait_for_output()
+                        }
+                        Err(e) => break Err(e.into()),
                     }
-                    Err(e) => break Err(e.into()),
+                }
+            });
+
+            match result {
+                Ok(0) => {
+                    break 'chain_loop;
+                }
+                Ok(n) => {
+                    assert_eq!(n, chain.len as usize);
+                    log::trace!("Tx {n}/{len}", len = chain.len);
+                    bytes_written += n;
+                }
+                Err(e) => {
+                    log::error!("Failed to write output: {e}");
                 }
             }
-        });
+        }
 
-        match result {
-            Ok(0) => {
-                log::trace!("Tx EOF/WouldBlock");
-                queue.undo_pop();
-            }
-            Ok(n) => {
-                assert_eq!(n, head.len as usize);
-                log::trace!("Tx {n}/{len}", len = head.len);
-                queue.add_used(mem, head.index, head.len)
-            }
-            Err(e) => {
-                log::error!("Failed to write output: {e}");
-            }
+        log::trace!("Add used {bytes_written}");
+        if bytes_written == 0 {
+            queue.undo_pop();
+        } else {
+            queue.add_used(mem, head_index, bytes_written as u32);
         }
     }
 }
