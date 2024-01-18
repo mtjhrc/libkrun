@@ -167,7 +167,7 @@ impl Subscriber for Console {
             EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
             EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
         ];
-
+    /*
         let in_port_events = self
             .ports
             .iter()
@@ -179,11 +179,11 @@ impl Subscriber for Console {
             .iter()
             .filter_map(|port| port.output_fd())
             .map(|fd| EpollEvent::new(EventSet::OUT | EventSet::EDGE_TRIGGERED, fd as u64));
-
+        */
         static_events
             .into_iter()
-            .chain(in_port_events)
-            .chain(out_port_events)
+       //     .chain(in_port_events)
+       //     .chain(out_port_events)
             .collect()
     }
 }

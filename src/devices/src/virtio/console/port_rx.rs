@@ -6,9 +6,12 @@ use crate::virtio::{PortInput, Queue};
 
 use std::thread::{JoinHandle};
 use std::{io, mem, thread};
+use std::os::fd::AsRawFd;
+use nix::poll::{poll, PollFd, PollFlags};
 use vm_memory::{
     GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
 };
+use polly::event_manager::Error::Poll;
 
 enum State {
     Stopped {
@@ -54,12 +57,24 @@ impl PortRx {
 
 fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler, mut input: PortInput) {
     let mem = &mem;
+
+    let mut poll_fds = [PollFd::new(input.as_raw_fd(), PollFlags::POLLIN)];
+    let mut wait_for_input = || {
+        poll(&mut poll_fds, -1).expect("Failed to poll");
+    };
+
     loop {
         let head = loop {
             match queue.pop(mem) {
                 Some(chain) => break chain,
                 None => {
                     irq_signaler.signal_used_queue();
+                    // TODO: are we sure this is not deadlock inducing?
+                    /*
+                    ME:     check -> empty
+              !!!   THEM:   unpark(),
+                    ME:     park()
+                     */
                     thread::park()
                 }
             }
@@ -75,6 +90,7 @@ fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler,
                     Err(VolatileMemoryError::IOError(e))
                         if e.kind() == io::ErrorKind::WouldBlock =>
                     {
+                        irq_signaler.signal_used_queue();
                         Ok(0)
                     }
                     Err(e) => Err(e.into()),
@@ -86,7 +102,7 @@ fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler,
                 log::trace!("Rx EOF/WouldBlock");
                 queue.undo_pop();
                 irq_signaler.signal_used_queue();
-                thread::park();
+                wait_for_input();
             }
             Ok(len) => {
                 log::trace!("Rx {len} bytes");

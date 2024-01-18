@@ -6,6 +6,8 @@ use crate::virtio::{PortInput, PortOutput, Queue};
 
 use std::thread::{JoinHandle};
 use std::{io, mem, thread};
+use std::os::fd::AsRawFd;
+use nix::poll::{poll, PollFd, PollFlags};
 use vm_memory::{Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError, WriteVolatile};
 
 enum State {
@@ -54,6 +56,11 @@ impl PortTx {
 
 fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut output: PortOutput) {
     let mem = &mem;
+    let mut poll_fds = [PollFd::new(output.as_raw_fd(), PollFlags::POLLOUT)];
+    let mut wait_for_output = || {
+        poll(&mut poll_fds, -1).expect("Failed to poll");
+    };
+
     loop {
         let head = loop {
             match queue.pop(mem) {
@@ -82,9 +89,8 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
                     // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
                     Err(VolatileMemoryError::IOError(e))
                     if e.kind() == io::ErrorKind::WouldBlock => {
-                        log::trace!("Tx parking (would block)");
-                        irq.signal_used_queue();
-                        thread::park()
+                        log::trace!("Tx wait for output (would block)");
+                        wait_for_output()
                     }
                     Err(e) => break Err(e.into()),
                 }
@@ -97,6 +103,7 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
                 queue.undo_pop();
             }
             Ok(n) => {
+                assert_eq!(n, head.len as usize);
                 log::trace!("Tx {n}/{len}", len = head.len);
                 queue.add_used(mem, head.index, head.len)
             }
