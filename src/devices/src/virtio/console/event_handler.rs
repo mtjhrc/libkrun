@@ -94,6 +94,17 @@ impl Console {
         self.update_console_size(cols, rows);
     }
 
+    fn read_control_queue_event(&mut self, event: &EpollEvent) {
+        let event_set = event.event_set();
+        if event_set != EventSet::IN {
+            warn!("Unexpected event {:?}", event_set);
+        }
+
+        if let Err(e) = self.control.queue_evt().read() {
+            error!("Failed to read the ConsoleControl event: {:?}", e);
+        }
+    }
+
     fn port_id_of_input(&self, source: RawFd) -> Option<usize> {
         self.ports
             .iter()
@@ -117,6 +128,7 @@ impl Subscriber for Console {
 
         let control_rxq = self.queue_events[CONTROL_RXQ_INDEX].as_raw_fd();
         let control_txq = self.queue_events[CONTROL_TXQ_INDEX].as_raw_fd();
+        let control_rxq_control = self.control.queue_evt().as_raw_fd();
 
         let activate_evt = self.activate_evt.as_raw_fd();
         let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
@@ -131,8 +143,10 @@ impl Subscriber for Console {
                 log::trace!("Notify tx (source)");
                 self.ports[port_id].notify_tx();
             } else if source == control_txq {
-                raise_irq |=
-                    self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
+                raise_irq |= self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
+            } else if source == control_rxq_control {
+                self.read_control_queue_event(event);
+                raise_irq |= self.process_control_rx();
             } else if source == control_rxq {
                 raise_irq |= self.read_queue_event(CONTROL_RXQ_INDEX, event)
             }
@@ -166,6 +180,7 @@ impl Subscriber for Console {
         let static_events = [
             EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
             EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
+            EpollEvent::new(EventSet::IN, self.control.queue_evt().as_raw_fd() as u64)
         ];
     /*
         let in_port_events = self
@@ -182,6 +197,7 @@ impl Subscriber for Console {
         */
         static_events
             .into_iter()
+       //     .chain()
        //     .chain(in_port_events)
        //     .chain(out_port_events)
             .collect()

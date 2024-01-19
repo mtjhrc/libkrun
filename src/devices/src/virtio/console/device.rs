@@ -1,11 +1,12 @@
 use std::cmp;
 use std::io::Write;
 use std::mem::{size_of, size_of_val};
+use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use libc::TIOCGWINSZ;
+use libc::{raise, TIOCGWINSZ};
 use utils::eventfd::EventFd;
 use vm_memory::{ByteValued, Bytes, GuestMemoryMmap};
 
@@ -14,7 +15,7 @@ use super::super::{
 };
 use super::{defs, defs::control_event, defs::uapi};
 use crate::legacy::Gic;
-use crate::virtio::console::console_control::{ConsoleControlSender, VirtioConsoleControl};
+use crate::virtio::console::console_control::{ConsoleControl, VirtioConsoleControl};
 use crate::virtio::console::defs::QUEUE_SIZE;
 use crate::virtio::console::port::Port;
 use crate::virtio::console::port_queue_mapping::{
@@ -80,6 +81,7 @@ impl VirtioConsoleConfig {
 pub struct Console {
     pub(crate) device_state: DeviceState,
     pub(crate) irq: IRQSignaler,
+    pub(crate) control: Arc<ConsoleControl>,
     pub(crate) ports: Vec<Port>,
 
     pub(crate) queues: Vec<VirtQueue>,
@@ -125,6 +127,7 @@ impl Console {
         let ports = ports.into_iter().map(Port::new).collect();
         Ok(Console {
             irq: IRQSignaler::new(),
+            control: ConsoleControl::new(),
             ports,
             queues,
             queue_events,
@@ -257,14 +260,44 @@ impl Console {
         self.irq.signal_config_update()
     }
 
+    pub(crate) fn process_control_rx(&mut self) -> bool {
+        log::trace!("process_control_rx");
+        let DeviceState::Activated(ref mem) = self.device_state else {
+            unreachable!()
+        };
+        let mut raise_irq = false;
+
+        while let Some(head) = self.queues[CONTROL_RXQ_INDEX].pop(mem) {
+            if let Some(buf)  = self.control.queue_pop() {
+                match mem.write(&buf, head.addr) {
+                    Ok(n) => {
+                        if n != buf.len() {
+                            log::error!("process_control_rx: partial write");
+                        }
+                        raise_irq = true;
+                        log::trace!("process_control_rx wrote {n}");
+                        self.queues[CONTROL_RXQ_INDEX].add_used(mem, head.index, n as u32);
+                    }
+                    Err(e) => {
+                        log::error!("process_control_rx failed to write: {e}");
+                    }
+                }
+            } else {
+                self.queues[CONTROL_RXQ_INDEX].undo_pop();
+                break;
+            }
+        }
+        raise_irq
+    }
+
     pub(crate) fn process_control_tx(&mut self) -> bool {
+        log::trace!("process_control_tx");
         let DeviceState::Activated(ref mem) = self.device_state else {
             unreachable!()
         };
 
-        let (rx_queue, tx_queue) =
-            borrow_mut_two_indices(&mut self.queues, CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX);
-        let mut control = ConsoleControlSender::new(rx_queue);
+        let tx_queue = &mut self.queues[CONTROL_TXQ_INDEX];
+        //let mut control = ConsoleControlSender::new(rx_queue);
         let mut send_irq = false;
 
         let mut ports_to_resume = Vec::new();
@@ -293,7 +326,7 @@ impl Console {
                         if cmd.value == 1 { "ok" } else { "failed" }
                     );
                     for port_id in 0..self.ports.len() {
-                        control.send_port_add(mem, port_id as u32);
+                        self.control.add_port(port_id as u32);
                     }
                 }
                 control_event::VIRTIO_CONSOLE_PORT_READY => {
@@ -303,15 +336,15 @@ impl Console {
                     }
                     self.ports[cmd.id as usize].on_ready();
                     if self.ports[cmd.id as usize].is_console() {
-                        control.send_mark_console_port(mem, cmd.id);
+                        self.control.send_mark_console_port(mem, cmd.id);
                     } else {
                         // lets start with all ports open for now
-                        control.send_port_open(mem, cmd.id, true)
+                        self.control.set_port_open(cmd.id, true)
                     }
 
                     let name = self.ports[cmd.id as usize].name();
                     if !name.is_empty() {
-                        control.send_port_name(mem, cmd.id, name)
+                        self.control.set_port_name(cmd.id, name)
                     }
                 }
                 control_event::VIRTIO_CONSOLE_PORT_OPEN => {
@@ -352,6 +385,7 @@ impl Console {
         }
 
         for port_id in ports_to_resume {
+            log::trace!("Starting port io for port {}", port_id);
             self.ports[port_id].on_open(
                 mem.clone(),
                 self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)].clone(),
@@ -444,10 +478,4 @@ impl VirtioDevice for Console {
             DeviceState::Activated(_) => true,
         }
     }
-}
-
-fn borrow_mut_two_indices<T>(slice: &mut [T], idx1: usize, idx2: usize) -> (&mut T, &mut T) {
-    assert!(idx2 > idx1);
-    let (slice1, slice2) = slice.split_at_mut(idx2);
-    (&mut slice1[idx1], &mut slice2[0])
 }
