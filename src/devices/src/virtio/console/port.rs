@@ -5,6 +5,7 @@ use std::borrow::Cow;
 
 
 use std::os::fd::{AsRawFd, RawFd};
+use std::sync::Arc;
 
 use crate::virtio::console::device::PortDescription;
 
@@ -12,6 +13,7 @@ use crate::virtio::Queue;
 use vm_memory::{
     GuestMemoryMmap,
 };
+use crate::virtio::console::console_control::ConsoleControl;
 use crate::virtio::console::irq_signaler::IRQSignaler;
 use crate::virtio::console::port_rx::{PortRx};
 use crate::virtio::console::port_tx::PortTx;
@@ -90,10 +92,10 @@ impl Port {
         self.status = PortStatus::Ready {opened: false}
     }
 
-    pub fn on_open(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, tx_queue: Queue, irq_signaler: IRQSignaler) {
+    pub fn on_open(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, tx_queue: Queue, irq_signaler: IRQSignaler, control: Arc<ConsoleControl>) {
         self.status = PortStatus::Ready {opened: true};
-        self.rx.start(mem.clone(), rx_queue, irq_signaler.clone());
-        self.tx.start(mem, tx_queue, irq_signaler);
+        self.rx.start(mem.clone(), rx_queue, irq_signaler.clone(), control.clone());
+        self.tx.start(mem, tx_queue, irq_signaler, control);
     }
     /*
     pub fn process_rx(&mut self, mem: &GuestMemoryMmap, queue: &mut Queue) -> bool {

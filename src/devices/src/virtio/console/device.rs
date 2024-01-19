@@ -391,6 +391,7 @@ impl Console {
                 self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)].clone(),
                 self.queues[port_id_to_queue_idx(QueueDirection::Tx, port_id)].clone(),
                 self.irq.clone(),
+                self.control.clone()
             );
         }
 

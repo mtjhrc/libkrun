@@ -6,10 +6,12 @@ use nix::poll::{poll, PollFd, PollFlags};
 use std::os::fd::AsRawFd;
 use std::thread::JoinHandle;
 use std::{io, mem, thread};
+use std::sync::Arc;
 use vm_memory::{
     Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
     WriteVolatile,
 };
+use crate::virtio::console::console_control::ConsoleControl;
 
 enum State {
     Stopped { output: PortOutput },
@@ -28,12 +30,12 @@ impl PortTx {
         }
     }
 
-    pub fn start(&mut self, mem: GuestMemoryMmap, tx_queue: Queue, irq_signaler: IRQSignaler) {
+    pub fn start(&mut self, mem: GuestMemoryMmap, tx_queue: Queue, irq_signaler: IRQSignaler, control: Arc<ConsoleControl>) {
         let old_state = mem::replace(&mut self.state, State::Starting);
         self.state = match old_state {
             State::Starting | State::Running { .. } => panic!("Already running!"),
             State::Stopped { output } => {
-                let thread = thread::spawn(|| process_tx(mem, tx_queue, irq_signaler, output));
+                let thread = thread::spawn(|| process_tx(mem, tx_queue, irq_signaler, output, control));
                 State::Running { thread }
             }
         };
@@ -47,7 +49,7 @@ impl PortTx {
     }
 }
 
-fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut output: PortOutput) {
+fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut output: PortOutput, control: Arc<ConsoleControl>) {
     let mem = &mem;
     let mut poll_fds = [PollFd::new(output.as_raw_fd(), PollFlags::POLLOUT)];
     let mut wait_for_output = || {
