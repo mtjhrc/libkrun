@@ -61,7 +61,8 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
                 None => {
                     irq.signal_used_queue();
                     log::trace!("Tx parking (queue empty)");
-                    thread::park()
+                    thread::park();
+                    log::trace!("Tx unparked, queue len {}", queue.len(mem))
                 }
             }
         };
@@ -70,12 +71,16 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
         let mut bytes_written = 0;
 
         'chain_loop:
-        for chain in head.into_iter().readable() {
-            log::trace!("tx chain: {:?} {:?}", chain.addr, chain.len);
+        for chain in head.into_iter() {
+            if chain.is_write_only() {
+                continue
+            }
+            log::trace!("tx chain: [{}] {:?} {:?}", head_index, chain.addr, chain.len);
             let result = mem.try_access(chain.len as usize, chain.addr, |_, len, addr, region| {
                 let src = region.get_slice(addr, len).unwrap();
 
                 loop {
+                    log::trace!("Tx write_volatile {len} bytes");
                     match output.write_volatile(&src) {
                         // try_access seem to handle partial write for us (we will be invoked again with an offset)
                         Ok(n) => break Ok(n),
@@ -84,6 +89,7 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
                             if e.kind() == io::ErrorKind::WouldBlock =>
                         {
                             log::trace!("Tx wait for output (would block)");
+                            irq.signal_used_queue();
                             wait_for_output()
                         }
                         Err(e) => break Err(e.into()),
@@ -106,7 +112,7 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
             }
         }
 
-        log::trace!("Add used {bytes_written}");
+        log::trace!("Tx Add used [{}] {bytes_written}", head_index);
         if bytes_written == 0 {
             queue.undo_pop();
         } else {

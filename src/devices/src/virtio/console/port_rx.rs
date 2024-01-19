@@ -69,13 +69,8 @@ fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler,
                 Some(chain) => break chain,
                 None => {
                     irq_signaler.signal_used_queue();
-                    // TODO: are we sure this is not deadlock inducing?
-                    /*
-                    ME:     check -> empty
-              !!!   THEM:   unpark(),
-                    ME:     park()
-                     */
-                    thread::park()
+                    thread::park();
+                    log::trace!("Rx unparked, queue len {}", queue.len(mem))
                 }
             }
         };
@@ -90,7 +85,6 @@ fn process_rx(mem: GuestMemoryMmap, mut queue: Queue, irq_signaler: IRQSignaler,
                     Err(VolatileMemoryError::IOError(e))
                         if e.kind() == io::ErrorKind::WouldBlock =>
                     {
-                        irq_signaler.signal_used_queue();
                         Ok(0)
                     }
                     Err(e) => Err(e.into()),
