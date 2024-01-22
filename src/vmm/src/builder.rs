@@ -1048,18 +1048,18 @@ fn attach_console_devices(
         log::error!("Failed to set terminal to raw mode: {e}")
     }
 
-    let ports = vec![PortDescription::Console {
+    let mut ports = vec![PortDescription::Console {
         input: Some(PortInput::stdin().unwrap()),
         output: Some(PortOutput::stdout().unwrap()),
     }];
-    /*
+
     if !stdin_is_terminal {
         ports.push(PortDescription::InputPipe {
             name: "krun-stdin".into(),
             input: PortInput::stdin().unwrap(),
         })
     }
-
+    /*
     if !stdout_is_terminal {
         ports.push(PortDescription::OutputPipe {
             name: "krun-stdout".into(),

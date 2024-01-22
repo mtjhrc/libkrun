@@ -61,7 +61,7 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
             match queue.pop(mem) {
                 Some(chain) => break chain,
                 None => {
-                    irq.signal_used_queue();
+                    irq.signal_used_queue("tx popped all heads");
                     log::trace!("Tx parking (queue empty)");
                     thread::park();
                     log::trace!("Tx unparked, queue len {}", queue.len(mem))
@@ -73,10 +73,7 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
         let mut bytes_written = 0;
 
         'chain_loop:
-        for chain in head.into_iter() {
-            if chain.is_write_only() {
-                continue
-            }
+        for chain in head.into_iter().readable() {
             log::trace!("tx chain: [{}] {:?} {:?}", head_index, chain.addr, chain.len);
             let result = mem.try_access(chain.len as usize, chain.addr, |_, len, addr, region| {
                 let src = region.get_slice(addr, len).unwrap();
@@ -91,7 +88,7 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
                             if e.kind() == io::ErrorKind::WouldBlock =>
                         {
                             log::trace!("Tx wait for output (would block)");
-                            irq.signal_used_queue();
+                            irq.signal_used_queue("tx waiting for output");
                             wait_for_output()
                         }
                         Err(e) => break Err(e.into()),

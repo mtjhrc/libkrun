@@ -172,7 +172,7 @@ impl Subscriber for Console {
             );
         }
         if raise_irq {
-            self.irq.signal_used_queue();
+            self.irq.signal_used_queue("event_handler");
         }
     }
 

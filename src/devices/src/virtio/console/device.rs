@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp;
 use std::io::Write;
 use std::mem::{size_of, size_of_val};
@@ -101,14 +102,14 @@ pub enum PortDescription {
         input: Option<PortInput>,
         output: Option<PortOutput>,
     },
-    /*InputPipe {
+    InputPipe {
         name: Cow<'static, str>,
         input: PortInput,
     },
     OutputPipe {
         name: Cow<'static, str>,
         output: PortOutput,
-    },*/
+    },
 }
 
 impl Console {

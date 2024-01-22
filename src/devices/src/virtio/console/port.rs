@@ -31,8 +31,8 @@ pub(crate) struct Port {
     represents_console: bool,
     input_fd: Option<RawFd>,
     output_fd: Option<RawFd>,
-    rx: PortRx,
-    tx: PortTx,
+    rx: Option<PortRx>,
+    tx: Option<PortTx>,
 }
 
 impl Port {
@@ -44,23 +44,27 @@ impl Port {
                 status: PortStatus::NotReady,
                 input_fd: input.as_ref().map(AsRawFd::as_raw_fd),
                 output_fd: output.as_ref().map(AsRawFd::as_raw_fd),
-                rx: PortRx::new(input.unwrap()), //TODO
-                tx: PortTx::new(output.unwrap())
+                rx: input.map(PortRx::new),
+                tx: output.map(PortTx::new),
             },
-            /*PortDescription::InputPipe { name, input } => Self {
+            PortDescription::InputPipe { name, input } => Self {
                 name,
                 represents_console: false,
                 status: PortStatus::NotReady,
-                input: Some(input),
-                output: None,
+                input_fd: Some(input.as_raw_fd()),
+                output_fd: None,
+                rx: Some(PortRx::new(input)),
+                tx: None
             },
             PortDescription::OutputPipe { name, output } => Self {
                 name,
                 represents_console: false,
                 status: PortStatus::NotReady,
-                input: None,
-                output: Some(output),
-            },*/
+                input_fd: None,
+                output_fd: Some(output.as_raw_fd()),
+                rx: None,
+                tx: Some(PortTx::new(output))
+            },
         }
     }
 
@@ -81,21 +85,30 @@ impl Port {
     }
 
     pub fn notify_rx(&self) {
-        self.rx.notify()
+        if let Some(rx) = &self.rx {
+            rx.notify();
+        }
     }
 
     pub fn notify_tx(&self) {
-        self.tx.notify();
+        if let Some(tx) = &self.tx {
+            tx.notify();
+        }
     }
 
     pub fn on_ready(&mut self) {
-        self.status = PortStatus::Ready {opened: false}
+        self.status = PortStatus::Ready { opened: false }
     }
 
     pub fn on_open(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, tx_queue: Queue, irq_signaler: IRQSignaler, control: Arc<ConsoleControl>) {
-        self.status = PortStatus::Ready {opened: true};
-        self.rx.start(mem.clone(), rx_queue, irq_signaler.clone(), control.clone());
-        self.tx.start(mem, tx_queue, irq_signaler, control);
+        self.status = PortStatus::Ready { opened: true };
+        if let Some(rx) = &mut self.rx {
+            rx.start(mem.clone(), rx_queue, irq_signaler.clone(), control.clone());
+        }
+
+        if let Some(tx) = &mut self.tx {
+            tx.start(mem, tx_queue, irq_signaler, control);
+        }
     }
     /*
     pub fn process_rx(&mut self, mem: &GuestMemoryMmap, queue: &mut Queue) -> bool {
