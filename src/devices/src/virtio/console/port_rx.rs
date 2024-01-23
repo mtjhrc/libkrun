@@ -126,6 +126,7 @@ fn process_rx(
             //irq_signaler.signal_used_queue("rx queue used");
         } else if bytes_read == 0 {
             if eof {
+                control.set_port_open(1, false);
                 log::trace!("RX eof stopping!!!!!!");
                 return;
             }

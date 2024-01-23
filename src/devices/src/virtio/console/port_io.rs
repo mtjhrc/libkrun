@@ -1,8 +1,10 @@
 use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK, STDIN_FILENO, STDOUT_FILENO};
 use nix::errno::Errno;
 use nix::unistd::dup;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, stderr, stdout};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use nix::fcntl::{OFlag, open};
+use nix::sys::stat::Mode;
 use vm_memory::bitmap::BitmapSlice;
 use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
 
@@ -77,6 +79,15 @@ impl PortOutput {
     pub fn stdout() -> Result<Self, nix::Error> {
         let fd = dup_raw_fd_into_owned(STDOUT_FILENO)?;
         make_non_blocking(&fd)?;
+        Ok(PortOutput(fd))
+    }
+
+    pub fn krun_log() -> Result<Self, nix::Error> {
+        let fd = open("/tmp/krun-log", OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty())?;
+        if fd < 0 {
+            panic!("Failed to open krun_log???");
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         Ok(PortOutput(fd))
     }
 }

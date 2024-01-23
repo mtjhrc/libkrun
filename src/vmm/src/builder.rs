@@ -1049,8 +1049,17 @@ fn attach_console_devices(
     }
 
     let mut ports = vec![PortDescription::Console {
-        input: Some(PortInput::stdin().unwrap()),
-        output: Some(PortOutput::stdout().unwrap()),
+        input: if stdin_is_terminal {
+            Some(PortInput::stdin().unwrap())
+        } else {
+            None
+        },
+        output: if stdout_is_terminal {
+            Some(PortOutput::stdout().unwrap())
+        } else {
+            //TODO: just for debugging - puts kernel messages there
+            Some(PortOutput::krun_log().unwrap())
+        }
     }];
 
     if !stdin_is_terminal {
@@ -1059,14 +1068,12 @@ fn attach_console_devices(
             input: PortInput::stdin().unwrap(),
         })
     }
-    /*
-    if !stdout_is_terminal {
+    /*if !stdout_is_terminal {
         ports.push(PortDescription::OutputPipe {
             name: "krun-stdout".into(),
             output: PortOutput::stdout().unwrap(),
         })
     };*/
-    //TODO: same for stderr
 
     let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
 
