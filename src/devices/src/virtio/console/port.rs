@@ -2,21 +2,18 @@
 //! for port <-> virtio queue index mapping
 
 use std::borrow::Cow;
-
-
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::{mem, thread};
+use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::console::device::PortDescription;
-
-use crate::virtio::Queue;
-use vm_memory::{
-    GuestMemoryMmap,
-};
 use crate::virtio::console::console_control::ConsoleControl;
+use crate::virtio::console::device::PortDescription;
 use crate::virtio::console::irq_signaler::IRQSignaler;
-use crate::virtio::console::port_rx::{PortRx};
-use crate::virtio::console::port_tx::PortTx;
+use crate::virtio::console::process_rx::process_rx;
+use crate::virtio::console::process_tx::process_tx;
+use crate::virtio::{PortInput, PortOutput, Queue};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum PortStatus {
@@ -24,15 +21,23 @@ pub(crate) enum PortStatus {
     Ready { opened: bool },
 }
 
+enum PortState {
+    Inactive {
+        input: Option<PortInput>,
+        output: Option<PortOutput>,
+    },
+    Active {
+        rx_thread: Option<JoinHandle<()>>,
+        tx_thread: Option<JoinHandle<()>>,
+    },
+}
+
 pub(crate) struct Port {
     /// Empty if no name given
     name: Cow<'static, str>,
     status: PortStatus,
     represents_console: bool,
-    input_fd: Option<RawFd>,
-    output_fd: Option<RawFd>,
-    rx: Option<PortRx>,
-    tx: Option<PortTx>,
+    state: PortState,
 }
 
 impl Port {
@@ -42,28 +47,25 @@ impl Port {
                 name: "".into(),
                 represents_console: true,
                 status: PortStatus::NotReady,
-                input_fd: input.as_ref().map(AsRawFd::as_raw_fd),
-                output_fd: output.as_ref().map(AsRawFd::as_raw_fd),
-                rx: input.map(PortRx::new),
-                tx: output.map(PortTx::new),
+                state: PortState::Inactive { input, output },
             },
             PortDescription::InputPipe { name, input } => Self {
                 name,
                 represents_console: false,
                 status: PortStatus::NotReady,
-                input_fd: Some(input.as_raw_fd()),
-                output_fd: None,
-                rx: Some(PortRx::new(input)),
-                tx: None
+                state: PortState::Inactive {
+                    input: Some(input),
+                    output: None,
+                },
             },
             PortDescription::OutputPipe { name, output } => Self {
                 name,
                 represents_console: false,
                 status: PortStatus::NotReady,
-                input_fd: None,
-                output_fd: Some(output.as_raw_fd()),
-                rx: None,
-                tx: Some(PortTx::new(output))
+                state: PortState::Inactive {
+                    input: None,
+                    output: Some(output),
+                },
             },
         }
     }
@@ -76,23 +78,19 @@ impl Port {
         self.represents_console
     }
 
-    pub fn input_fd(&self) -> Option<RawFd> {
-        self.input_fd
-    }
-
-    pub fn output_fd(&self) -> Option<RawFd> {
-        self.output_fd
-    }
-
     pub fn notify_rx(&self) {
-        if let Some(rx) = &self.rx {
-            rx.notify();
+        if let PortState::Active { rx_thread, .. } = &self.state {
+            if let Some(rx_thread) = rx_thread {
+                rx_thread.thread().unpark()
+            }
         }
     }
 
     pub fn notify_tx(&self) {
-        if let Some(tx) = &self.tx {
-            tx.notify();
+        if let PortState::Active { tx_thread, .. } = &self.state {
+            if let Some(rx_thread) = tx_thread {
+                rx_thread.thread().unpark()
+            }
         }
     }
 
@@ -100,126 +98,44 @@ impl Port {
         self.status = PortStatus::Ready { opened: false }
     }
 
-    pub fn on_open(&mut self, mem: GuestMemoryMmap, rx_queue: Queue, tx_queue: Queue, irq_signaler: IRQSignaler, control: Arc<ConsoleControl>) {
+    pub fn on_open(
+        &mut self,
+        mem: GuestMemoryMmap,
+        rx_queue: Queue,
+        tx_queue: Queue,
+        irq_signaler: IRQSignaler,
+        control: Arc<ConsoleControl>,
+    ) {
+        match self.status {
+            PortStatus::NotReady => {
+                log::warn!("attempted to open port that is not ready, assuming the port is ready")
+            }
+            PortStatus::Ready { .. } => {}
+        }
+
         self.status = PortStatus::Ready { opened: true };
-        if let Some(rx) = &mut self.rx {
-            rx.start(mem.clone(), rx_queue, irq_signaler.clone(), control.clone());
-        }
 
-        if let Some(tx) = &mut self.tx {
-            tx.start(mem, tx_queue, irq_signaler, control);
-        }
-    }
-    /*
-    pub fn process_rx(&mut self, mem: &GuestMemoryMmap, queue: &mut Queue) -> bool {
-        let mut raise_irq = false;
-
-        let Some(input) = &mut self.input else {
-            return raise_irq;
+        let (input, output) = if let PortState::Inactive { input, output } = &mut self.state {
+            (mem::take(input), mem::take(output))
+        } else {
+            // The threads are already started
+            return;
         };
 
-        while let Some(head) = queue.pop(mem) {
-            let result = mem.try_access(head.len as usize, head.addr, |_, len, addr, region| {
-                let mut target = region.get_slice(addr, len).unwrap();
-                log::trace!("read {{");
-                let result = input.read_volatile(&mut target);
-                log::trace!("}} read");
-                match result {
-                    Ok(n) => {
-                        if n == 0 {
-                            self.pending_input = false;
-                        }
-                        Ok(n)
-                    }
-                    // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
-                    Err(VolatileMemoryError::IOError(e))
-                        if e.kind() == io::ErrorKind::WouldBlock =>
-                    {
-                        self.pending_input = false;
-                        Ok(0)
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            });
-            raise_irq = true;
-            match result {
-                Ok(0) => {
-                    log::trace!("Rx EOF/WouldBlock");
-                    queue.undo_pop();
-                    break;
-                }
-                Ok(len) => {
-                    log::trace!("Rx {len} bytes");
-                    queue.add_used(mem, head.index, len as u32);
-                }
-                Err(e) => {
-                    log::error!("Failed to read: {e:?}")
-                }
-            }
-        }
+        let rx_thread = input.map(|input| {
+            let mem = mem.clone();
+            let irq_signaler = irq_signaler.clone();
+            let control = control.clone();
+            thread::spawn(|| process_rx(mem, rx_queue, irq_signaler, input, control))
+        });
 
-        raise_irq
+        let tx_thread = output.map(|output| {
+            thread::spawn(move || process_tx(mem, tx_queue, irq_signaler, output, control))
+        });
+
+        self.state = PortState::Active {
+            rx_thread,
+            tx_thread,
+        }
     }
-
-    pub fn process_tx(&mut self, mem: &GuestMemoryMmap, queue: &mut Queue) -> bool {
-        let mut raise_irq = false;
-
-        let Some(output) = &mut self.output else {
-            return raise_irq;
-        };
-
-        loop {
-            let (addr, len, index) = if let Some(out) = &self.unfinished_output {
-                (out.addr, out.len, out.index)
-            } else if let Some(head) = queue.pop(mem) {
-                (head.addr, head.len, head.index)
-            } else {
-                break;
-            };
-
-            let result = mem.try_access(len as usize, addr, |_, len, addr, region| {
-                let src = region.get_slice(addr, len).unwrap();
-                let result = output.write_volatile(&src);
-
-                match result {
-                    // try_access seem to handle partial write for us (we will be invoked again with an offset)
-                    Ok(n) => Ok(n),
-                    // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
-                    Err(VolatileMemoryError::IOError(e))
-                        if e.kind() == io::ErrorKind::WouldBlock =>
-                    {
-                        Ok(0)
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            });
-
-            match result {
-                Ok(0) => {
-                    log::trace!("Tx EOF/WouldBlock");
-                    queue.undo_pop();
-                    break;
-                }
-                Ok(n) => {
-                    if n == len as usize {
-                        self.unfinished_output = None;
-                        queue.add_used(mem, index, n as u32)
-                    } else {
-                        assert!(n < len as usize);
-                        self.unfinished_output = Some(UnfinishedDescriptorChain {
-                            addr: addr.checked_add(n as u64).expect("Guest address overflow!"),
-                            len: len - n as u32,
-                            index,
-                        })
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to write output: {e}");
-                }
-            }
-            raise_irq = true;
-        }
-
-        raise_irq
-    }*/
 }

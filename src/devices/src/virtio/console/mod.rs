@@ -4,9 +4,9 @@ mod event_handler;
 mod port;
 mod port_io;
 mod port_queue_mapping;
-mod port_rx;
+mod process_rx;
 mod irq_signaler;
-mod port_tx;
+mod process_tx;
 
 pub use self::defs::uapi::VIRTIO_ID_CONSOLE as TYPE_CONSOLE;
 pub use self::device::{Console, PortDescription};

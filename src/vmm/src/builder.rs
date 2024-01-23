@@ -1068,12 +1068,13 @@ fn attach_console_devices(
             input: PortInput::stdin().unwrap(),
         })
     }
-    /*if !stdout_is_terminal {
+
+    if !stdout_is_terminal {
         ports.push(PortDescription::OutputPipe {
             name: "krun-stdout".into(),
             output: PortOutput::stdout().unwrap(),
         })
-    };*/
+    };
 
     let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
 

@@ -104,22 +104,6 @@ impl Console {
             error!("Failed to read the ConsoleControl event: {:?}", e);
         }
     }
-
-    fn port_id_of_input(&self, source: RawFd) -> Option<usize> {
-        self.ports
-            .iter()
-            .enumerate()
-            .find(|(_port_id, port)| port.input_fd() == Some(source))
-            .map(|(port_id, _)| port_id)
-    }
-
-    fn port_id_of_output(&self, source: RawFd) -> Option<usize> {
-        self.ports
-            .iter()
-            .enumerate()
-            .find(|(_port_id, port)| port.output_fd() == Some(source))
-            .map(|(port_id, _)| port_id)
-    }
 }
 
 impl Subscriber for Console {
@@ -136,13 +120,7 @@ impl Subscriber for Console {
         let mut raise_irq = false;
 
         if self.is_activated() {
-            if let Some(port_id) = self.port_id_of_input(source) {
-                log::trace!("Notify rx (source)");
-                self.ports[port_id].notify_rx();
-            } else if let Some(port_id) = self.port_id_of_output(source) {
-                log::trace!("Notify tx (source)");
-                self.ports[port_id].notify_tx();
-            } else if source == control_txq {
+            if source == control_txq {
                 raise_irq |= self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
             } else if source == control_rxq_control {
                 self.read_control_queue_event(event);

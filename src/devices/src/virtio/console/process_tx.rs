@@ -1,55 +1,24 @@
-use crate::virtio::console::irq_signaler::IRQSignaler;
-
-use crate::virtio::{PortInput, PortOutput, Queue};
-
 use nix::poll::{poll, PollFd, PollFlags};
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::{io, mem, thread};
-use std::sync::Arc;
 use vm_memory::{
     Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
     WriteVolatile,
 };
+
 use crate::virtio::console::console_control::ConsoleControl;
+use crate::virtio::console::irq_signaler::IRQSignaler;
+use crate::virtio::{PortInput, PortOutput, Queue};
 
-enum State {
-    Stopped { output: PortOutput },
-    Starting,
-    Running { thread: JoinHandle<()> },
-}
-
-pub struct PortTx {
-    state: State,
-}
-
-impl PortTx {
-    pub fn new(output: PortOutput) -> Self {
-        Self {
-            state: State::Stopped { output },
-        }
-    }
-
-    pub fn start(&mut self, mem: GuestMemoryMmap, tx_queue: Queue, irq_signaler: IRQSignaler, control: Arc<ConsoleControl>) {
-        let old_state = mem::replace(&mut self.state, State::Starting);
-        self.state = match old_state {
-            State::Starting | State::Running { .. } => panic!("Already running!"),
-            State::Stopped { output } => {
-                let thread = thread::spawn(|| process_tx(mem, tx_queue, irq_signaler, output, control));
-                State::Running { thread }
-            }
-        };
-    }
-
-    pub fn notify(&self) {
-        match &self.state {
-            State::Running { thread, .. } => thread.thread().unpark(),
-            State::Starting | State::Stopped { .. } => (),
-        }
-    }
-}
-
-fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut output: PortOutput, control: Arc<ConsoleControl>) {
+pub(crate) fn process_tx(
+    mem: GuestMemoryMmap,
+    mut queue: Queue,
+    irq: IRQSignaler,
+    mut output: PortOutput,
+    control: Arc<ConsoleControl>,
+) {
     let mem = &mem;
     let mut poll_fds = [PollFd::new(output.as_raw_fd(), PollFlags::POLLOUT)];
     let mut wait_for_output = || {
@@ -72,9 +41,13 @@ fn process_tx(mem: GuestMemoryMmap, mut queue: Queue, irq: IRQSignaler, mut outp
         let head_index = head.index;
         let mut bytes_written = 0;
 
-        'chain_loop:
-        for chain in head.into_iter().readable() {
-            log::trace!("tx chain: [{}] {:?} {:?}", head_index, chain.addr, chain.len);
+        'chain_loop: for chain in head.into_iter().readable() {
+            log::trace!(
+                "tx chain: [{}] {:?} {:?}",
+                head_index,
+                chain.addr,
+                chain.len
+            );
             let result = mem.try_access(chain.len as usize, chain.addr, |_, len, addr, region| {
                 let src = region.get_slice(addr, len).unwrap();
 

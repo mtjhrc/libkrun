@@ -1,8 +1,3 @@
-use crate::virtio::console::irq_signaler::IRQSignaler;
-
-use crate::virtio::{PortInput, Queue};
-
-use crate::virtio::console::console_control::ConsoleControl;
 use nix::poll::{poll, PollFd, PollFlags};
 use polly::event_manager::Error::Poll;
 use std::os::fd::AsRawFd;
@@ -14,50 +9,11 @@ use vm_memory::{
     GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
 };
 
-enum State {
-    Stopped { input: PortInput },
-    Starting,
-    Running { thread: JoinHandle<()> },
-}
+use crate::virtio::console::console_control::ConsoleControl;
+use crate::virtio::console::irq_signaler::IRQSignaler;
+use crate::virtio::{PortInput, Queue};
 
-pub struct PortRx {
-    state: State,
-}
-
-impl PortRx {
-    pub fn new(input: PortInput) -> Self {
-        Self {
-            state: State::Stopped { input },
-        }
-    }
-
-    pub fn start(
-        &mut self,
-        mem: GuestMemoryMmap,
-        rx_queue: Queue,
-        irq_signaler: IRQSignaler,
-        control: Arc<ConsoleControl>,
-    ) {
-        let old_state = mem::replace(&mut self.state, State::Starting);
-        self.state = match old_state {
-            State::Starting | State::Running { .. } => panic!("Already running!"),
-            State::Stopped { input } => {
-                let thread =
-                    thread::spawn(|| process_rx(mem, rx_queue, irq_signaler, input, control));
-                State::Running { thread }
-            }
-        };
-    }
-
-    pub fn notify(&self) {
-        match &self.state {
-            State::Running { thread, .. } => thread.thread().unpark(),
-            State::Starting | State::Stopped { .. } => (),
-        }
-    }
-}
-
-fn process_rx(
+pub(crate) fn process_rx(
     mem: GuestMemoryMmap,
     mut queue: Queue,
     irq_signaler: IRQSignaler,
@@ -118,7 +74,6 @@ fn process_rx(
                 }
             }
         }
-
 
         if bytes_read != 0 {
             log::trace!("Rx {bytes_read} bytes queue len{}", queue.len(mem));
