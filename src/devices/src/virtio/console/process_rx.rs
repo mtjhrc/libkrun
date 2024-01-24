@@ -16,7 +16,7 @@ pub(crate) fn process_rx(
     mem: GuestMemoryMmap,
     mut queue: Queue,
     irq_signaler: IRQSignaler,
-    mut input: PortInputFd,
+    mut input: Box<dyn PortInput>,
     control: Arc<ConsoleControl>,
     port_id: u32,
 ) {

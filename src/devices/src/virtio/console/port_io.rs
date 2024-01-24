@@ -1,31 +1,25 @@
-use std::io;
-use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK, STDIN_FILENO, STDOUT_FILENO, fd_set};
+use libc::{fcntl, fd_set, F_GETFL, F_SETFL, O_NONBLOCK, STDIN_FILENO, STDOUT_FILENO};
 use nix::errno::Errno;
-use nix::unistd::dup;
-use std::io::{ErrorKind, stderr, stdout};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use nix::fcntl::{OFlag, open};
+use nix::fcntl::{open, OFlag};
 use nix::poll::{poll, PollFd, PollFlags};
-use nix::sys::select::{Fds, FdSet, select};
+use nix::sys::select::{select, FdSet, Fds};
 use nix::sys::stat::Mode;
+use nix::unistd::dup;
+use std::io;
+use std::io::{stderr, stdout, Error, ErrorKind};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use vm_memory::bitmap::{Bitmap, BitmapSlice};
-use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
 use vm_memory::GuestMemoryError::IOError;
+use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
 
 pub trait PortInput {
-    fn read_volatile(
-        &mut self,
-        buf: &mut VolatileSlice,
-    ) -> Result<usize, io::Error>;
+    fn read_volatile(&mut self, buf: &mut VolatileSlice) -> Result<usize, io::Error>;
 
     fn wait_until_readable(&self);
 }
 
 pub trait PortOutput {
-    fn write_volatile(
-        &mut self,
-        buf: &VolatileSlice,
-    ) -> Result<usize, io::Error>;
+    fn write_volatile(&mut self, buf: &VolatileSlice) -> Result<usize, io::Error>;
 
     fn wait_until_writable(&self);
 }
@@ -39,10 +33,7 @@ impl AsRawFd for PortInputFd {
 }
 
 impl PortInput for PortInputFd {
-    fn read_volatile(
-        &mut self,
-        buf: &mut VolatileSlice,
-    ) -> io::Result<usize> {
+    fn read_volatile(&mut self, buf: &mut VolatileSlice) -> io::Result<usize> {
         // This source code is copied from vm-memory, except it fixes an issue, where
         // the original code would does not handle handle EWOULDBLOCK
 
@@ -94,17 +85,12 @@ impl AsRawFd for PortOutputFd {
 }
 
 impl PortOutput for PortOutputFd {
-    fn write_volatile(
-        &mut self,
-        buf: &VolatileSlice
-    ) -> Result<usize, io::Error> {
-        self.0.write_volatile(buf).map_err(|e| {
-            match e {
-                VolatileMemoryError::IOError(e) => e,
-                e => {
-                    log::error!("Unsuported error from write_volatile: {e:?}");
-                    io::Error::new(ErrorKind::Other, e)
-                }
+    fn write_volatile(&mut self, buf: &VolatileSlice) -> Result<usize, io::Error> {
+        self.0.write_volatile(buf).map_err(|e| match e {
+            VolatileMemoryError::IOError(e) => e,
+            e => {
+                log::error!("Unsuported error from write_volatile: {e:?}");
+                io::Error::new(ErrorKind::Other, e)
             }
         })
     }
@@ -119,15 +105,6 @@ impl PortOutputFd {
     pub fn stdout() -> Result<Self, nix::Error> {
         let fd = dup_raw_fd_into_owned(STDOUT_FILENO)?;
         make_non_blocking(&fd)?;
-        Ok(PortOutputFd(fd))
-    }
-
-    pub fn krun_log() -> Result<Self, nix::Error> {
-        let fd = open("/tmp/krun-log", OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty())?;
-        if fd < 0 {
-            panic!("Failed to open krun_log???");
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         Ok(PortOutputFd(fd))
     }
 }
@@ -151,4 +128,53 @@ fn make_non_blocking(as_rw_fd: &impl AsRawFd) -> Result<(), nix::Error> {
         }
     }
     Ok(())
+}
+
+// Utility to relay log from the VM (the kernel boot log and messages from init)
+// to the rust log
+#[derive(Default)]
+pub struct PortOutputLog {
+    buf: Vec<u8>,
+}
+
+impl PortOutputLog {
+    const FORCE_FLUSH_TRESHOLD: usize = 512;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn force_flush(&mut self) {
+        log::debug!(
+            "[guest](no newline): {}",
+            String::from_utf8_lossy(&self.buf)
+        );
+        self.buf.clear();
+    }
+}
+
+impl PortOutput for PortOutputLog {
+    fn write_volatile(&mut self, buf: &VolatileSlice) -> Result<usize, Error> {
+        self.buf
+            .write_volatile(buf)
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+
+        let mut start = 0;
+        for (i, ch) in self.buf.iter().cloned().enumerate() {
+            if ch == b'\n' {
+                log::error!("[guest]: {}", String::from_utf8_lossy(&self.buf[start..i]));
+                start = i + 1;
+            }
+        }
+        self.buf.drain(0..start);
+        // We don't want to grow our inner buffer indefinetly!
+        if self.buf.len() > PortOutputLog::FORCE_FLUSH_TRESHOLD {
+            self.force_flush()
+        }
+        Ok(buf.len())
+    }
+
+    fn wait_until_writable(&self) {
+        return;
+    }
 }

@@ -26,6 +26,7 @@ use crate::virtio::console::port_queue_mapping::{
 use crate::virtio::{VmmExitObserver, PortInputFd, PortOutputFd};
 
 use crate::virtio::console::irq_signaler::IRQSignaler;
+use crate::virtio::console::port_io::{PortInput, PortOutput};
 
 pub(crate) const CONTROL_RXQ_INDEX: usize = 2;
 pub(crate) const CONTROL_TXQ_INDEX: usize = 3;
@@ -100,16 +101,16 @@ pub struct Console {
 
 pub enum PortDescription {
     Console {
-        input: Option<PortInputFd>,
-        output: Option<PortOutputFd>,
+        input: Option<Box<dyn PortInput + Send>>,
+        output: Option<Box<dyn PortOutput + Send>>,
     },
     InputPipe {
         name: Cow<'static, str>,
-        input: PortInputFd,
+        input: Box<dyn PortInput + Send>,
     },
     OutputPipe {
         name: Cow<'static, str>,
-        output: PortOutputFd,
+        output: Box<dyn PortOutput + Send>,
     },
 }
 

@@ -16,7 +16,7 @@ pub(crate) fn process_tx(
     mem: GuestMemoryMmap,
     mut queue: Queue,
     irq: IRQSignaler,
-    mut output: PortOutputFd,
+    mut output: Box<dyn PortOutput>,
     control: Arc<ConsoleControl>,
 ) {
     let mem = &mem;

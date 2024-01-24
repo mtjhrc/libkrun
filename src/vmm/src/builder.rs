@@ -20,7 +20,7 @@ use devices::legacy::Serial;
 use devices::virtio::Net;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::VirtioShmRegion;
-use devices::virtio::{MmioTransport, PortDescription, PortInputFd, PortOutputFd, Vsock};
+use devices::virtio::{MmioTransport, PortDescription, PortInputFd, PortOutputFd, PortOutputLog, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -1050,29 +1050,29 @@ fn attach_console_devices(
 
     let mut ports = vec![PortDescription::Console {
         input: if stdin_is_terminal {
-            Some(PortInputFd::stdin().unwrap())
+            Some(Box::new(PortInputFd::stdin().unwrap()))
         } else {
             None
         },
         output: if stdout_is_terminal {
-            Some(PortOutputFd::stdout().unwrap())
+            Some(Box::new(PortOutputFd::stdout().unwrap()))
         } else {
             //TODO: just for debugging - puts kernel messages there
-            Some(PortOutputFd::krun_log().unwrap())
+            Some(Box::new(PortOutputLog::new()))
         }
     }];
 
     if !stdin_is_terminal {
         ports.push(PortDescription::InputPipe {
             name: "krun-stdin".into(),
-            input: PortInputFd::stdin().unwrap(),
+            input: Box::new(PortInputFd::stdin().unwrap()),
         })
     }
 
     if !stdout_is_terminal {
         ports.push(PortDescription::OutputPipe {
             name: "krun-stdout".into(),
-            output: PortOutputFd::stdout().unwrap(),
+            output: Box::new(PortOutputFd::stdout().unwrap()),
         })
     };
 

@@ -15,6 +15,7 @@ use crate::virtio::console::irq_signaler::IRQSignaler;
 use crate::virtio::console::process_rx::process_rx;
 use crate::virtio::console::process_tx::process_tx;
 use crate::virtio::{PortInputFd, PortOutputFd, Queue};
+use crate::virtio::console::port_io::{PortInput, PortOutput};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum PortStatus {
@@ -24,8 +25,8 @@ pub(crate) enum PortStatus {
 
 enum PortState {
     Inactive {
-        input: Option<PortInputFd>,
-        output: Option<PortOutputFd>,
+        input: Option<Box<dyn PortInput + Send>>,
+        output: Option<Box<dyn PortOutput + Send>>,
     },
     Active {
         stop: Arc<AtomicBool>,

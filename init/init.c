@@ -915,6 +915,7 @@ int main(int argc, char **argv)
     }
 
 	if (execvp(exec_argv[0], exec_argv) < 0) {
+		//TODO: maybe print this msg to the console not redirected stdout?
 		printf("Couldn't execute '%s' inside the vm: %s\n", exec_argv[0], strerror(errno));
 		exit(-3);
 	}
