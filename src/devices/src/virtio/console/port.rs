@@ -6,6 +6,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::{mem, thread};
+use std::sync::atomic::{AtomicBool, Ordering};
 use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::console::console_control::ConsoleControl;
@@ -27,6 +28,7 @@ enum PortState {
         output: Option<PortOutputFd>,
     },
     Active {
+        stop: Arc<AtomicBool>,
         rx_thread: Option<JoinHandle<()>>,
         tx_thread: Option<JoinHandle<()>>,
     },
@@ -134,13 +136,29 @@ impl Port {
             thread::spawn(move || process_rx(mem, rx_queue, irq_signaler, input, control, port_id))
         });
 
+        let stop = Arc::new(AtomicBool::new(false));
+
         let tx_thread = output.map(|output| {
-            thread::spawn(move || process_tx(mem, tx_queue, irq_signaler, output, control))
+            let stop = stop.clone();
+            thread::spawn(move || process_tx(stop, mem, tx_queue, irq_signaler, output, control))
         });
 
         self.state = PortState::Active {
+            stop,
             rx_thread,
             tx_thread,
         }
+    }
+
+    pub fn flush(&mut self) {
+        if let PortState::Active { stop, tx_thread, rx_thread: _} = &mut self.state {
+            stop.store(true, Ordering::Release);
+            if let Some(tx_thread) = mem::take(tx_thread) {
+                tx_thread.thread().unpark();
+                if let Err(e) = tx_thread.join() {
+                    log::error!("Failed to flush tx for port {port_id}, thread panicked: {e:?}", port_id = self.port_id)
+                }
+            }
+        };
     }
 }

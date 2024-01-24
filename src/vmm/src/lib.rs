@@ -38,7 +38,7 @@ use macos::vstate;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::os::unix::io::AsRawFd;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
@@ -59,6 +59,7 @@ use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use utils::time::TimestampUs;
 use vm_memory::GuestMemoryMmap;
+use devices::virtio::{Console, VirtioDevice, VmmExitObserver};
 
 /// Success exit code.
 pub const FC_EXIT_CODE_OK: u8 = 0;
@@ -181,8 +182,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Contains the state and associated methods required for the Firecracker VMM.
 pub struct Vmm {
-    //events_observer: Option<Box<dyn VmmEventsObserver>>,
-
     // Guest VM core resources.
     guest_memory: GuestMemoryMmap,
     arch_memory_info: ArchMemoryInfo,
@@ -192,6 +191,7 @@ pub struct Vmm {
     vcpus_handles: Vec<VcpuHandle>,
     exit_evt: EventFd,
     vm: Vm,
+    exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
 
     // Guest VM devices.
     mmio_device_manager: MMIODeviceManager,
@@ -335,6 +335,10 @@ impl Vmm {
         if let Err(e) = term_set_canonical_mode() {
             log::error!("Failed to restore terminal to canonical mode: {e}")
         }
+
+       for observer in &self.exit_observers {
+           observer.lock().expect("Poisoned mutex for exit observer").on_vmm_exit();
+       }
 
         // Exit from Firecracker using the provided exit code. Safe because we're terminating
         // the process anyway.

@@ -3,6 +3,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::{io, mem, thread};
+use std::sync::atomic::{AtomicBool, Ordering};
 use vm_memory::{Bytes, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
 
 use crate::virtio::console::console_control::ConsoleControl;
@@ -11,6 +12,7 @@ use crate::virtio::{PortInputFd, PortOutputFd, Queue};
 use crate::virtio::console::port_io::PortOutput;
 
 pub(crate) fn process_tx(
+    stop: Arc<AtomicBool>,
     mem: GuestMemoryMmap,
     mut queue: Queue,
     irq: IRQSignaler,
@@ -27,6 +29,9 @@ pub(crate) fn process_tx(
                     irq.signal_used_queue("tx popped all heads");
                     log::trace!("Tx parking (queue empty)");
                     thread::park();
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
                     log::trace!("Tx unparked, queue len {}", queue.len(mem))
                 }
             }

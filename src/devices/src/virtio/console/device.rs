@@ -23,7 +23,7 @@ use crate::virtio::console::port::Port;
 use crate::virtio::console::port_queue_mapping::{
     num_queues, port_id_to_queue_idx, QueueDirection,
 };
-use crate::virtio::{PortInputFd, PortOutputFd};
+use crate::virtio::{VmmExitObserver, PortInputFd, PortOutputFd};
 
 use crate::virtio::console::irq_signaler::IRQSignaler;
 
@@ -471,5 +471,15 @@ impl VirtioDevice for Console {
             DeviceState::Inactive => false,
             DeviceState::Activated(_) => true,
         }
+    }
+}
+
+impl VmmExitObserver for Console {
+    fn on_vmm_exit(&mut self) {
+        for port in &mut self.ports {
+            port.flush();
+        }
+
+        log::trace!("Console on_vmm_exit finished");
     }
 }
