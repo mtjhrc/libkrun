@@ -22,7 +22,7 @@ use crate::virtio::console::port::Port;
 use crate::virtio::console::port_queue_mapping::{
     num_queues, port_id_to_queue_idx, QueueDirection,
 };
-use crate::virtio::{PortInput, PortOutput};
+use crate::virtio::{PortInputFd, PortOutputFd};
 
 use crate::virtio::console::irq_signaler::IRQSignaler;
 
@@ -99,16 +99,16 @@ pub struct Console {
 
 pub enum PortDescription {
     Console {
-        input: Option<PortInput>,
-        output: Option<PortOutput>,
+        input: Option<PortInputFd>,
+        output: Option<PortOutputFd>,
     },
     InputPipe {
         name: Cow<'static, str>,
-        input: PortInput,
+        input: PortInputFd,
     },
     OutputPipe {
         name: Cow<'static, str>,
-        output: PortOutput,
+        output: PortOutputFd,
     },
 }
 
@@ -368,18 +368,6 @@ impl Console {
                     }
 
                     ports_to_resume.push(cmd.id as usize);
-
-                    /*
-                    if ports[cmd.id as usize].status == PortStatus::NotReady {
-                        log::warn!("Driver signaled opened={} to port {} that was not ready, assuming the port is ready.",opened, cmd.id)
-                    }*/
-                    //self.ports[cmd.id as usize].status = PortStatus::Ready { opened };
-                    // There could be pending input on the given port, so lets try to process it
-
-                    /*
-                    if opened {
-                        ports_to_resume.push(cmd.id);
-                    }*/
                 }
                 _ => log::warn!("Unknown console control event {:x}", cmd.event),
             }

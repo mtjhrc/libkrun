@@ -3,27 +3,21 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::{io, mem, thread};
-use vm_memory::{
-    Bytes, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
-    WriteVolatile,
-};
+use vm_memory::{Bytes, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
 
 use crate::virtio::console::console_control::ConsoleControl;
 use crate::virtio::console::irq_signaler::IRQSignaler;
-use crate::virtio::{PortInput, PortOutput, Queue};
+use crate::virtio::{PortInputFd, PortOutputFd, Queue};
+use crate::virtio::console::port_io::PortOutput;
 
 pub(crate) fn process_tx(
     mem: GuestMemoryMmap,
     mut queue: Queue,
     irq: IRQSignaler,
-    mut output: PortOutput,
+    mut output: PortOutputFd,
     control: Arc<ConsoleControl>,
 ) {
     let mem = &mem;
-    let mut poll_fds = [PollFd::new(output.as_raw_fd(), PollFlags::POLLOUT)];
-    let mut wait_for_output = || {
-        poll(&mut poll_fds, -1).expect("Failed to poll");
-    };
 
     loop {
         let head = loop {
@@ -57,14 +51,14 @@ pub(crate) fn process_tx(
                         // try_access seem to handle partial write for us (we will be invoked again with an offset)
                         Ok(n) => break Ok(n),
                         // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
-                        Err(VolatileMemoryError::IOError(e))
+                        Err(e)
                             if e.kind() == io::ErrorKind::WouldBlock =>
                         {
                             log::trace!("Tx wait for output (would block)");
                             irq.signal_used_queue("tx waiting for output");
-                            wait_for_output()
+                            output.wait_until_writable();
                         }
-                        Err(e) => break Err(e.into()),
+                        Err(e) => break Err(GuestMemoryError::IOError(e)),
                     }
                 }
             });

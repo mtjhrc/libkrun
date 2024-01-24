@@ -5,27 +5,21 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{io, mem, thread};
-use vm_memory::{
-    GuestMemory, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError,
-};
+use vm_memory::{GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion, ReadVolatile, VolatileMemoryError, VolatileSlice};
 
 use crate::virtio::console::console_control::ConsoleControl;
 use crate::virtio::console::irq_signaler::IRQSignaler;
-use crate::virtio::{PortInput, Queue};
+use crate::virtio::{PortInputFd, Queue};
+use crate::virtio::console::port_io::PortInput;
 
 pub(crate) fn process_rx(
     mem: GuestMemoryMmap,
     mut queue: Queue,
     irq_signaler: IRQSignaler,
-    mut input: PortInput,
+    mut input: PortInputFd,
     control: Arc<ConsoleControl>,
 ) {
     let mem = &mem;
-
-    let mut poll_fds = [PollFd::new(input.as_raw_fd(), PollFlags::POLLIN)];
-    let mut wait_for_input = || {
-        poll(&mut poll_fds, -1).expect("Failed to poll");
-    };
 
     let mut eof = false;
     loop {
@@ -54,12 +48,12 @@ pub(crate) fn process_rx(
                         Ok(n)
                     }
                     // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
-                    Err(VolatileMemoryError::IOError(e))
+                    Err(e)
                         if e.kind() == io::ErrorKind::WouldBlock =>
                     {
                         Ok(0)
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(GuestMemoryError::IOError(e)),
                 }
             });
             match result {
@@ -88,9 +82,8 @@ pub(crate) fn process_rx(
 
             log::trace!("Rx EOF/WouldBlock");
             irq_signaler.signal_used_queue("rx eof/wouldblock");
-            // raise irq here?
             queue.undo_pop();
-            wait_for_input();
+            input.wait_until_readable();
         }
     }
 }

@@ -1,26 +1,48 @@
-use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK, STDIN_FILENO, STDOUT_FILENO};
+use std::io;
+use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK, STDIN_FILENO, STDOUT_FILENO, fd_set};
 use nix::errno::Errno;
 use nix::unistd::dup;
 use std::io::{ErrorKind, stderr, stdout};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use nix::fcntl::{OFlag, open};
+use nix::poll::{poll, PollFd, PollFlags};
+use nix::sys::select::{Fds, FdSet, select};
 use nix::sys::stat::Mode;
-use vm_memory::bitmap::BitmapSlice;
+use vm_memory::bitmap::{Bitmap, BitmapSlice};
 use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
+use vm_memory::GuestMemoryError::IOError;
 
-pub struct PortInput(OwnedFd);
+pub trait PortInput {
+    fn read_volatile(
+        &mut self,
+        buf: &mut VolatileSlice,
+    ) -> Result<usize, io::Error>;
 
-impl AsRawFd for PortInput {
+    fn wait_until_readable(&self);
+}
+
+pub trait PortOutput {
+    fn write_volatile(
+        &mut self,
+        buf: &VolatileSlice,
+    ) -> Result<usize, io::Error>;
+
+    fn wait_until_writable(&self);
+}
+
+pub struct PortInputFd(OwnedFd);
+
+impl AsRawFd for PortInputFd {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }
 }
 
-impl ReadVolatile for PortInput {
-    fn read_volatile<B: BitmapSlice>(
+impl PortInput for PortInputFd {
+    fn read_volatile(
         &mut self,
-        buf: &mut VolatileSlice<B>,
-    ) -> Result<usize, VolatileMemoryError> {
+        buf: &mut VolatileSlice,
+    ) -> io::Result<usize> {
         // This source code is copied from vm-memory, except it fixes an issue, where
         // the original code would does not handle handle EWOULDBLOCK
 
@@ -41,45 +63,63 @@ impl ReadVolatile for PortInput {
                 buf.bitmap().mark_dirty(0, buf.len());
             }
 
-            Err(VolatileMemoryError::IOError(err))
+            Err(err)
         } else {
             let bytes_read = bytes_read.try_into().unwrap();
             buf.bitmap().mark_dirty(0, bytes_read);
             Ok(bytes_read)
         }
     }
-}
 
-impl PortInput {
-    pub fn stdin() -> Result<Self, nix::Error> {
-        let fd = dup_raw_fd_into_owned(STDIN_FILENO)?;
-        make_non_blocking(&fd)?;
-        Ok(PortInput(fd))
+    fn wait_until_readable(&self) {
+        let mut poll_fds = [PollFd::new(self.as_raw_fd(), PollFlags::POLLIN)];
+        poll(&mut poll_fds, -1).expect("Failed to poll");
     }
 }
 
-pub struct PortOutput(OwnedFd);
+impl PortInputFd {
+    pub fn stdin() -> Result<Self, nix::Error> {
+        let fd = dup_raw_fd_into_owned(STDIN_FILENO)?;
+        make_non_blocking(&fd)?;
+        Ok(PortInputFd(fd))
+    }
+}
 
-impl AsRawFd for PortOutput {
+pub struct PortOutputFd(OwnedFd);
+
+impl AsRawFd for PortOutputFd {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }
 }
 
-impl WriteVolatile for PortOutput {
-    fn write_volatile<B: BitmapSlice>(
+impl PortOutput for PortOutputFd {
+    fn write_volatile(
         &mut self,
-        buf: &VolatileSlice<B>,
-    ) -> Result<usize, VolatileMemoryError> {
-        self.0.write_volatile(buf)
+        buf: &VolatileSlice
+    ) -> Result<usize, io::Error> {
+        self.0.write_volatile(buf).map_err(|e| {
+            match e {
+                VolatileMemoryError::IOError(e) => e,
+                e => {
+                    log::error!("Unsuported error from write_volatile: {e:?}");
+                    io::Error::new(ErrorKind::Other, e)
+                }
+            }
+        })
+    }
+
+    fn wait_until_writable(&self) {
+        let mut poll_fds = [PollFd::new(self.as_raw_fd(), PollFlags::POLLOUT)];
+        poll(&mut poll_fds, -1).expect("Failed to poll");
     }
 }
 
-impl PortOutput {
+impl PortOutputFd {
     pub fn stdout() -> Result<Self, nix::Error> {
         let fd = dup_raw_fd_into_owned(STDOUT_FILENO)?;
         make_non_blocking(&fd)?;
-        Ok(PortOutput(fd))
+        Ok(PortOutputFd(fd))
     }
 
     pub fn krun_log() -> Result<Self, nix::Error> {
@@ -88,7 +128,7 @@ impl PortOutput {
             panic!("Failed to open krun_log???");
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        Ok(PortOutput(fd))
+        Ok(PortOutputFd(fd))
     }
 }
 
