@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cmp;
 use std::io::Write;
+use std::iter::zip;
 use std::mem::{size_of, size_of_val};
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -125,7 +126,10 @@ impl Console {
 
         let (cols, rows) = get_win_size();
         let config = VirtioConsoleConfig::new(cols, rows, ports.len() as u32);
-        let ports = ports.into_iter().map(Port::new).collect();
+        let ports = zip(0u32.., ports.into_iter())
+            .map(|(port_id, description)| Port::new(port_id, description))
+            .collect();
+
         Ok(Console {
             irq: IRQSignaler::new(),
             control: ConsoleControl::new(),
@@ -269,7 +273,7 @@ impl Console {
         let mut raise_irq = false;
 
         while let Some(head) = self.queues[CONTROL_RXQ_INDEX].pop(mem) {
-            if let Some(buf)  = self.control.queue_pop() {
+            if let Some(buf) = self.control.queue_pop() {
                 match mem.write(&buf, head.addr) {
                     Ok(n) => {
                         if n != buf.len() {
@@ -380,7 +384,7 @@ impl Console {
                 self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)].clone(),
                 self.queues[port_id_to_queue_idx(QueueDirection::Tx, port_id)].clone(),
                 self.irq.clone(),
-                self.control.clone()
+                self.control.clone(),
             );
         }
 

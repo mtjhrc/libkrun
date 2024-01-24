@@ -18,6 +18,7 @@ pub(crate) fn process_rx(
     irq_signaler: IRQSignaler,
     mut input: PortInputFd,
     control: Arc<ConsoleControl>,
+    port_id: u32,
 ) {
     let mem = &mem;
 
@@ -75,7 +76,7 @@ pub(crate) fn process_rx(
             //irq_signaler.signal_used_queue("rx queue used");
         } else if bytes_read == 0 {
             if eof {
-                control.set_port_open(1, false);
+                control.set_port_open(port_id, false);
                 log::trace!("RX eof stopping!!!!!!");
                 return;
             }

@@ -33,6 +33,7 @@ enum PortState {
 }
 
 pub(crate) struct Port {
+    port_id: u32,
     /// Empty if no name given
     name: Cow<'static, str>,
     status: PortStatus,
@@ -41,15 +42,17 @@ pub(crate) struct Port {
 }
 
 impl Port {
-    pub(crate) fn new(description: PortDescription) -> Self {
+    pub(crate) fn new(port_id: u32, description: PortDescription) -> Self {
         match description {
             PortDescription::Console { input, output } => Self {
+                port_id,
                 name: "".into(),
                 represents_console: true,
                 status: PortStatus::NotReady,
                 state: PortState::Inactive { input, output },
             },
             PortDescription::InputPipe { name, input } => Self {
+                port_id,
                 name,
                 represents_console: false,
                 status: PortStatus::NotReady,
@@ -59,6 +62,7 @@ impl Port {
                 },
             },
             PortDescription::OutputPipe { name, output } => Self {
+                port_id,
                 name,
                 represents_console: false,
                 status: PortStatus::NotReady,
@@ -126,7 +130,8 @@ impl Port {
             let mem = mem.clone();
             let irq_signaler = irq_signaler.clone();
             let control = control.clone();
-            thread::spawn(|| process_rx(mem, rx_queue, irq_signaler, input, control))
+            let port_id = self.port_id;
+            thread::spawn(move || process_rx(mem, rx_queue, irq_signaler, input, control, port_id))
         });
 
         let tx_thread = output.map(|output| {
