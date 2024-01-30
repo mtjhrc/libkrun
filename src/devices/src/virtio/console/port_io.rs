@@ -5,12 +5,15 @@ use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::select::{select, FdSet, Fds};
 use nix::sys::stat::Mode;
 use nix::unistd::dup;
-use std::io;
+use std::{io, thread};
+use std::cell::Cell;
 use std::io::{stderr, stdout, Error, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::time::Duration;
+use nix::time::{clock_gettime, ClockId};
 use vm_memory::bitmap::{Bitmap, BitmapSlice};
 use vm_memory::GuestMemoryError::IOError;
-use vm_memory::{ReadVolatile, VolatileMemoryError, VolatileSlice, WriteVolatile};
+use vm_memory::{Bytes, ReadVolatile, VolatileMemory, VolatileMemoryError, VolatileSlice, WriteVolatile};
 
 pub trait PortInput {
     fn read_volatile(&mut self, buf: &mut VolatileSlice) -> Result<usize, io::Error>;
@@ -176,5 +179,34 @@ impl PortOutput for PortOutputLog {
 
     fn wait_until_writable(&self) {
         return;
+    }
+}
+
+
+pub struct PortInputSigInt {
+    ready: Cell<bool>,
+}
+
+impl PortInputSigInt {
+    pub fn new() -> Self {
+        PortInputSigInt {
+            ready: Cell::new(false),
+        }
+    }
+}
+
+impl PortInput for PortInputSigInt {
+    fn read_volatile(&mut self, buf: &mut VolatileSlice) -> Result<usize, Error> {
+        if self.ready.get() {
+            buf.copy_from(&[3u8]); //ASCII 'ETX', -> generates SIGINIT
+            Ok(1)
+        }else {
+            Err(io::Error::from(ErrorKind::WouldBlock))
+        }
+    }
+
+    fn wait_until_readable(&self) {
+        thread::sleep(Duration::from_secs(3));
+        self.ready.replace(true);
     }
 }

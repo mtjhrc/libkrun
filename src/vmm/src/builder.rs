@@ -20,7 +20,7 @@ use devices::legacy::Serial;
 use devices::virtio::Net;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::VirtioShmRegion;
-use devices::virtio::{MmioTransport, PortDescription, PortInputFd, PortOutputFd, PortOutputLog, Vsock};
+use devices::virtio::{MmioTransport, PortDescription, PortInputFd, PortInputSigInt, PortOutputFd, PortOutputLog, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -1052,7 +1052,7 @@ fn attach_console_devices(
         input: if stdin_is_terminal {
             Some(Box::new(PortInputFd::stdin().unwrap()))
         } else {
-            None
+            None //Some(Box::new(PortInputSigInt::new()))
         },
         output: if stdout_is_terminal {
             Some(Box::new(PortOutputFd::stdout().unwrap()))

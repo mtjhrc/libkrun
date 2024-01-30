@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <dirent.h>
+#include <termios.h>
 
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -818,6 +819,28 @@ int setup_redirects()
     return 0;
 }
 
+int enable_isig() {
+    struct termios termios_p;
+    printf("aaaaaaaaaaaa\n");
+
+    // Get the current attributes
+    if (tcgetattr(STDIN_FILENO, &termios_p) == -1) {
+        perror("tcgetattr");
+        exit(EXIT_FAILURE);
+    }
+
+    // Enable ISIG flag
+    termios_p.c_lflag |= ISIG;
+    printf("VINTR is %d\n", termios_p.c_cc[VINTR]);
+
+    // Set the new attributes
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_p) == -1) {
+        perror("tcsetattr");
+        exit(EXIT_FAILURE);
+    }
+    printf("bbbbbbbbbbbbbb\n");
+}
+
 int main(int argc, char **argv)
 {
 	struct ifreq ifr;
@@ -909,16 +932,23 @@ int main(int argc, char **argv)
 		clock_worker();
 	}
 #endif
-
-    if (setup_redirects() < 0) {
-       exit(-4);
+//    enable_isig();
+    int pid = fork();
+    if (pid < 0) {
+        perror("fork");
+    } if (pid == 0) {
+        if (setup_redirects() < 0) {
+           exit(-4);
+        }
+        if (execvp(exec_argv[0], exec_argv) < 0) {
+            //TODO: maybe print this msg to the console not redirected stdout?
+            printf("Couldn't execute '%s' inside the vm: %s\n", exec_argv[0], strerror(errno));
+            exit(-3);
+        }
+    }else{ //parent
+        // wait for children since we can't exit init
+        waitpid(pid, NULL, 0);
     }
-
-	if (execvp(exec_argv[0], exec_argv) < 0) {
-		//TODO: maybe print this msg to the console not redirected stdout?
-		printf("Couldn't execute '%s' inside the vm: %s\n", exec_argv[0], strerror(errno));
-		exit(-3);
-	}
 
 	return 0;
 }

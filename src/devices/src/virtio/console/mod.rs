@@ -10,7 +10,7 @@ mod process_tx;
 
 pub use self::defs::uapi::VIRTIO_ID_CONSOLE as TYPE_CONSOLE;
 pub use self::device::{Console, PortDescription};
-pub use self::port_io::{PortInputFd, PortOutputFd, PortOutputLog};
+pub use self::port_io::{PortInputFd, PortOutputFd, PortOutputLog, PortInputSigInt};
 
 mod defs {
     pub const CONSOLE_DEV_ID: &str = "virtio_console";
