@@ -1,69 +1,42 @@
-use std::io::Read;
 use std::os::unix::io::AsRawFd;
-use std::process;
 
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 
-use super::device::{get_win_size, Console, RXQ_INDEX, TXQ_INDEX};
+use super::device::{get_win_size, Console};
+use crate::virtio::console::device::{CONTROL_RXQ_INDEX, CONTROL_TXQ_INDEX};
+use crate::virtio::console::port_queue_mapping::{queue_idx_to_port_id, QueueDirection};
 use crate::virtio::device::VirtioDevice;
 
 impl Console {
-    pub(crate) fn handle_rxq_event(&mut self, event: &EpollEvent) -> bool {
-        debug!("console: RX queue event");
+    pub(crate) fn read_queue_event(&self, queue_index: usize, event: &EpollEvent) -> bool {
+        log::trace!("Event on queue {queue_index}: {:?}", event.event_set());
 
         let event_set = event.event_set();
         if event_set != EventSet::IN {
-            warn!("console: rxq unexpected event {:?}", event_set);
+            warn!("Unexpected event from queue index {queue_index}: {event_set:?}");
             return false;
         }
 
-        let mut raise_irq = false;
-        if let Err(e) = self.queue_events[RXQ_INDEX].read() {
-            error!("Failed to get console rx queue event: {:?}", e);
-        } else {
-            raise_irq |= self.process_rx();
-        }
-        raise_irq
-    }
-
-    pub(crate) fn handle_txq_event(&mut self, event: &EpollEvent) -> bool {
-        debug!("console: TX queue event");
-
-        let event_set = event.event_set();
-        if event_set != EventSet::IN {
-            warn!("console: txq unexpected event {:?}", event_set);
+        if let Err(e) = self.queue_events[queue_index].read() {
+            error!("Failed to read event from queue index {queue_index}: {e:?}");
             return false;
         }
 
-        let mut raise_irq = false;
-        if let Err(e) = self.queue_events[TXQ_INDEX].read() {
-            error!("Failed to get console tx queue event: {:?}", e);
-        } else {
-            raise_irq |= self.process_tx();
-        }
-        raise_irq
+        true
     }
 
-    pub(crate) fn handle_input(&mut self, event: &EpollEvent) {
-        debug!("console: input event");
-
-        let event_set = event.event_set();
-        match event_set {
-            EventSet::HANG_UP => process::exit(0),
-            EventSet::IN => {}
-            _ => {
-                warn!("console: input unexpected event {:?}", event_set);
-                return;
+    fn notify_port_queue_event(&mut self, queue_index: usize) {
+        let (direction, port_id) = queue_idx_to_port_id(queue_index);
+        match direction {
+            QueueDirection::Rx => {
+                log::trace!("Notify rx (queue event)");
+                self.ports[port_id].notify_rx()
             }
-        }
-
-        let mut out = [0u8; 64];
-        let count = self.input.read(&mut out).unwrap();
-        self.in_buffer.extend(&out[..count]);
-
-        if self.process_rx() {
-            self.signal_used_queue().unwrap();
+            QueueDirection::Tx => {
+                log::trace!("Notify tx (queue event)");
+                self.ports[port_id].notify_tx()
+            }
         }
     }
 
@@ -79,31 +52,22 @@ impl Console {
             .subscriber(self.activate_evt.as_raw_fd())
             .unwrap();
 
-        event_manager
-            .register(
-                self.queue_events[RXQ_INDEX].as_raw_fd(),
-                EpollEvent::new(
-                    EventSet::IN,
-                    self.queue_events[RXQ_INDEX].as_raw_fd() as u64,
-                ),
-                self_subscriber.clone(),
-            )
-            .unwrap_or_else(|e| {
-                error!("Failed to register fs rxq with event manager: {:?}", e);
-            });
-
-        event_manager
-            .register(
-                self.queue_events[TXQ_INDEX].as_raw_fd(),
-                EpollEvent::new(
-                    EventSet::IN,
-                    self.queue_events[TXQ_INDEX].as_raw_fd() as u64,
-                ),
-                self_subscriber.clone(),
-            )
-            .unwrap_or_else(|e| {
-                error!("Failed to register fs txq with event manager: {:?}", e);
-            });
+        for queue_index in 0..self.queues.len() {
+            event_manager
+                .register(
+                    self.queue_events[queue_index].as_raw_fd(),
+                    EpollEvent::new(
+                        EventSet::IN,
+                        self.queue_events[queue_index].as_raw_fd() as u64,
+                    ),
+                    self_subscriber.clone(),
+                )
+                .unwrap_or_else(|e| {
+                    error!(
+                        "Failed to register queue index {queue_index} with event manager: {e:?}"
+                    );
+                });
+        }
 
         event_manager
             .unregister(self.activate_evt.as_raw_fd())
@@ -127,33 +91,59 @@ impl Console {
         let (cols, rows) = get_win_size();
         self.update_console_size(cols, rows);
     }
+
+    fn read_control_queue_event(&mut self, event: &EpollEvent) {
+        let event_set = event.event_set();
+        if event_set != EventSet::IN {
+            warn!("Unexpected event {:?}", event_set);
+        }
+
+        if let Err(e) = self.control.queue_evt().read() {
+            error!("Failed to read the ConsoleControl event: {:?}", e);
+        }
+    }
 }
 
 impl Subscriber for Console {
     fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager) {
         let source = event.fd();
-        let rxq = self.queue_events[RXQ_INDEX].as_raw_fd();
-        let txq = self.queue_events[TXQ_INDEX].as_raw_fd();
+
+        let control_rxq = self.queue_events[CONTROL_RXQ_INDEX].as_raw_fd();
+        let control_txq = self.queue_events[CONTROL_TXQ_INDEX].as_raw_fd();
+        let control_rxq_control = self.control.queue_evt().as_raw_fd();
+
         let activate_evt = self.activate_evt.as_raw_fd();
         let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
-        let input = self.input.as_raw_fd();
 
         if self.is_activated() {
             let mut raise_irq = false;
-            match source {
-                _ if source == rxq => raise_irq = self.handle_rxq_event(event),
-                _ if source == txq => raise_irq = self.handle_txq_event(event),
-                _ if source == input => self.handle_input(event),
-                _ if source == activate_evt => {
-                    self.handle_activate_event(event_manager);
-                }
-                _ if source == sigwinch_evt => {
-                    self.handle_sigwinch_event(event);
-                }
-                _ => warn!("Unexpected console event received: {:?}", source),
+
+            if source == control_txq {
+                raise_irq |=
+                    self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
+            } else if source == control_rxq_control {
+                self.read_control_queue_event(event);
+                raise_irq |= self.process_control_rx();
+            } else if source == control_rxq {
+                raise_irq |= self.read_queue_event(CONTROL_RXQ_INDEX, event)
+            }
+            /* Guest signaled input/output on port */
+            else if let Some(queue_index) = self
+                .queue_events
+                .iter()
+                .position(|fd| fd.as_raw_fd() == source)
+            {
+                raise_irq |= self.read_queue_event(queue_index, event);
+                self.notify_port_queue_event(queue_index);
+            } else if source == activate_evt {
+                self.handle_activate_event(event_manager);
+            } else if source == sigwinch_evt {
+                self.handle_sigwinch_event(event);
+            } else {
+                log::warn!("Unexpected console event received: {:?}", source)
             }
             if raise_irq {
-                self.signal_used_queue().unwrap_or_default();
+                self.irq.signal_used_queue("event_handler");
             }
         } else {
             warn!(
@@ -164,17 +154,10 @@ impl Subscriber for Console {
     }
 
     fn interest_list(&self) -> Vec<EpollEvent> {
-        if self.interactive {
-            vec![
-                EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.input.as_raw_fd() as u64),
-            ]
-        } else {
-            vec![
-                EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
-                EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
-            ]
-        }
+        vec![
+            EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
+            EpollEvent::new(EventSet::IN, self.sigwinch_evt.as_raw_fd() as u64),
+            EpollEvent::new(EventSet::IN, self.control.queue_evt().as_raw_fd() as u64),
+        ]
     }
 }

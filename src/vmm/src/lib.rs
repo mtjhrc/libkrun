@@ -30,25 +30,29 @@ mod linux;
 use crate::linux::vstate;
 #[cfg(target_os = "macos")]
 mod macos;
+mod terminal;
+
 #[cfg(target_os = "macos")]
 use macos::vstate;
 
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::os::unix::io::AsRawFd;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
 #[cfg(target_arch = "x86_64")]
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
+use crate::terminal::term_set_canonical_mode;
 #[cfg(target_os = "linux")]
 use crate::vstate::VcpuEvent;
 use crate::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
 use arch::ArchMemoryInfo;
 use arch::DeviceType;
 use arch::InitrdConfig;
+use devices::virtio::VmmExitObserver;
 use devices::BusDevice;
 use kernel::cmdline::Cmdline as KernelCmdline;
 use polly::event_manager::{self, EventManager, Subscriber};
@@ -178,8 +182,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Contains the state and associated methods required for the Firecracker VMM.
 pub struct Vmm {
-    //events_observer: Option<Box<dyn VmmEventsObserver>>,
-
     // Guest VM core resources.
     guest_memory: GuestMemoryMmap,
     arch_memory_info: ArchMemoryInfo,
@@ -189,6 +191,7 @@ pub struct Vmm {
     vcpus_handles: Vec<VcpuHandle>,
     exit_evt: EventFd,
     vm: Vm,
+    exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
 
     // Guest VM devices.
     mmio_device_manager: MMIODeviceManager,
@@ -209,10 +212,6 @@ impl Vmm {
     /// Starts the microVM vcpus.
     pub fn start_vcpus(&mut self, mut vcpus: Vec<Vcpu>) -> Result<()> {
         let vcpu_count = vcpus.len();
-
-        //if let Some(observer) = self.events_observer.as_mut() {
-        //    observer.on_vmm_boot().map_err(Error::VmmObserverInit)?;
-        //}
 
         Vcpu::register_kick_signal_handler();
 
@@ -329,13 +328,16 @@ impl Vmm {
     pub fn stop(&mut self, exit_code: i32) {
         info!("Vmm is stopping.");
 
-        //if let Some(observer) = self.events_observer.as_mut() {
-        //    if let Err(e) = observer.on_vmm_stop() {
-        //        warn!("{}", Error::VmmObserverTeardown(e));
-        //    }
-        //}
+        if let Err(e) = term_set_canonical_mode() {
+            log::error!("Failed to restore terminal to canonical mode: {e}")
+        }
 
-        builder::SerialStdin::restore();
+        for observer in &self.exit_observers {
+            observer
+                .lock()
+                .expect("Poisoned mutex for exit observer")
+                .on_vmm_exit();
+        }
 
         // Exit from Firecracker using the provided exit code. Safe because we're terminating
         // the process anyway.

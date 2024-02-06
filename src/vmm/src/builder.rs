@@ -7,7 +7,7 @@
 use crossbeam_channel::unbounded;
 use std::fmt::{Display, Formatter};
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use super::{Error, Vmm};
@@ -21,15 +21,19 @@ use devices::legacy::Serial;
 use devices::virtio::Net;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::VirtioShmRegion;
-use devices::virtio::{MmioTransport, Vsock};
+use devices::virtio::{port_io, MmioTransport, PortDescription, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
 
+use crate::device_manager;
 #[cfg(feature = "tee")]
 use crate::resources::TeeConfig;
 #[cfg(target_os = "linux")]
+use crate::signal_handler::register_sigint_handler;
+#[cfg(target_os = "linux")]
 use crate::signal_handler::register_sigwinch_handler;
+use crate::terminal::term_set_raw_mode;
 #[cfg(feature = "tee")]
 use crate::vmm_config::block::BlockBuilder;
 use crate::vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE;
@@ -42,15 +46,15 @@ use crate::vstate::KvmContext;
 #[cfg(all(target_os = "linux", feature = "tee"))]
 use crate::vstate::MeasuredRegion;
 use crate::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
-use crate::{device_manager, VmmEventsObserver};
 use arch::ArchMemoryInfo;
 #[cfg(feature = "tee")]
 use arch::InitrdConfig;
 #[cfg(feature = "tee")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
+use libc::{STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
+use nix::unistd::isatty;
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
-use utils::terminal::Terminal;
 use utils::time::TimestampUs;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
 use vm_memory::mmap::GuestRegionMmap;
@@ -248,52 +252,6 @@ impl Display for StartMicrovmError {
                 write!(f, "TEE selected is not currently supported")
             }
         }
-    }
-}
-
-// Wrapper over io::Stdin that implements `Serial::ReadableFd` and `vmm::VmmEventsObserver`.
-pub struct SerialStdin(io::Stdin);
-impl SerialStdin {
-    /// Returns a `SerialStdin` wrapper over `io::stdin`.
-    pub fn get() -> Self {
-        let stdin = io::stdin();
-        stdin.lock().set_raw_mode().unwrap();
-        SerialStdin(stdin)
-    }
-
-    pub fn restore() {
-        let stdin = io::stdin();
-        stdin.lock().set_canon_mode().unwrap();
-    }
-}
-
-impl io::Read for SerialStdin {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-impl AsRawFd for SerialStdin {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
-    }
-}
-
-impl devices::legacy::ReadableFd for SerialStdin {}
-
-impl VmmEventsObserver for SerialStdin {
-    fn on_vmm_boot(&mut self) -> std::result::Result<(), utils::errno::Error> {
-        // Set raw mode for stdin.
-        self.0.lock().set_raw_mode().map_err(|e| {
-            warn!("Cannot set raw mode for the terminal. {:?}", e);
-            e
-        })
-    }
-    fn on_vmm_stop(&mut self) -> std::result::Result<(), utils::errno::Error> {
-        self.0.lock().set_canon_mode().map_err(|e| {
-            warn!("Cannot set canonical mode for the terminal. {:?}", e);
-            e
-        })
     }
 }
 
@@ -558,12 +516,12 @@ pub fn build_microvm(
     let shm_region = None;
 
     let mut vmm = Vmm {
-        //events_observer: Some(Box::new(SerialStdin::get())),
         guest_memory,
         arch_memory_info,
         kernel_cmdline,
         vcpus_handles: Vec::new(),
         exit_evt,
+        exit_observers: Vec::new(),
         vm,
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
@@ -646,6 +604,9 @@ pub fn build_microvm(
     vmm.start_vcpus(vcpus)
         .map_err(StartMicrovmError::Internal)?;
 
+    // Clippy thinks we don't need Arc<Mutex<...
+    // but we don't want to change the event_manager interface
+    #[allow(clippy::arc_with_non_send_sync)]
     let vmm = Arc::new(Mutex::new(vmm));
     event_manager
         .add_subscriber(vmm.clone())
@@ -1086,19 +1047,66 @@ fn attach_console_devices(
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
-    let console = Arc::new(Mutex::new(
-        devices::virtio::Console::new(Box::new(SerialStdin::get()), Box::new(io::stdout()))
-            .unwrap(),
-    ));
+    let stdin_is_terminal = isatty(STDIN_FILENO).unwrap_or(false);
+    let stdout_is_terminal = isatty(STDOUT_FILENO).unwrap_or(false);
+    let stderr_is_terminal = isatty(STDERR_FILENO).unwrap_or(false);
+
+    if let Err(e) = term_set_raw_mode(!stdin_is_terminal) {
+        log::error!("Failed to set terminal to raw mode: {e}")
+    }
+
+    let console_input = if stdin_is_terminal {
+        Some(port_io::stdin().unwrap())
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            let sigint_input = port_io::PortInputSigInt::new();
+            let sigint_input_fd = sigint_input.sigint_evt().as_raw_fd();
+            register_sigint_handler(sigint_input_fd).map_err(RegisterFsSigwinch)?;
+            Some(Box::new(sigint_input) as _)
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    };
+
+    let console_output = if stdout_is_terminal {
+        Some(port_io::stdout().unwrap())
+    } else {
+        Some(port_io::output_to_log_as_err())
+    };
+
+    let mut ports = vec![PortDescription::Console {
+        input: console_input,
+        output: console_output,
+    }];
+
+    if !stdin_is_terminal {
+        ports.push(PortDescription::InputPipe {
+            name: "krun-stdin".into(),
+            input: port_io::stdin().unwrap(),
+        })
+    }
+
+    if !stdout_is_terminal {
+        ports.push(PortDescription::OutputPipe {
+            name: "krun-stdout".into(),
+            output: port_io::stdout().unwrap(),
+        })
+    };
+
+    if !stderr_is_terminal {
+        ports.push(PortDescription::OutputPipe {
+            name: "krun-stderr".into(),
+            output: port_io::stderr().unwrap(),
+        });
+    }
+
+    let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
+
+    vmm.exit_observers.push(console.clone());
 
     if let Some(intc) = intc {
         console.lock().unwrap().set_intc(intc);
-    }
-
-    // Stdin may not be pollable (i.e. when running a container without "-i"). If that's
-    // the case, disable the interactive mode in the console.
-    if !event_manager.is_pollable(io::stdin().as_raw_fd()) {
-        console.lock().unwrap().set_interactive(false)
     }
 
     event_manager
@@ -1277,12 +1285,6 @@ pub mod tests {
         };
 
         create_guest_memory(mem_size_mib, kernel_region, kernel_guest_addr, kernel_size)
-    }
-
-    #[test]
-    fn test_stdin_wrapper() {
-        let wrapper = SerialStdin::get();
-        assert_eq!(wrapper.as_raw_fd(), io::stdin().as_raw_fd())
     }
 
     #[test]
