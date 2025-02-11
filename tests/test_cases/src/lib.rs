@@ -4,6 +4,10 @@ use test_vm_config::TestVmConfig;
 mod test_vsock_guest_connect;
 use test_vsock_guest_connect::TestVsockGuestConnect;
 
+mod test_tsi_tcp_guest_connect;
+use test_tsi_tcp_guest_connect::TestTsiHijackTCP;
+
+// Register your test here!
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -22,6 +26,7 @@ pub fn test_cases() -> Vec<TestCase> {
             }),
         ),
         TestCase::new("vsock-guest-connect", Box::new(TestVsockGuestConnect)),
+        TestCase::new("tsi-hijack-tcp", Box::new(TestTsiHijackTCP)),
     ]
 }
 

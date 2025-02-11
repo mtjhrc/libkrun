@@ -341,7 +341,8 @@ impl TcpProxy {
     }
 
     fn switch_to_connected(&mut self) {
-        self.status = ProxyStatus::Connected;
+        debug!("Switch to connected from {:?}", self.status);
+        self.status = ProxyStatus::ConnectedUnconfirmed;
         match fcntl(self.fd, FcntlArg::F_GETFL) {
             Ok(flags) => match OFlag::from_bits(flags) {
                 Some(flags) => {
@@ -367,7 +368,10 @@ impl Proxy for TcpProxy {
 
     fn connect(&mut self, _pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
         let mut update = ProxyUpdate::default();
-
+        debug!(
+            "[MY] connecting to {}:{} (current status {:?})",
+            req.addr, req.port, self.status
+        );
         let result = match connect(
             self.fd,
             &SockaddrIn::from(SocketAddrV4::new(req.addr, req.port)),
@@ -395,7 +399,7 @@ impl Proxy for TcpProxy {
         if self.status == ProxyStatus::Connecting {
             update.polling = Some((self.id, self.fd, EventSet::IN | EventSet::OUT));
         } else {
-            if self.status == ProxyStatus::Connected {
+            if self.status == ProxyStatus::ConnectedUnconfirmed {
                 update.polling = Some((self.id, self.fd, EventSet::IN));
             }
             self.push_connect_rsp(result);
@@ -406,12 +410,22 @@ impl Proxy for TcpProxy {
 
     fn confirm_connect(&mut self, pkt: &VsockPacket) {
         debug!(
-            "tcp: confirm_connect: local_port={} peer_port={}, src_port={}, dst_port={}",
+            "tcp: confirm_connect: local_port={} peer_port={}, src_port={}, dst_port={} status={:?}",
             pkt.dst_port(),
             pkt.src_port(),
             self.local_port,
             self.peer_port,
+            self.status
         );
+
+        if self.status != ProxyStatus::ConnectedUnconfirmed {
+            warn!(
+                "Expected state to be {:?}, but it is {:?}",
+                ProxyStatus::ConnectedUnconfirmed,
+                self.status
+            );
+        }
+        self.status = ProxyStatus::Connected;
 
         self.peer_buf_alloc = pkt.buf_alloc();
         self.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
@@ -458,7 +472,7 @@ impl Proxy for TcpProxy {
     }
 
     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate {
-        debug!("vsock: tcp_proxy: sendmsg");
+        debug!("vsock: tcp_proxy: sendmsg (status {:?})", self.status);
 
         let mut update = ProxyUpdate::default();
 
@@ -574,6 +588,11 @@ impl Proxy for TcpProxy {
         self.peer_buf_alloc = pkt.buf_alloc();
         self.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
 
+        debug!(
+            "[MY] update_peer_credit {:?} -> {:?}",
+            self.status,
+            ProxyStatus::Connected
+        );
         self.status = ProxyStatus::Connected;
 
         ProxyUpdate {
@@ -607,6 +626,7 @@ impl Proxy for TcpProxy {
         self.peer_buf_alloc = pkt.buf_alloc();
         self.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
 
+        debug!("process_op_response: switch_to_connected");
         self.switch_to_connected();
 
         ProxyUpdate {
@@ -704,6 +724,7 @@ impl Proxy for TcpProxy {
                 update.signal_queue = signal_queue;
 
                 if wait_credit && self.status != ProxyStatus::WaitingCreditUpdate {
+                    debug!("[MY] ProxyStatus::Connected, pushing CreditRequest");
                     self.status = ProxyStatus::WaitingCreditUpdate;
                     let rx = MuxerRx::CreditRequest {
                         local_port: self.local_port,
@@ -748,6 +769,7 @@ impl Proxy for TcpProxy {
         if evset.contains(EventSet::OUT) {
             debug!("process_event: OUT");
             if self.status == ProxyStatus::Connecting {
+                debug!("evset.contains(EventSet::OUT): switching status to connected");
                 self.switch_to_connected();
                 self.push_connect_rsp(0);
                 update.signal_queue = true;

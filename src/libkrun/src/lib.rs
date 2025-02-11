@@ -30,6 +30,7 @@ use hvf::MemoryMapping;
 #[cfg(not(feature = "efi"))]
 use libc::size_t;
 use libc::{c_char, c_int};
+use log::LevelFilter;
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
 use utils::eventfd::EventFd;
@@ -267,16 +268,12 @@ extern "C" {
 }
 
 #[no_mangle]
-pub extern "C" fn krun_set_log_level(level: u32) -> i32 {
-    let log_level = match level {
-        0 => "off",
-        1 => "error",
-        2 => "warn",
-        3 => "info",
-        4 => "debug",
-        _ => "trace",
-    };
-    env_logger::Builder::from_env(Env::default().default_filter_or(log_level)).init();
+pub extern "C" fn krun_set_log_level(_level: u32) -> i32 {
+    env_logger::Builder::new()
+        .filter(None, LevelFilter::Error)
+        .filter(Some("devices::virtio::vsock"), LevelFilter::Trace)
+        .init();
+    log::error!("Set log level!");
     KRUN_SUCCESS
 }
 
