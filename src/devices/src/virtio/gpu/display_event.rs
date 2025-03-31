@@ -35,11 +35,12 @@ pub struct ScanoutUpdate {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// Pitch/ specified in pixels
     pub pitch: u32,
     pub damage_area: Rect,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -62,7 +63,7 @@ impl Rect {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Dimensions {
     pub width: u32,
     pub height: u32,
@@ -71,6 +72,10 @@ pub struct Dimensions {
 impl Dimensions {
     pub fn new(width: u32, height: u32) -> Dimensions {
         Self { width, height }
+    }
+
+    pub fn as_rect(&self) -> Rect {
+        Rect::new(0, 0, self.width, self.height)
     }
 }
 

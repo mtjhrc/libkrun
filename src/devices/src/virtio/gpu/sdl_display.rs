@@ -3,20 +3,22 @@ use crate::virtio::gpu::display_event::{Dimensions, DisplayEvent, Rect, ScanoutU
 use crate::virtio::gpu::protocol::{virtio_gpu_rect, VIRTIO_GPU_MAX_SCANOUTS};
 use crossbeam_channel::Sender;
 use imago::format::wrapped::WrappedFormat;
-use libc::{_exit, c_int};
+use libc::{_exit, c_int, memalign, memcpy, ptrace};
 use nix::sys::signal::{kill, SIGINT};
 use nix::unistd::getpid;
 use sdl3::event::EventType::WindowCloseRequested;
 use sdl3::event::WindowEvent::PixelSizeChanged;
 use sdl3::event::{Event, EventSender, EventWatchCallback, WindowEvent};
+use sdl3::gpu::TextureFormat;
 use sdl3::pixels::{PixelFormat, PixelMasks};
-use sdl3::render::Canvas;
+use sdl3::render::{Canvas, Texture};
 use sdl3::surface::Surface;
 use sdl3::sys::everything::{
-    SDL_PixelFormat, SDL_SetTrayEntryChecked, SDL_SetTrayTooltip, SDL_TrayEntry,
-    SDL_PIXELFORMAT_XRGB8888,
+    SDL_PixelFormat, SDL_RendererLogicalPresentation, SDL_SetTrayEntryChecked, SDL_SetTrayTooltip,
+    SDL_TrayEntry, SDL_PIXELFORMAT_XRGB8888,
 };
 use sdl3::sys::pixels::{SDL_PIXELFORMAT_RGBA8888, SDL_PIXELFORMAT_RGBX8888};
+use sdl3::sys::render::SDL_LOGICAL_PRESENTATION_LETTERBOX;
 use sdl3::sys::surface::{SDL_LoadBMP, SDL_Surface};
 use sdl3::sys::tray::{
     SDL_CreateTray, SDL_CreateTrayMenu, SDL_DestroyTray, SDL_GetTrayEntryChecked,
@@ -31,8 +33,8 @@ use std::ffi::{c_void, CStr, CString};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 use std::thread::JoinHandle;
+use std::{mem, thread};
 
 struct DisplayHandleInner {
     displays: Box<[DisplayInfo]>,
@@ -257,7 +259,6 @@ fn construct_tray<'sdl>(
         tray.push_checkbox(
             &CString::new(label).unwrap(),
             Box::new(move |entry| {
-                debug!("Clicked");
                 sender
                     .push_custom_event(DisplayEvent::ShowWindow(i))
                     .unwrap()
@@ -268,9 +269,133 @@ fn construct_tray<'sdl>(
     }
 
     tray.push_tray_separator();
-    tray.push_checkbox(c"Kill vmm", Box::new(|try_item| unsafe { _exit(0) }))
-        .expect("TODO: panic message");
+    tray.push_checkbox(c"Kill VM", Box::new(|tray_item| unsafe { _exit(0) }))
+        .unwrap();
     tray
+}
+
+struct Scanout<'sdl> {
+    video_sys: &'sdl VideoSubsystem,
+    scanout_dimensions: Dimensions,
+    canvas: Canvas<Window>,
+    output_texture: Texture,
+    format: PixelFormat,
+}
+
+impl<'sdl> Scanout<'sdl> {
+    pub fn new(
+        video_sys: &'sdl VideoSubsystem,
+        name: &str,
+        display_dimensions: Dimensions,
+        scanout_dimensions: Dimensions,
+        format: PixelFormat,
+    ) -> Result<Self, SdlError> {
+        let mut new_window = video_sys
+            .window(name, display_dimensions.width, display_dimensions.height)
+            .resizable()
+            .build()
+            .unwrap();
+        new_window.set_minimum_size(256, 144).unwrap();
+        new_window.show();
+
+        let mut canvas = new_window.into_canvas();
+        let output_texture = canvas
+            .create_texture_streaming(format, scanout_dimensions.width, scanout_dimensions.height)
+            .unwrap();
+
+        Ok(Self {
+            video_sys,
+            scanout_dimensions,
+            canvas,
+            output_texture,
+            format,
+        })
+    }
+
+    pub fn window_mut(&mut self) -> &mut Window {
+        self.canvas.window_mut()
+    }
+
+    pub fn resize_scanout(&mut self, dimensions: Dimensions) {
+        if self.scanout_dimensions == dimensions {
+            return;
+        }
+
+        self.scanout_dimensions = dimensions;
+        self.canvas
+            .set_logical_size(
+                dimensions.width,
+                dimensions.height,
+                SDL_RendererLogicalPresentation::LETTERBOX,
+            )
+            .unwrap();
+
+        let new_texture = self
+            .canvas
+            .create_texture_streaming(self.format, dimensions.width, dimensions.height)
+            .unwrap();
+
+        let old_texture = mem::replace(&mut self.output_texture, new_texture);
+        unsafe {
+            old_texture.destroy();
+        }
+    }
+
+    pub fn dimensions(&self) -> Dimensions {
+        self.scanout_dimensions
+    }
+
+    pub fn update(&mut self, update: ScanoutUpdate) {
+        let damage_area = update.damage_area;
+        let damage_area_sdl: sdl3::rect::Rect = update.damage_area.try_into().unwrap();
+        self.output_texture
+            .with_lock(None, |pixels, texture_pitch| {
+                if damage_area == self.scanout_dimensions.as_rect()
+                    && texture_pitch == update.pitch as usize
+                {
+                    log::trace!(
+                        "Copying full scanout: {:?} (scanout {:?})",
+                        update.damage_area,
+                        self.scanout_dimensions
+                    );
+
+                    unsafe {
+                        libc::memcpy(pixels.as_ptr() as *mut c_void, update.data.as_ptr() as *mut c_void, update.data.len());
+                    }
+                    /*pixels.copy_from_slice(&*update.data);*/
+                } else {
+                    log::trace!(
+                        "Copying scanout line-by-line {:?} (scanout {:?})",
+                        update.damage_area,
+                        self.scanout_dimensions
+                    );
+                    let bytes_per_pixel = 4;
+                    let row_size_bytes = damage_area.width as usize * 4;
+
+                    for y in 0..damage_area.height as usize {
+                        let texture_offset = y * texture_pitch;
+                        let data_offset = y * update.pitch as usize;
+                        dbg!(y, texture_offset, data_offset, update.pitch, row_size_bytes, pixels.len(), pixels.as_ptr());
+                        pixels[texture_offset..texture_offset + row_size_bytes].copy_from_slice(
+                            &update.data[data_offset..data_offset + row_size_bytes],
+                        );
+                    }
+                }
+            })
+            .unwrap();
+        let display_area = sdl3::rect::Rect::new(
+            0,
+            0,
+            self.scanout_dimensions.width,
+            self.scanout_dimensions.height,
+        );
+        // This needs to render the whole texture in order to support letterbox/scaling of output
+        self.canvas.clear();
+        self.canvas
+            .copy(&self.output_texture, display_area, display_area)
+            .unwrap();
+        self.canvas.present();
+    }
 }
 
 fn display_thread(displays: Box<[DisplayInfo]>, tx: Sender<EventSender>) {
@@ -283,7 +408,7 @@ fn display_thread(displays: Box<[DisplayInfo]>, tx: Sender<EventSender>) {
     tx.send(event_sys.event_sender()).unwrap();
     drop(tx);
 
-    let mut windows: [Option<Window>; VIRTIO_GPU_MAX_SCANOUTS as usize] =
+    let mut scanouts: [Option<Scanout>; VIRTIO_GPU_MAX_SCANOUTS as usize] =
         [const { None }; VIRTIO_GPU_MAX_SCANOUTS as usize];
 
     let mut tray = construct_tray(&video_sys, &event_sys, &displays);
@@ -293,70 +418,58 @@ fn display_thread(displays: Box<[DisplayInfo]>, tx: Sender<EventSender>) {
             trace!("sdl event loop iteration");
             if let Some(mut display_event) = event.as_user_event_type::<DisplayEvent>() {
                 match display_event {
-                    DisplayEvent::EnableScanout(scanout_id, dimensions) => {
+                    DisplayEvent::EnableScanout(scanout_id, scanout_dimensions) => {
                         debug!("Enable scanout {scanout_id}");
-                        let window_ref = &mut windows[scanout_id.as_index()];
+                        let scanout_ref = &mut scanouts[scanout_id.as_index()];
 
-                        if window_ref.is_none() {
-                            let mut new_window = video_sys
-                                .window(
-                                    &format!(
-                                        "libkrun scanout {} ({}x{}px)",
-                                        scanout_id.0, dimensions.width, dimensions.height
-                                    ),
-                                    dimensions.width,
-                                    dimensions.height,
-                                )
-                                .build()
-                                .unwrap();
-                            new_window.show();
-                            *window_ref = Some(new_window);
+                        if scanout_ref.is_none() {
+                            let display = &displays[scanout_id.as_index()];
+                            let scanout = Scanout::new(
+                                &video_sys,
+                                &format!(
+                                    "libkrun scanout {} ({}x{}px)",
+                                    scanout_id.0,
+                                    scanout_dimensions.width,
+                                    scanout_dimensions.height
+                                ),
+                                Dimensions::new(display.width, display.height),
+                                scanout_dimensions,
+                                // TODO: unhardcode the format!
+                                unsafe { PixelFormat::from_ll(SDL_PIXELFORMAT_XRGB8888) },
+                            )
+                            .unwrap();
+                            *scanout_ref = Some(scanout);
+
                             tray.set_checked(scanout_id.0 as usize, true);
                             tray.set_enabled(scanout_id.0 as usize, true);
+                        } else if let Some(scanout) = scanout_ref {
+                            log::info!("Scanout {scanout_id} is already enabled");
+                            scanout.resize_scanout(scanout_dimensions);
                         }
                     }
                     DisplayEvent::DisableScanout(scanout_id) => {
                         debug!("Disable scanout {scanout_id}");
-                        windows[scanout_id.as_index()] = None;
+                        scanouts[scanout_id.as_index()] = None;
                         tray.set_checked(scanout_id.0 as usize, false);
                         tray.set_enabled(scanout_id.0 as usize, false);
                     }
-                    DisplayEvent::UpdateScanout(scanout_id, mut update) => {
+                    DisplayEvent::UpdateScanout(scanout_id, update) => {
                         debug!("Update scanout {scanout_id}");
-                        // TODO: unhardcode
-                        let format = unsafe { PixelFormat::from_ll(SDL_PIXELFORMAT_XRGB8888) };
-
-                        let src_surface = Surface::from_data(
-                            update.data.as_mut_slice(),
-                            update.width,
-                            update.height,
-                            update.pitch,
-                            format,
-                        )
-                        .unwrap();
-
-                        let window: &mut Window = windows
-                            .get_mut(scanout_id.as_index())
-                            .unwrap()
-                            .as_mut()
-                            .unwrap();
-
-                        let mut window_surface = window.surface(&event_pump).unwrap();
-
-                        let damage_area = update.damage_area.try_into().unwrap();
-                        src_surface
-                            .blit::<sdl3::rect::Rect, sdl3::rect::Rect>(
-                                damage_area,
-                                window_surface.deref_mut(),
-                                damage_area,
-                            )
-                            .unwrap();
-                        window_surface.update_window_rects(&[damage_area]).unwrap();
+                        if let Some(scanout) = &mut scanouts[scanout_id.as_index()] {
+                            scanout.update(update);
+                        }
                     }
                     DisplayEvent::ShowWindow(window_index) => {
-                        if let Some(window) = &mut windows[window_index] {
-                            window.show();
-                            window.raise();
+                        if let Some(canvas) = &mut scanouts[window_index] {
+                            canvas
+                                .window_mut()
+                                .set_size(
+                                    displays[window_index].width,
+                                    displays[window_index].height,
+                                )
+                                .unwrap();
+                            canvas.window_mut().show();
+                            canvas.window_mut().raise();
                             tray.set_checked(window_index, true);
                         }
                     }
@@ -369,12 +482,12 @@ fn display_thread(displays: Box<[DisplayInfo]>, tx: Sender<EventSender>) {
                     window_id,
                     ..
                 } => {
-                    for (index, window) in windows.iter_mut().enumerate() {
-                        if let Some(window) = window
+                    for (index, scanout) in scanouts.iter_mut().enumerate() {
+                        if let Some(scanout) = scanout
                             .as_mut()
-                            .and_then(|w| (w.id() == window_id).then_some(w))
+                            .and_then(|s| (s.window_mut().id() == window_id).then_some(s))
                         {
-                            window.hide();
+                            scanout.window_mut().hide();
                             tray.set_checked(index, false);
                         }
                     }

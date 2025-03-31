@@ -251,8 +251,7 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    uint32_t virgl_flags = VIRGLRENDERER_USE_EGL | VIRGLRENDERER_DRM |
-	    VIRGLRENDERER_THREAD_SYNC | VIRGLRENDERER_USE_ASYNC_FENCE_CB;
+    uint32_t virgl_flags = VIRGLRENDERER_USE_EGL | VIRGLRENDERER_USE_SURFACELESS | VIRGLRENDERER_USE_GLES | VIRGLRENDERER_THREAD_SYNC | VIRGLRENDERER_USE_ASYNC_FENCE_CB;
     if (err = krun_set_gpu_options(ctx_id, virgl_flags)) {
         errno = -err;
         perror("Error configuring gpu");

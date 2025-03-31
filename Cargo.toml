@@ -6,5 +6,7 @@ resolver = "2"
 #panic = "abort"
 
 [profile.release]
+debug = true
+debug-assertions = true
 #panic = "abort"
 lto = true
