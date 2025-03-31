@@ -27,7 +27,7 @@ use devices::legacy::Serial;
 use devices::legacy::VcpuList;
 #[cfg(feature = "net")]
 use devices::virtio::Net;
-use devices::virtio::{port_io, MmioTransport, PortDescription, Vsock};
+use devices::virtio::{port_io, sdl_display_start, DisplayInfo, MmioTransport, PortDescription, Vsock};
 #[cfg(target_os = "macos")]
 use hvf::MemoryMapping;
 
@@ -1825,6 +1825,7 @@ fn attach_gpu_device(
             virgl_flags,
             #[cfg(target_os = "macos")]
             map_sender,
+            sdl_display_start(Box::new([DisplayInfo::new(1280, 720), DisplayInfo::new(1280, 720)]))
         )
         .unwrap(),
     ));

@@ -19,6 +19,7 @@ use crate::legacy::GicV3;
 use crate::Error as DeviceError;
 #[cfg(target_os = "macos")]
 use hvf::MemoryMapping;
+use crate::virtio::gpu::sdl_display::DisplayHandle;
 
 // Control queue.
 pub(crate) const CTL_INDEX: usize = 0;
@@ -51,12 +52,14 @@ pub struct Gpu {
     #[cfg(target_os = "macos")]
     map_sender: Sender<MemoryMapping>,
     export_table: Option<ExportTable>,
+    display_handle: DisplayHandle,
 }
 
 impl Gpu {
     pub(crate) fn with_queues(
         queues: Vec<VirtQueue>,
         virgl_flags: u32,
+        display_handle: DisplayHandle,
         #[cfg(target_os = "macos")] map_sender: Sender<MemoryMapping>,
     ) -> super::Result<Gpu> {
         let mut queue_events = Vec::new();
@@ -87,11 +90,13 @@ impl Gpu {
             #[cfg(target_os = "macos")]
             map_sender,
             export_table: None,
+            display_handle,
         })
     }
 
     pub fn new(
         virgl_flags: u32,
+        display_handle: DisplayHandle,
         #[cfg(target_os = "macos")] map_sender: Sender<MemoryMapping>,
     ) -> super::Result<Gpu> {
         let queues: Vec<VirtQueue> = defs::QUEUE_SIZES
@@ -101,6 +106,7 @@ impl Gpu {
         Self::with_queues(
             queues,
             virgl_flags,
+            display_handle,
             #[cfg(target_os = "macos")]
             map_sender,
         )
@@ -240,7 +246,7 @@ impl VirtioDevice for Gpu {
         let config = virtio_gpu_config {
             events_read: 0,
             events_clear: 0,
-            num_scanouts: 0,
+            num_scanouts: self.display_handle.display_info().len() as u32,
             num_capsets: 5,
         };
 
@@ -297,6 +303,7 @@ impl VirtioDevice for Gpu {
             #[cfg(target_os = "macos")]
             self.map_sender.clone(),
             self.export_table.take(),
+            self.display_handle.clone(),
         );
         worker.run();
 

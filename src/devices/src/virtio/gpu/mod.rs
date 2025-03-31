@@ -1,6 +1,8 @@
 mod device;
+mod display_event;
 mod event_handler;
 mod protocol;
+mod sdl_display;
 mod virtio_gpu;
 mod worker;
 
@@ -8,6 +10,7 @@ use super::descriptor_utils::Error as DescriptorError;
 
 pub use self::defs::uapi::VIRTIO_ID_GPU as TYPE_GPU;
 pub use self::device::Gpu;
+pub use self::sdl_display::{sdl_display_start, DisplayHandle, DisplayInfo};
 
 mod defs {
     pub const GPU_DEV_ID: &str = "virtio_gpu";
