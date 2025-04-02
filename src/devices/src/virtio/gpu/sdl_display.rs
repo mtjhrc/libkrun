@@ -359,7 +359,7 @@ impl<'sdl> Scanout<'sdl> {
         let damage_area_sdl: sdl3::rect::Rect = update.damage_area.try_into().unwrap();
         //println!("sdl rect: {} {} {} {}", damage_area_sdl.x, damage_area.y, damage_area.width, damage_area.height);
         self.output_texture
-            .with_lock(damage_area_sdl, |pixels, texture_pitch| {
+            .with_lock(black_box(damage_area_sdl), |pixels, texture_pitch| {
                 if false && damage_area == self.scanout_dimensions.as_rect()
                     && texture_pitch == update.pitch as usize
                 {
