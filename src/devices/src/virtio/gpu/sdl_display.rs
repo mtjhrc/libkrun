@@ -35,6 +35,7 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::{mem, thread};
+use std::hint::black_box;
 use sdl3::sys::video::SDL_WINDOW_HIDDEN;
 
 struct DisplayHandleInner {
@@ -356,6 +357,7 @@ impl<'sdl> Scanout<'sdl> {
     pub fn update(&mut self, update: ScanoutUpdate) {
         let damage_area = update.damage_area;
         let damage_area_sdl: sdl3::rect::Rect = update.damage_area.try_into().unwrap();
+        //println!("sdl rect: {} {} {} {}", damage_area_sdl.x, damage_area.y, damage_area.width, damage_area.height);
         self.output_texture
             .with_lock(damage_area_sdl, |pixels, texture_pitch| {
                 if false && damage_area == self.scanout_dimensions.as_rect()
@@ -370,9 +372,11 @@ impl<'sdl> Scanout<'sdl> {
                     pixels.copy_from_slice(&update.data);
                 } else {
                     println!(
-                        "Copying scanout line-by-line {:?} (scanout {:?})",
+                        "Copying scanout line-by-line {:?} (scanout {:?}), pitch: {}->{}",
                         damage_area,
-                        self.scanout_dimensions
+                        self.scanout_dimensions,
+                        update.pitch,
+                        texture_pitch
                     );
                     let bytes_per_pixel = 4;
                     let row_size_bytes = damage_area.width as usize * 4;
@@ -381,7 +385,7 @@ impl<'sdl> Scanout<'sdl> {
                         let texture_offset = y * texture_pitch;
                         let data_offset = y * update.pitch as usize;
                         pixels[texture_offset..texture_offset + row_size_bytes].copy_from_slice(
-                            &update.data[0..0 + row_size_bytes],
+                            &update.data[data_offset..data_offset + row_size_bytes],
                         );
                     }
                 }
