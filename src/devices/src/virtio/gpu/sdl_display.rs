@@ -35,6 +35,7 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::{mem, thread};
+use sdl3::sys::video::SDL_WINDOW_HIDDEN;
 
 struct DisplayHandleInner {
     displays: Box<[DisplayInfo]>,
@@ -299,6 +300,13 @@ impl<'sdl> Scanout<'sdl> {
         new_window.show();
 
         let mut canvas = new_window.into_canvas();
+        canvas
+            .set_logical_size(
+                scanout_dimensions.width,
+                scanout_dimensions.height,
+                SDL_RendererLogicalPresentation::LETTERBOX,
+            )
+            .unwrap();
         let output_texture = canvas
             .create_texture_streaming(format, scanout_dimensions.width, scanout_dimensions.height)
             .unwrap();
@@ -349,24 +357,21 @@ impl<'sdl> Scanout<'sdl> {
         let damage_area = update.damage_area;
         let damage_area_sdl: sdl3::rect::Rect = update.damage_area.try_into().unwrap();
         self.output_texture
-            .with_lock(None, |pixels, texture_pitch| {
-                if damage_area == self.scanout_dimensions.as_rect()
+            .with_lock(damage_area_sdl, |pixels, texture_pitch| {
+                if false && damage_area == self.scanout_dimensions.as_rect()
                     && texture_pitch == update.pitch as usize
                 {
-                    log::trace!(
+                    println!(
                         "Copying full scanout: {:?} (scanout {:?})",
-                        update.damage_area,
+                        damage_area,
                         self.scanout_dimensions
                     );
 
-                    unsafe {
-                        libc::memcpy(pixels.as_ptr() as *mut c_void, update.data.as_ptr() as *mut c_void, update.data.len());
-                    }
-                    /*pixels.copy_from_slice(&*update.data);*/
+                    pixels.copy_from_slice(&update.data);
                 } else {
-                    log::trace!(
+                    println!(
                         "Copying scanout line-by-line {:?} (scanout {:?})",
-                        update.damage_area,
+                        damage_area,
                         self.scanout_dimensions
                     );
                     let bytes_per_pixel = 4;
@@ -375,9 +380,8 @@ impl<'sdl> Scanout<'sdl> {
                     for y in 0..damage_area.height as usize {
                         let texture_offset = y * texture_pitch;
                         let data_offset = y * update.pitch as usize;
-                        dbg!(y, texture_offset, data_offset, update.pitch, row_size_bytes, pixels.len(), pixels.as_ptr());
                         pixels[texture_offset..texture_offset + row_size_bytes].copy_from_slice(
-                            &update.data[data_offset..data_offset + row_size_bytes],
+                            &update.data[0..0 + row_size_bytes],
                         );
                     }
                 }
@@ -460,17 +464,22 @@ fn display_thread(displays: Box<[DisplayInfo]>, tx: Sender<EventSender>) {
                         }
                     }
                     DisplayEvent::ShowWindow(window_index) => {
-                        if let Some(canvas) = &mut scanouts[window_index] {
-                            canvas
-                                .window_mut()
-                                .set_size(
-                                    displays[window_index].width,
-                                    displays[window_index].height,
-                                )
-                                .unwrap();
-                            canvas.window_mut().show();
-                            canvas.window_mut().raise();
-                            tray.set_checked(window_index, true);
+                        if let Some(scanout) = &mut scanouts[window_index] {
+                            if scanout.window_mut().window_flags() & SDL_WINDOW_HIDDEN != 0 {
+                                scanout
+                                    .window_mut()
+                                    .set_size(
+                                        displays[window_index].width,
+                                        displays[window_index].height,
+                                    )
+                                    .unwrap();
+                                scanout.window_mut().show();
+                                scanout.window_mut().raise();
+                                tray.set_checked(window_index, true);
+                            } else {
+                                scanout.window_mut().hide();
+                                tray.set_checked(window_index, false);
+                            }
                         }
                     }
                 }
