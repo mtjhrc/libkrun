@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 #[cfg(not(feature = "efi"))]
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::ptr;
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
