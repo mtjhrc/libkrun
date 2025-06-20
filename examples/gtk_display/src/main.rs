@@ -9,7 +9,7 @@ use krun_sys::{
     KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER, VIRGLRENDERER_THREAD_SYNC,
     VIRGLRENDERER_USE_ASYNC_FENCE_CB, VIRGLRENDERER_USE_EGL, krun_create_ctx, krun_set_display,
     krun_set_display_backend, krun_set_exec, krun_set_gpu_options, krun_set_log_level,
-    krun_set_root, krun_start_enter,
+    krun_set_root, krun_start_enter, krun_set_root_disk
 };
 use std::ffi::{CString, c_char, c_void};
 use std::process::exit;
@@ -42,10 +42,10 @@ fn parse_display(s: &str) -> Result<DisplayArg, String> {
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long)]
-    root_dir: CString,
+    root_disk: CString,
     #[clap(long, value_parser = parse_display)]
     display: Vec<DisplayArg>,
-    argv: Vec<CString>,
+    //argv: Vec<CString>,
 }
 
 fn krun_thread(args: &Args, tx: &PollableChannelSender<DisplayEvent>) -> anyhow::Result<()> {
@@ -61,8 +61,7 @@ fn krun_thread(args: &Args, tx: &PollableChannelSender<DisplayEvent>) -> anyhow:
                 | VIRGLRENDERER_USE_ASYNC_FENCE_CB
         ))?;
 
-        krun_call!(krun_set_root(ctx, args.root_dir.as_ptr()))?;
-
+        krun_call!(krun_set_root_disk(ctx, args.root_disk.as_ptr()))?;
         for display in &args.display {
             krun_call!(krun_set_display(
                 ctx,
@@ -79,15 +78,6 @@ fn krun_thread(args: &Args, tx: &PollableChannelSender<DisplayEvent>) -> anyhow:
             1,
             &raw const display_backend as *const c_void,
             size_of::<DisplayBackend>()
-        ))?;
-
-        let envp = [c"TEST=works".as_ptr(), null()];
-        let argv_ptrs: Vec<*const c_char> = args.argv.iter().map(|x| x.as_ptr()).collect();
-        krun_call!(krun_set_exec(
-            ctx,
-            argv_ptrs[0],
-            argv_ptrs[1..].as_ptr(),
-            envp.as_ptr()
         ))?;
         krun_call!(krun_start_enter(ctx))?;
     };
