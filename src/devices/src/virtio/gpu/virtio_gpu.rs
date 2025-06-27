@@ -345,11 +345,12 @@ impl VirtioGpu {
     /// Creates a 3D resource with the given properties and resource_id.
     pub fn resource_create_3d(
         &mut self,
+        ctx_id: u32,
         resource_id: u32,
         resource_create_3d: ResourceCreate3D,
     ) -> VirtioGpuResult {
         self.rutabaga
-            .resource_create_3d(resource_id, resource_create_3d)?;
+            .resource_create_3d(ctx_id, resource_id, resource_create_3d)?;
 
         let format = GpuResourceFormat::try_from(resource_create_3d.format).ok();
         if format.is_none() {
@@ -488,7 +489,7 @@ impl VirtioGpu {
     }
 
     /// If the resource is the scanout resource, flush it to the display.
-    pub fn flush_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
+    pub fn flush_resource(&mut self, ctx_id: u32, resource_id: u32) -> VirtioGpuResult {
         if resource_id == 0 {
             return Ok(OkNoData);
         }
@@ -563,12 +564,13 @@ impl VirtioGpu {
     /// mapping.
     pub fn attach_backing(
         &mut self,
+        ctx_id: u32,
         resource_id: u32,
         mem: &GuestMemoryMmap,
         vecs: Vec<(GuestAddress, usize)>,
     ) -> VirtioGpuResult {
         let rutabaga_iovecs = sglist_to_rutabaga_iovecs(&vecs[..], mem).map_err(|_| ErrUnspec)?;
-        self.rutabaga.attach_backing(resource_id, rutabaga_iovecs)?;
+        self.rutabaga.attach_backing(ctx_id, resource_id, rutabaga_iovecs)?;
         Ok(OkNoData)
     }
 

@@ -9,8 +9,10 @@ use std::fs::File;
 use std::io::IoSliceMut;
 use std::io::Read;
 use std::io::Write;
+use std::path::Component;
 use std::sync::{Arc, Mutex};
-
+use log::info;
+use nix::sys::ptrace::traceme;
 use crate::cross_domain::CrossDomain;
 
 #[cfg(feature = "gfxstream")]
@@ -309,7 +311,7 @@ const RUTABAGA_CAPSETS: [RutabagaCapsetInfo; 9] = [
     },
 ];
 
-pub fn calculate_capset_mask<'a, I: Iterator<Item = &'a str>>(context_names: I) -> u64 {
+pub fn calculate_capset_mask<'a, I: Iterator<Item=&'a str>>(context_names: I) -> u64 {
     let mut capset_mask = 0;
     for name in context_names {
         if let Some(capset) = RUTABAGA_CAPSETS.iter().find(|capset| capset.name == name) {
@@ -342,6 +344,26 @@ fn calculate_component(component_mask: u8) -> RutabagaResult<RutabagaComponentTy
     }
 }
 
+fn find_component_by_ctx_id<'a>(
+    contexts: &Map<u32, Box<dyn RutabagaContext>>,
+    components: &'a mut Map<RutabagaComponentType, Box<dyn RutabagaComponent>>,
+    ctx_id: u32,
+) -> RutabagaResult<&'a dyn RutabagaComponent> {
+    if ctx_id == 0 {
+        let component = components.get(&RutabagaComponentType::Rutabaga2D).unwrap();
+        return Ok(component.as_ref());
+    }
+
+    let component_type = contexts
+        .get(&ctx_id)
+        .ok_or(RutabagaError::InvalidContextId)?
+        .component_type();
+    let component = components
+        .get(&component_type)
+        .ok_or(RutabagaError::InvalidComponent)?;
+    Ok(component.as_ref())
+}
+
 /// The global libary handle used to query capability sets, create resources and contexts.
 ///
 /// Currently, Rutabaga only supports one default component.  Many components running at the
@@ -368,9 +390,9 @@ impl Rutabaga {
         // We current only support snapshotting Rutabaga2D.
         if !(self.contexts.is_empty()
             && self
-                .components
-                .keys()
-                .all(|t| *t == RutabagaComponentType::Rutabaga2D)
+            .components
+            .keys()
+            .all(|t| *t == RutabagaComponentType::Rutabaga2D)
             && self.default_component == RutabagaComponentType::Rutabaga2D
             && self.capset_info.is_empty())
         {
@@ -440,9 +462,9 @@ impl Rutabaga {
         if !(self.resources.is_empty()
             && self.contexts.is_empty()
             && self
-                .components
-                .keys()
-                .all(|t| *t == RutabagaComponentType::Rutabaga2D)
+            .components
+            .keys()
+            .all(|t| *t == RutabagaComponentType::Rutabaga2D)
             && self.default_component == RutabagaComponentType::Rutabaga2D
             && self.capset_info.is_empty())
         {
@@ -589,13 +611,11 @@ impl Rutabaga {
     /// Creates a resource with the `resource_create_3d` metadata.
     pub fn resource_create_3d(
         &mut self,
+        ctx_id: u32,
         resource_id: u32,
         resource_create_3d: ResourceCreate3D,
     ) -> RutabagaResult<()> {
-        let component = self
-            .components
-            .get_mut(&self.default_component)
-            .ok_or(RutabagaError::InvalidComponent)?;
+        let component = find_component_by_ctx_id(&self.contexts, &mut self.components, ctx_id)?;
 
         if self.resources.contains_key(&resource_id) {
             return Err(RutabagaError::InvalidResourceId);
@@ -609,13 +629,11 @@ impl Rutabaga {
     /// Attaches `vecs` to the resource.
     pub fn attach_backing(
         &mut self,
+        ctx_id: u32,
         resource_id: u32,
         mut vecs: Vec<RutabagaIovec>,
     ) -> RutabagaResult<()> {
-        let component = self
-            .components
-            .get_mut(&self.default_component)
-            .ok_or(RutabagaError::InvalidComponent)?;
+        let component = find_component_by_ctx_id(&self.contexts, &mut self.components, ctx_id)?;
 
         let resource = self
             .resources
@@ -667,16 +685,12 @@ impl Rutabaga {
         resource_id: u32,
         transfer: Transfer3D,
     ) -> RutabagaResult<()> {
-        let component = self
-            .components
-            .get(&self.default_component)
-            .ok_or(RutabagaError::InvalidComponent)?;
-
         let resource = self
             .resources
             .get_mut(&resource_id)
             .ok_or(RutabagaError::InvalidResourceId)?;
 
+        let component = find_component_by_ctx_id(&self.contexts, &mut self.components, ctx_id)?;
         component.transfer_write(ctx_id, resource, transfer)
     }
 
@@ -691,10 +705,7 @@ impl Rutabaga {
         transfer: Transfer3D,
         buf: Option<IoSliceMut>,
     ) -> RutabagaResult<()> {
-        let component = self
-            .components
-            .get(&self.default_component)
-            .ok_or(RutabagaError::InvalidComponent)?;
+        let component = find_component_by_ctx_id(&self.contexts, &mut self.components, ctx_id)?;
 
         let resource = self
             .resources
@@ -704,11 +715,8 @@ impl Rutabaga {
         component.transfer_read(ctx_id, resource, transfer, buf)
     }
 
-    pub fn resource_flush(&mut self, resource_id: u32) -> RutabagaResult<()> {
-        let component = self
-            .components
-            .get(&self.default_component)
-            .ok_or(RutabagaError::Unsupported)?;
+    pub fn resource_flush(&mut self, ctx_id: u32, resource_id: u32) -> RutabagaResult<()> {
+        let component = find_component_by_ctx_id(&self.contexts, &mut self.components, ctx_id)?;
 
         let resource = self
             .resources
@@ -962,6 +970,7 @@ impl Rutabaga {
         let component_type = self
             .capset_id_to_component_type(capset_id)
             .unwrap_or(self.default_component);
+        log::trace!("Rutabaga::create_context ctx_id: {ctx_id}, context_init: {context_init}, component_type: {component_type:?}");
 
         let component = self
             .components
@@ -1268,11 +1277,13 @@ impl RutabagaBuilder {
                     rutabaga_server_descriptor,
                 )?;
                 rutabaga_components.insert(RutabagaComponentType::VirglRenderer, virgl);
+                let rutabaga_2d = Rutabaga2D::init(fence_handler.clone())?;
+                rutabaga_components.insert(RutabagaComponentType::Rutabaga2D, rutabaga_2d);
 
-                push_capset(RUTABAGA_CAPSET_VIRGL);
-                push_capset(RUTABAGA_CAPSET_VIRGL2);
+                //push_capset(RUTABAGA_CAPSET_VIRGL);
+                //push_capset(RUTABAGA_CAPSET_VIRGL2);
                 push_capset(RUTABAGA_CAPSET_VENUS);
-                push_capset(RUTABAGA_CAPSET_DRM);
+                //push_capset(RUTABAGA_CAPSET_DRM);
             }
 
             #[cfg(feature = "gfxstream")]
@@ -1292,14 +1303,14 @@ impl RutabagaBuilder {
                 push_capset(RUTABAGA_CAPSET_GFXSTREAM_GLES);
                 push_capset(RUTABAGA_CAPSET_GFXSTREAM_COMPOSER);
             }
-
+            /*
             let cross_domain = CrossDomain::init(
                 self.channels,
                 fence_handler.clone(),
                 self.export_table.take(),
             )?;
             rutabaga_components.insert(RutabagaComponentType::CrossDomain, cross_domain);
-            push_capset(RUTABAGA_CAPSET_CROSS_DOMAIN);
+            push_capset(RUTABAGA_CAPSET_CROSS_DOMAIN);*/
         }
 
         Ok(Rutabaga {

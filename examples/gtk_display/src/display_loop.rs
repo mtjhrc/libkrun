@@ -31,6 +31,13 @@ impl Scanout {
         format: gdk::MemoryFormat,
     ) -> Self {
         let header_bar = HeaderBar::new();
+
+        #[cfg(target_os = "macos")]
+        {
+            header_bar.set_decoration_layout(Some("native,minimize,maximize:"));
+            header_bar.set_property("use-native-controls", true);
+        }
+
         let window = Window::builder()
             .title(title)
             // remove the close button, since it is unclear what it should do

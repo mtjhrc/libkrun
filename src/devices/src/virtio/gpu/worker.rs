@@ -6,6 +6,7 @@ use std::{result, thread};
 use crossbeam_channel::Receiver;
 #[cfg(target_os = "macos")]
 use crossbeam_channel::Sender;
+use nix::sys::ptrace::traceme;
 use rutabaga_gfx::{
     ResourceCreate3D, ResourceCreateBlob, RutabagaFence, Transfer3D,
     RUTABAGA_PIPE_BIND_RENDER_TARGET, RUTABAGA_PIPE_TEXTURE_2D,
@@ -137,10 +138,18 @@ impl Worker {
         reader: &mut Reader,
     ) -> VirtioGpuResult {
         virtio_gpu.force_ctx_0();
-
+        const CONTEXT_2D: u32 = 0;
         match cmd {
-            GpuCommand::GetDisplayInfo => virtio_gpu.display_info(),
+            GpuCommand::GetDisplayInfo => {
+                trace!("GetDisplayInfo: ctx_id: {}", hdr.ctx_id);
+                virtio_gpu.display_info()
+            },
             GpuCommand::ResourceCreate2d(info) => {
+                trace!(
+                    "ResourceCreate2d: ctx_id: {}, resource_id: {}",
+                    hdr.ctx_id,
+                    info.resource_id
+                );
                 let resource_id = info.resource_id;
 
                 let resource_create_3d = ResourceCreate3D {
@@ -156,22 +165,41 @@ impl Worker {
                     flags: 0,
                 };
 
-                virtio_gpu.resource_create_3d(resource_id, resource_create_3d)
+                virtio_gpu.resource_create_3d(CONTEXT_2D, resource_id, resource_create_3d)
             }
-            GpuCommand::ResourceUnref(info) => virtio_gpu.unref_resource(info.resource_id),
-            GpuCommand::SetScanout(info) => virtio_gpu.set_scanout(
-                info.scanout_id,
-                info.resource_id,
-                info.r.width,
-                info.r.height,
-            ),
-            GpuCommand::ResourceFlush(info) => virtio_gpu.flush_resource(info.resource_id),
+            GpuCommand::ResourceUnref(info) => {
+                trace!("ResourceUnref: ctx_id: {}, resource_id: {}", hdr.ctx_id, info.resource_id);
+
+                virtio_gpu.unref_resource(info.resource_id)
+            },
+            GpuCommand::SetScanout(info) => {
+                trace!("SetScanout: ctx_id: {}, scanout_id: {} resource_id: {}", hdr.ctx_id, info.scanout_id, info.resource_id);
+
+                virtio_gpu.set_scanout(
+                    info.scanout_id,
+                    info.resource_id,
+                    info.r.width,
+                    info.r.height,
+                )
+            },
+            GpuCommand::ResourceFlush(info) => {
+                trace!("ResourceFlush: ctx_id: {}, resource_id: {}", hdr.ctx_id, info.resource_id);
+
+                virtio_gpu.flush_resource(hdr.ctx_id, info.resource_id)
+            }
             GpuCommand::TransferToHost2d(info) => {
+                trace!("TransferToHost2d: ctx_id: {}, resource_id: {}", hdr.ctx_id, info.resource_id);
                 let resource_id = info.resource_id;
                 let transfer = Transfer3D::new_2d(info.r.x, info.r.y, info.r.width, info.r.height);
-                virtio_gpu.transfer_write(0, resource_id, transfer)
+                virtio_gpu.transfer_write(CONTEXT_2D, resource_id, transfer)
             }
             GpuCommand::ResourceAttachBacking(info) => {
+                trace!(
+                    "ResourceAttachBacking: ctx_id: {}, resource_id: {}, nr_entries: {}",
+                    hdr.ctx_id,
+                    info.resource_id,
+                    info.nr_entries
+                );
                 let available_bytes = reader.available_bytes();
                 if available_bytes != 0 {
                     let entry_count = info.nr_entries as usize;
@@ -186,7 +214,7 @@ impl Worker {
                             Err(_) => return Err(GpuResponse::ErrUnspec),
                         }
                     }
-                    virtio_gpu.attach_backing(info.resource_id, mem, vecs)
+                    virtio_gpu.attach_backing(hdr.ctx_id, info.resource_id, mem, vecs)
                 } else {
                     error!("missing data for command {:?}", cmd);
                     Err(GpuResponse::ErrUnspec)
@@ -210,16 +238,42 @@ impl Worker {
 
             GpuCommand::CtxCreate(info) => {
                 let context_name: Option<String> = String::from_utf8(info.debug_name.to_vec()).ok();
+                trace!(
+                    "CtxCreate: ctx_id: {}, name: {:?}",
+                    hdr.ctx_id,
+                    context_name
+                );
                 virtio_gpu.create_context(hdr.ctx_id, info.context_init, context_name.as_deref())
             }
-            GpuCommand::CtxDestroy(_info) => virtio_gpu.destroy_context(hdr.ctx_id),
+            GpuCommand::CtxDestroy(_info) => {
+                trace!(
+                    "CtxDestroy: ctx_id: {}",
+                    hdr.ctx_id,
+                );
+                virtio_gpu.destroy_context(hdr.ctx_id)
+            },
             GpuCommand::CtxAttachResource(info) => {
+                trace!(
+                    "CtxAttachResource: ctx_id: {}, resource_id: {}",
+                    hdr.ctx_id,
+                    info.resource_id
+                );
                 virtio_gpu.context_attach_resource(hdr.ctx_id, info.resource_id)
             }
             GpuCommand::CtxDetachResource(info) => {
+                trace!(
+                    "CtxDetachResource: ctx_id: {}, resource_id: {}",
+                    hdr.ctx_id,
+                    info.resource_id
+                );
                 virtio_gpu.context_detach_resource(hdr.ctx_id, info.resource_id)
             }
             GpuCommand::ResourceCreate3d(info) => {
+                trace!(
+                    "ResourceCreate3d: ctx_id: {}, resource_id: {}",
+                    hdr.ctx_id,
+                    info.resource_id
+                );
                 let resource_id = info.resource_id;
                 let resource_create_3d = ResourceCreate3D {
                     target: info.target,
@@ -234,9 +288,11 @@ impl Worker {
                     flags: info.flags,
                 };
 
-                virtio_gpu.resource_create_3d(resource_id, resource_create_3d)
+                virtio_gpu.resource_create_3d(hdr.ctx_id, resource_id, resource_create_3d)
             }
             GpuCommand::TransferToHost3d(info) => {
+                trace!("TransferToHost3d: ctx_id: {}, resource_id: {}", hdr.ctx_id, info.resource_id);
+
                 let ctx_id = hdr.ctx_id;
                 let resource_id = info.resource_id;
 
@@ -256,6 +312,8 @@ impl Worker {
                 virtio_gpu.transfer_write(ctx_id, resource_id, transfer)
             }
             GpuCommand::TransferFromHost3d(info) => {
+                trace!("TransferFromHost3d: ctx_id: {}, resource_id: {}", hdr.ctx_id, info.resource_id);
+
                 let ctx_id = hdr.ctx_id;
                 let resource_id = info.resource_id;
 
@@ -275,6 +333,8 @@ impl Worker {
                 virtio_gpu.transfer_read(ctx_id, resource_id, transfer, None)
             }
             GpuCommand::CmdSubmit3d(info) => {
+                trace!("CmdSubmit3d: ctx_id: {}", hdr.ctx_id);
+
                 if reader.available_bytes() != 0 {
                     let num_in_fences = info.num_in_fences as usize;
                     let cmd_size = info.size as usize;
@@ -302,6 +362,7 @@ impl Worker {
                 }
             }
             GpuCommand::ResourceCreateBlob(info) => {
+                trace!("ResourceCreateBlob: ctx_id: {}, resource_id: {}", hdr.ctx_id, info.resource_id);
                 let resource_id = info.resource_id;
                 let ctx_id = hdr.ctx_id;
 
@@ -338,7 +399,9 @@ impl Worker {
                 )
             }
             GpuCommand::SetScanoutBlob(_info) => {
-                panic!("virtio_gpu: GpuCommand::SetScanoutBlob unimplemented");
+                error!("SetScanoutBlob: ctx_id: {} NOT SUPPORTED", hdr.ctx_id);
+                Err(GpuResponse::ErrUnspec)
+                //panic!("virtio_gpu: GpuCommand::SetScanoutBlob unimplemented");
             }
             GpuCommand::ResourceMapBlob(info) => {
                 let resource_id = info.resource_id;
