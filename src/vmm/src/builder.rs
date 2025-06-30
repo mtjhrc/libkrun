@@ -39,7 +39,7 @@ use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(feature = "net")]
 use devices::virtio::Net;
-use devices::virtio::{port_io, MmioTransport, PortDescription, Vsock};
+use devices::virtio::{port_io, MmioTransport, PortDescription, VirtioDevice, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -1551,27 +1551,26 @@ fn create_vcpus_aarch64(
     Ok(vcpus)
 }
 
-/// Attaches an MmioTransport device to the device manager.
+/// Attaches an virtio mmio device to the device manager.
 fn attach_mmio_device(
     vmm: &mut Vmm,
     id: String,
-    device: MmioTransport,
+    intc: IrqChip,
+    device: Arc<Mutex<dyn VirtioDevice>>,
 ) -> std::result::Result<(), device_manager::mmio::Error> {
-    let type_id = device
-        .device()
-        .lock()
-        .expect("Poisoned device lock")
-        .device_type();
+    let mmio_device = MmioTransport::new(vmm.guest_memory().clone(), intc, device);
+
+    let type_id = mmio_device.locked_device().device_type();
     let _cmdline = &mut vmm.kernel_cmdline;
 
     #[cfg(target_os = "linux")]
     let (_mmio_base, _irq) =
         vmm.mmio_device_manager
-            .register_mmio_device(vmm.vm.fd(), device, type_id, id)?;
+            .register_mmio_device(vmm.vm.fd(), mmio_device, type_id, id)?;
     #[cfg(target_os = "macos")]
-    let (_mmio_base, _irq) = vmm
-        .mmio_device_manager
-        .register_mmio_device(device, type_id, id)?;
+    let (_mmio_base, _irq) =
+        vmm.mmio_device_manager
+            .register_mmio_device(mmio_device, type_id, id)?;
 
     #[cfg(target_arch = "x86_64")]
     vmm.mmio_device_manager
@@ -1624,12 +1623,7 @@ fn attach_fs_devices(
         fs.lock().unwrap().set_map_sender(map_sender.clone());
 
         // The device mutex mustn't be locked here otherwise it will deadlock.
-        attach_mmio_device(
-            vmm,
-            id,
-            MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), fs.clone()),
-        )
-        .map_err(RegisterFsDevice)?;
+        attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
     }
 
     Ok(())
@@ -1720,12 +1714,7 @@ fn attach_console_devices(
         .map_err(RegisterFsSigwinch)?;
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(
-        vmm,
-        "hvc0".to_string(),
-        MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), console),
-    )
-    .map_err(RegisterFsDevice)?;
+    attach_mmio_device(vmm, "hvc0".to_string(), intc, console).map_err(RegisterFsDevice)?;
 
     Ok(())
 }
@@ -1739,12 +1728,8 @@ fn attach_net_devices<'a>(
     for net_device in net_devices {
         let id = net_device.lock().unwrap().id().to_string();
 
-        attach_mmio_device(
-            vmm,
-            id,
-            MmioTransport::new(vmm.guest_memory.clone(), intc.clone(), net_device.clone()),
-        )
-        .map_err(StartMicrovmError::RegisterNetDevice)?;
+        attach_mmio_device(vmm, id, intc.clone(), net_device.clone())
+            .map_err(StartMicrovmError::RegisterNetDevice)?;
     }
     Ok(())
 }
@@ -1764,12 +1749,7 @@ fn attach_unixsock_vsock_device(
     let id = String::from(unix_vsock.lock().unwrap().id());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(
-        vmm,
-        id,
-        MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), unix_vsock.clone()),
-    )
-    .map_err(RegisterVsockDevice)?;
+    attach_mmio_device(vmm, id, intc, unix_vsock.clone()).map_err(RegisterVsockDevice)?;
 
     Ok(())
 }
@@ -1791,12 +1771,7 @@ fn attach_balloon_device(
     let id = String::from(balloon.lock().unwrap().id());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(
-        vmm,
-        id,
-        MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), balloon),
-    )
-    .map_err(RegisterBalloonDevice)?;
+    attach_mmio_device(vmm, id, intc.clone(), balloon).map_err(RegisterBalloonDevice)?;
 
     Ok(())
 }
@@ -1813,12 +1788,7 @@ fn attach_block_devices(
         let id = String::from(block.lock().unwrap().id());
 
         // The device mutex mustn't be locked here otherwise it will deadlock.
-        attach_mmio_device(
-            vmm,
-            id,
-            MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), block.clone()),
-        )
-        .map_err(RegisterBlockDevice)?;
+        attach_mmio_device(vmm, id, intc.clone(), block.clone()).map_err(RegisterBlockDevice)?;
     }
 
     Ok(())
@@ -1841,12 +1811,7 @@ fn attach_rng_device(
     let id = String::from(rng.lock().unwrap().id());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(
-        vmm,
-        id,
-        MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), rng),
-    )
-    .map_err(RegisterRngDevice)?;
+    attach_mmio_device(vmm, id, intc.clone(), rng).map_err(RegisterRngDevice)?;
 
     Ok(())
 }
@@ -1895,12 +1860,7 @@ fn attach_gpu_device(
     }
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(
-        vmm,
-        id,
-        MmioTransport::new(vmm.guest_memory().clone(), intc.clone(), gpu),
-    )
-    .map_err(RegisterGpuDevice)?;
+    attach_mmio_device(vmm, id, intc, gpu).map_err(RegisterGpuDevice)?;
 
     Ok(())
 }
@@ -1913,12 +1873,7 @@ fn attach_snd_device(vmm: &mut Vmm, intc: IrqChip) -> std::result::Result<(), St
     let id = String::from(snd.lock().unwrap().id());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(
-        vmm,
-        id,
-        MmioTransport::new(vmm.guest_memory().clone(), intc, snd),
-    )
-    .map_err(RegisterSndDevice)?;
+    attach_mmio_device(vmm, id, intc, snd).map_err(RegisterSndDevice)?;
 
     Ok(())
 }
