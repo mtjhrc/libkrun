@@ -386,7 +386,7 @@ int32_t krun_set_gpu_options2(uint32_t ctx_id,
 /**
  * Configure and enable a display output for the VM.
  *
- * A display backend must be set using krun_set_display_backend_impl and the GPU device must be enabled, otherwise this
+ * A display backend must be set using krun_set_display_backend and the GPU device must be enabled, otherwise this
  * call will fail.
  *
  * Arguments:
@@ -400,11 +400,8 @@ int32_t krun_set_gpu_options2(uint32_t ctx_id,
  */
 int32_t krun_set_display(uint32_t ctx_id, uint32_t display_id, uint32_t width, uint32_t height);
 
-////////////////////////////////////////////////
-////////////////////////////////////////////////
 
-// TODO: move to a separate header
-
+// The display backend encountered an internal error
 #define KRUN_DISPLAY_ERR_INTERNAL -1
 #define KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID -3
 #define KRUN_DISPLAY_ERR_INVALID_PARAM -4
@@ -445,7 +442,7 @@ int32_t krun_set_display(uint32_t ctx_id, uint32_t display_id, uint32_t width, u
  * Returns:
  *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
  */
-typedef int32_t (*krun_display_create)(void **instance, const void *userdata, const void *reserved);
+typedef int32_t (*krun_display_create_fn)(void **instance, const void *userdata, const void *reserved);
 
 /**
  * Called to destroy the display instance.
@@ -456,7 +453,7 @@ typedef int32_t (*krun_display_create)(void **instance, const void *userdata, co
  * Returns:
  *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
  */
-typedef int32_t (*krun_display_destroy)(void *instance);
+typedef int32_t (*krun_display_destroy_fn)(void *instance);
 
 /**
  * Configures or reconfigures a display scanout.
@@ -471,7 +468,7 @@ typedef int32_t (*krun_display_destroy)(void *instance);
  * Returns:
  *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
  */
-typedef int32_t (*krun_display_configure_scanout)(void *instance, uint32_t scanout_id, uint32_t width, uint32_t height, uint32_t format);
+typedef int32_t (*krun_display_configure_scanout_fn)(void *instance, uint32_t scanout_id, uint32_t width, uint32_t height, uint32_t format);
 
 /**
  * Disables a display scanout.
@@ -483,7 +480,7 @@ typedef int32_t (*krun_display_configure_scanout)(void *instance, uint32_t scano
  * Returns:
  *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
  */
-typedef int32_t (*krun_display_disable_scanout)(void *userdata, uint32_t scanout_id);
+typedef int32_t (*krun_display_disable_scanout_fn)(void *userdata, uint32_t scanout_id);
 
 /**
  * Allocates a new frame for a specified scanout.
@@ -502,7 +499,7 @@ typedef int32_t (*krun_display_disable_scanout)(void *userdata, uint32_t scanout
  * Returns:
  *  The "frame_id" of the allocated frame or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
  */
-typedef int32_t (*krun_display_alloc_frame)(void *instance, uint32_t scanout_id, uint8_t **buffer, size_t *buffer_size);
+typedef int32_t (*krun_display_alloc_frame_fn)(void *instance, uint32_t scanout_id, uint8_t **buffer, size_t *buffer_size);
 
 /**
  * Presents a previously allocated frame to the display.
@@ -520,7 +517,7 @@ typedef int32_t (*krun_display_alloc_frame)(void *instance, uint32_t scanout_id,
  * Returns:
  * Zero on success or a negative error or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
  */
-typedef int32_t (*krun_display_present_frame)(void *instance, uint32_t scanout_id, uint32_t frame_id);
+typedef int32_t (*krun_display_present_frame_fn)(void *instance, uint32_t scanout_id, uint32_t frame_id);
 
 /**
  * Defines the set of callbacks for a display implementation.
@@ -540,16 +537,16 @@ typedef int32_t (*krun_display_present_frame)(void *instance, uint32_t scanout_i
  * fields NULL.
  */
 struct krun_display_vtable {
-    krun_display_destroy             destroy; // (optional)
-    krun_display_configure_scanout   configure_scanout; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
-    krun_display_disable_scanout     disable_scanout; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
-    krun_display_alloc_frame         alloc_frame; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
-    krun_display_present_frame       present_frame; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
+    krun_display_destroy_fn             destroy; // (optional)
+    krun_display_configure_scanout_fn   configure_scanout; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
+    krun_display_disable_scanout_fn     disable_scanout; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
+    krun_display_alloc_frame_fn         alloc_frame; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
+    krun_display_present_frame_fn       present_frame; // Required by KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER
 };
 
 struct krun_display_backend {
     void                       *create_userdata; // (optional)
-    krun_display_create         create; // (optional)
+    krun_display_create_fn      create; // (optional)
     struct krun_display_vtable  vtable;
 };
 

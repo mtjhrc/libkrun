@@ -220,7 +220,7 @@ int main(int argc, char *const argv[])
       return -1;
     }
 
-    if (err = krun_set_passt_fd(ctx_id, passt_fd)) {
+    if ((err = krun_set_passt_fd(ctx_id, passt_fd))) {
       errno = -err;
       perror("Error configuring net mode");
       return -1;

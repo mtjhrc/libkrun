@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicI32, Ordering};
 #[cfg(not(feature = "efi"))]
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use std::ptr;
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
@@ -1166,7 +1165,7 @@ pub extern "C" fn krun_set_display_backend(
     // SAFETY: We have checked the vtable size is fine, otherwise we have to trust the user. Just
     // to be extra careful, this uses read_unaligned, but we could probably get away with ptr::read.
     let display_backend: DisplayBackend =
-        unsafe { ptr::read_unaligned(vtable as *const DisplayBackend) };
+        unsafe { std::ptr::read_unaligned(vtable as *const DisplayBackend) };
 
     if !display_backend.vtable.implements_features(features) {
         return -libc::EINVAL;
