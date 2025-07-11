@@ -4,6 +4,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
+use libc::EFD_SEMAPHORE;
 
 /// A multiple producer single consumer channel that can be listened to by a file descriptor
 pub fn pollable_channel<T: Send>(
@@ -54,6 +55,10 @@ impl<T: Send> PollableChannelReciever<T> {
         }
 
         Ok(data_lock.pop_back())
+    }
+
+    pub fn approx_len(&self) -> usize {
+        self.inner.queue.lock().unwrap().len()
     }
 }
 

@@ -202,6 +202,7 @@ impl DisplayEventHandler {
             }
             DisplayEvent::UpdateScanout { scanout_id, data } => {
                 if let Some(scanout) = &mut scanouts[scanout_id as usize] {
+                    trace!("Update scanout {scanout_id}");
                     scanout.update(data);
                 } else {
                     warn!("Attempted to update non-existent scanout: {scanout_id}");
@@ -213,6 +214,11 @@ impl DisplayEventHandler {
 
 pub fn display_thread(rx: PollableChannelReciever<DisplayEvent>) -> anyhow::Result<()> {
     let app = Application::builder().build();
+
+    // Hold the application so it doesn't close when we don't have any windows open. We hold the
+    // app forever, because currently libkrun just exits the process on VM shutdown so there is no
+    // way for us to do anything better here for now.
+    let _app_hold = app.hold();
 
     let rx_fd = rx.as_raw_fd();
     let handler = Rc::new(DisplayEventHandler::new(rx));

@@ -6,6 +6,7 @@ use gtk4::prelude::{PaintableExt, SnapshotExt, TextureExt};
 use gtk4::subclass::prelude::{ObjectImpl, ObjectSubclass, PaintableImpl};
 use gtk4::{prelude::*, subclass::prelude::*};
 use std::cell::{Cell, RefCell};
+use log::{error, warn};
 
 #[derive(Default)]
 pub struct ScanoutPaintable {
@@ -13,6 +14,7 @@ pub struct ScanoutPaintable {
     pub texture: RefCell<Option<Texture>>,
     pub default_width: Cell<i32>,
     pub default_height: Cell<i32>,
+    pub rect: Rect,
 }
 
 // Implement the GObjectSubclass trait for our MyPaintable struct.
@@ -23,12 +25,16 @@ impl ObjectSubclass for ScanoutPaintable {
     type Interfaces = (Paintable,);
 }
 
-impl ObjectImpl for ScanoutPaintable {}
+impl ObjectImpl for ScanoutPaintable {
+    fn dispose(&self) {
+        error!("ScanoutPaintable::dispose");
+    }
+}
 
 impl PaintableImpl for ScanoutPaintable {
     fn snapshot(&self, snapshot: &gtk4::gdk::Snapshot, width: f64, height: f64) {
         if let Some(texture) = self.texture.borrow().as_ref() {
-            texture.snapshot(snapshot, width, height);
+            snapshot.append_texture(texture, &Rect::new(0.0, 0.0, width as f32, height as f32));
         } else {
             snapshot.append_color(
                 &RGBA::new(0.0, 0.0, 0.0, 1.0),
