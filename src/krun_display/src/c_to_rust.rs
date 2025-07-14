@@ -38,7 +38,7 @@ macro_rules! method_call {
 }
 
 // Note: by design DisplayBackendInstance is tied to the thread that created it. (!Send, !Sync).
-// This is to allow for easy and efficient implementation of the trait!
+// This is to allow for easy and efficient implementation of this trait.
 pub struct DisplayBackendInstance {
     instance: *mut c_void,
     vtable: DisplayBackendVtable,
@@ -51,7 +51,7 @@ impl Drop for DisplayBackendInstance {
         };
 
         if let Err(e) = into_rust_result!(delete_fn(self.instance)) {
-            error!("Failed to destroy display instance: {e}");
+            error!("Failed to destroy gtk_display instance: {e}");
         }
     }
 }
@@ -101,7 +101,7 @@ impl DisplayBackendBasicFramebuffer for DisplayBackendInstance {
 
         assert_ne!(buffer, null_mut());
         assert_ne!(buffer_len, 0);
-        // SAFETY: We have obtained the buffer and buffer_len from the display impl. Because
+        // SAFETY: We have obtained the buffer and buffer_len from the gtk_display impl. Because
         //         the alloc_frame_fn return an error we assume they should be valid.
         let buffer = unsafe {
             slice_from_raw_parts_mut(buffer, buffer_len)
@@ -123,7 +123,6 @@ impl DisplayBackendBasicFramebuffer for DisplayBackendInstance {
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct DisplayBackend<'userdata> {
-    // TODO: probably remove the lifetime? or make it 'static always?
     pub phantom: PhantomData<&'userdata c_void>,
     pub userdata: *const c_void,
     pub create_fn: Option<CreateFn>,

@@ -121,7 +121,7 @@ struct VirtioGpuResource {
 
 impl VirtioGpuResource {
     /// Creates a new VirtioGpuResource with the given metadata.  Width and height are used by the
-    /// display, while size is useful for hypervisor mapping.
+    /// gtk_display, while size is useful for hypervisor mapping.
     pub fn new(
         resource_id: u32,
         width: u32,
@@ -303,7 +303,7 @@ impl VirtioGpu {
 
         let display_backend = display_backend
             .create_instance()
-            .expect("Failed to create display backend instance!");
+            .expect("Failed to create gtk_display backend instance!");
 
         Self {
             rutabaga,
@@ -487,7 +487,7 @@ impl VirtioGpu {
         Ok(OkNoData)
     }
 
-    /// If the resource is the scanout resource, flush it to the display.
+    /// If the resource is the scanout resource, flush it to the gtk_display.
     pub fn flush_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
         if resource_id == 0 {
             return Ok(OkNoData);

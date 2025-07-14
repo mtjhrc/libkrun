@@ -162,7 +162,7 @@ pub trait RutabagaComponent {
         Ok(())
     }
 
-    /// Implementations must flush the given resource to the display.
+    /// Implementations must flush the given resource to the gtk_display.
     fn resource_flush(&self, _resource_id: &mut RutabagaResource) -> RutabagaResult<()> {
         Err(RutabagaError::Unsupported)
     }
@@ -1073,13 +1073,13 @@ impl RutabagaBuilder {
         }
     }
 
-    /// Set display width for the RutabagaBuilder
+    /// Set gtk_display width for the RutabagaBuilder
     pub fn set_display_width(mut self, display_width: u32) -> RutabagaBuilder {
         self.display_width = display_width;
         self
     }
 
-    /// Set display height for the RutabagaBuilder
+    /// Set gtk_display height for the RutabagaBuilder
     pub fn set_display_height(mut self, display_height: u32) -> RutabagaBuilder {
         self.display_height = display_height;
         self

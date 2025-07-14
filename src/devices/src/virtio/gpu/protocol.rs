@@ -708,15 +708,21 @@ impl From<DisplayBackendError> for GpuResponse {
     fn from(err: DisplayBackendError) -> GpuResponse {
         match err {
             DisplayBackendError::InternalError => {
-                error!("Unknown internal error occurred in display implementation");
+                error!("Unknown internal error occurred in gtk_display implementation");
                 GpuResponse::ErrUnspec
             }
             DisplayBackendError::MethodNotSupported => {
-                // This is likely an implementation error in the GPU device - using a display method
+                // This is likely an implementation error in the GPU device - using a gtk_display method
                 // that has not been negotiated using the feature flags.
                 error!("Display does not support used method for scanout");
                 GpuResponse::ErrUnspec
-            }
+            },
+            DisplayBackendError::OutOfBuffers => {
+                // We should never actually reach this, since we only ever use 1 buffer at a given
+                // moment.
+                error!("Display backend ran out of buffers");
+                GpuResponse::ErrUnspec
+            },
             DisplayBackendError::InvalidScanoutId => GpuResponse::ErrInvalidScanoutId,
             DisplayBackendError::InvalidParam => GpuResponse::ErrInvalidParameter,
         }

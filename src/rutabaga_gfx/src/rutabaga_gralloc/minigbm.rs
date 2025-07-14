@@ -110,7 +110,7 @@ impl Gralloc for MinigbmDevice {
         let gbm_buffer = MinigbmBuffer(bo, self.clone());
 
         // Intel GPUs typically only use cached memory buffers.  This will change with dGPUs, but
-        // perhaps minigbm will be deprecated by then.  Other display drivers (rockchip, mediatek,
+        // perhaps minigbm will be deprecated by then.  Other gtk_display drivers (rockchip, mediatek,
         // amdgpu) typically use write combine memory.  We can also consider use flags too if this
         // heuristic proves insufficient.
         if self.device_name == "i915" {

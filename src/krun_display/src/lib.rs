@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use thiserror::Error;
 
 bitflags! {
-    pub struct DisplayFeatures: u32 {
+    pub struct DisplayFeatures: u64 {
         const BASIC_FRAMEBUFFER = 1;
     }
 }
@@ -24,6 +24,8 @@ pub enum DisplayBackendError {
     InvalidScanoutId = -3,
     #[error("Invalid parameter")]
     InvalidParam = -4,
+    #[error("Maximum number of buffers has been alocated")]
+    OutOfBuffers = -5,
 }
 
 pub type CreateFn = extern "C" fn(

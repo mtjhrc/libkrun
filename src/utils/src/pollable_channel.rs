@@ -1,15 +1,14 @@
-use crate::eventfd::{EventFd, EFD_NONBLOCK};
+use crate::eventfd::{EventFd, EFD_NONBLOCK, EFD_SEMAPHORE};
 use std::collections::VecDeque;
 use std::io;
 use std::io::ErrorKind;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
-use libc::EFD_SEMAPHORE;
 
 /// A multiple producer single consumer channel that can be listened to by a file descriptor
 pub fn pollable_channel<T: Send>(
 ) -> io::Result<(PollableChannelSender<T>, PollableChannelReciever<T>)> {
-    let eventfd = EventFd::new(EFD_NONBLOCK)?;
+    let eventfd = EventFd::new(EFD_NONBLOCK | EFD_SEMAPHORE)?;
 
     let inner = Arc::new(Inner {
         eventfd,
@@ -34,7 +33,7 @@ pub struct PollableChannelSender<T: Send> {
 
 impl<T: Send> PollableChannelSender<T> {
     pub fn send(&self, msg: T) -> io::Result<()> {
-        let mut data_lock = self.inner.queue.lock().expect("Poisoned mutex");
+        let mut data_lock = self.inner.queue.lock().unwrap();
         data_lock.push_back(msg);
         self.inner.eventfd.write(1)?;
         Ok(())
@@ -47,7 +46,7 @@ pub struct PollableChannelReciever<T: Send> {
 
 impl<T: Send> PollableChannelReciever<T> {
     pub fn try_recv(&self) -> io::Result<Option<T>> {
-        let mut data_lock = self.inner.queue.lock().expect("Poisoned mutex");
+        let mut data_lock = self.inner.queue.lock().unwrap();
         match self.inner.eventfd.read() {
             Ok(_) => (),
             Err(e) if e.kind() == ErrorKind::WouldBlock => (),
@@ -57,7 +56,7 @@ impl<T: Send> PollableChannelReciever<T> {
         Ok(data_lock.pop_back())
     }
 
-    pub fn approx_len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.inner.queue.lock().unwrap().len()
     }
 }

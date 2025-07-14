@@ -277,7 +277,7 @@ impl RutabagaGralloc {
     /// Returns the best allocation backend to service a particular request.
     fn determine_optimal_backend(&self, _info: ImageAllocationInfo) -> GrallocBackend {
         // This function could be more sophisticated and consider the allocation info.  For example,
-        // nobody has ever tried Mali allocated memory + a mediatek/rockchip display and as such it
+        // nobody has ever tried Mali allocated memory + a mediatek/rockchip gtk_display and as such it
         // probably doesn't work.  In addition, YUV calculations in minigbm have yet to make it
         // towards the Vulkan api.  This function allows for a variety of quirks, but for now just
         // choose the most shiny backend that the user has built.  The rationale is "why would you

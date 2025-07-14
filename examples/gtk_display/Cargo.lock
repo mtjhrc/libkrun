@@ -587,6 +587,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_derive",
+ "crossbeam-channel",
  "env_logger",
  "gtk4",
  "krun-sys",
