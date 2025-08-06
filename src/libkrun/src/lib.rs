@@ -1,24 +1,6 @@
 #[macro_use]
 extern crate log;
 
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::convert::TryInto;
-use std::env;
-#[cfg(target_os = "linux")]
-use std::ffi::CString;
-use std::ffi::{c_void, CStr};
-use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
-use std::os::fd::{FromRawFd, RawFd};
-use std::path::PathBuf;
-use std::slice;
-use std::sync::atomic::{AtomicI32, Ordering};
-#[cfg(not(feature = "efi"))]
-use std::sync::LazyLock;
-use std::sync::Mutex;
-
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
 use devices::virtio::block::ImageType;
@@ -38,6 +20,23 @@ use libc::c_int;
 use libc::size_t;
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::convert::TryInto;
+use std::env;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+use std::ffi::{c_void, CStr};
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+use std::os::fd::{FromRawFd, RawFd};
+use std::path::PathBuf;
+use std::slice;
+use std::sync::atomic::{AtomicI32, Ordering};
+#[cfg(not(feature = "efi"))]
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use utils::eventfd::EventFd;
 use vmm::resources::VmResources;
 #[cfg(feature = "blk")]
@@ -60,7 +59,7 @@ use vmm::vmm_config::vsock::VsockDeviceConfig;
 use nitro::enclaves::NitroEnclave;
 
 #[cfg(feature = "gpu")]
-use devices::virtio::display::MAX_DISPLAYS;
+use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
 #[cfg(feature = "nitro")]
 use nitro_enclaves::launch::StartFlags;
 
@@ -337,6 +336,15 @@ impl TryFrom<ContextConfig> for NitroEnclave {
             vcpus,
             start_flags: ctx.nitro_start_flags,
         })
+    }
+}
+
+// TODO: Use this everywhere instead of the manual match
+#[allow(dead_code)]
+fn with_cfg(ctx_id: u32, f: impl FnOnce(&mut ContextConfig) -> i32) -> i32 {
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => f(ctx_cfg.get_mut()),
+        Entry::Vacant(_) => -libc::ENOENT,
     }
 }
 
@@ -1348,6 +1356,127 @@ pub unsafe extern "C" fn krun_add_display(ctx_id: u32, width: u32, height: u32) 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn krun_add_display(_ctx_id: u32, _width: u32, _height: u32) -> i32 {
+    -libc::ENOTSUP
+}
+
+#[cfg(feature = "gpu")]
+#[no_mangle]
+pub extern "C" fn krun_display_set_refresh_rate(
+    ctx_id: u32,
+    display_id: u32,
+    refresh_rate: u32,
+) -> i32 {
+    with_cfg(ctx_id, |cfg| {
+        let Some(display_info) = cfg.vmr.displays.get_mut(display_id as usize) else {
+            return -libc::EINVAL;
+        };
+
+        let DisplayInfoEdid::Generated(ref mut edid_params) = display_info.edid else {
+            return -libc::EALREADY;
+        };
+
+        edid_params.refresh_rate = refresh_rate;
+        KRUN_SUCCESS
+    })
+}
+
+#[cfg(not(feature = "gpu"))]
+#[no_mangle]
+pub extern "C" fn krun_display_set_refresh_rate(
+    _ctx_id: u32,
+    _display_id: u32,
+    _refresh_rate: u32,
+) -> i32 {
+    -libc::ENOTSUP
+}
+
+#[cfg(feature = "gpu")]
+#[no_mangle]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn krun_display_set_edid(
+    ctx_id: u32,
+    display_id: u32,
+    edid: *const u8,
+    size: size_t,
+) -> i32 {
+    with_cfg(ctx_id, |cfg| {
+        let Some(display_info) = cfg.vmr.displays.get_mut(display_id as usize) else {
+            return -libc::EINVAL;
+        };
+
+        if edid.is_null() {
+            return -libc::EINVAL;
+        }
+
+        let blob = unsafe { slice::from_raw_parts(edid, size) };
+
+        display_info.edid = DisplayInfoEdid::Provided(Box::from(blob));
+        KRUN_SUCCESS
+    })
+}
+
+#[cfg(not(feature = "gpu"))]
+#[no_mangle]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn krun_display_set_edid(
+    _ctx_id: u32,
+    _display_id: u32,
+    _edid: *const u8,
+    _size: size_t,
+) -> i32 {
+    -libc::ENOTSUP
+}
+
+#[cfg(feature = "gpu")]
+#[no_mangle]
+pub extern "C" fn krun_display_set_physical_size(
+    ctx_id: u32,
+    display_id: u32,
+    width_mm: u16,
+    height_mm: u16,
+) -> i32 {
+    with_cfg(ctx_id, |cfg| {
+        let Some(display_info) = cfg.vmr.displays.get_mut(display_id as usize) else {
+            return -libc::EINVAL;
+        };
+        let DisplayInfoEdid::Generated(ref mut edid_params) = display_info.edid else {
+            return -libc::EALREADY;
+        };
+        edid_params.physical_size = PhysicalSize::DimensionsMillimeters(width_mm, height_mm);
+        KRUN_SUCCESS
+    })
+}
+
+#[cfg(not(feature = "gpu"))]
+#[no_mangle]
+pub extern "C" fn krun_display_set_physical_size(
+    _ctx_id: u32,
+    _display_id: u32,
+    _width_mm: u16,
+    _height_mm: u16,
+) -> i32 {
+    -libc::ENOTSUP
+}
+
+#[cfg(feature = "gpu")]
+#[no_mangle]
+#[allow(clippy::missing_safety_doc)]
+pub extern "C" fn krun_display_set_dpi(ctx_id: u32, display_id: u32, dpi: u32) -> i32 {
+    with_cfg(ctx_id, |cfg| {
+        let Some(display_info) = cfg.vmr.displays.get_mut(display_id as usize) else {
+            return -libc::EINVAL;
+        };
+        let DisplayInfoEdid::Generated(ref mut edid_params) = display_info.edid else {
+            return -libc::EINVAL;
+        };
+        edid_params.physical_size = PhysicalSize::Dpi(dpi);
+        KRUN_SUCCESS
+    })
+}
+
+#[cfg(not(feature = "gpu"))]
+#[no_mangle]
+pub extern "C" fn krun_display_set_dpi(_ctx_id: u32, _display_id: u32, _dpi: u32) -> i32 {
     -libc::ENOTSUP
 }
 
