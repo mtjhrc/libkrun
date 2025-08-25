@@ -5,12 +5,13 @@ use std::rc::Rc;
 use super::scanout_paintable::ScanoutPaintable;
 use crate::DisplayEvent;
 use krun_display::Rect;
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 use utils::pollable_channel::PollableChannelReciever;
 
 use gtk::{
-    AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerMotion, HeaderBar,
-    Overlay, Picture, Revealer, RevealerTransitionType, Window, gdk,
+    AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey,
+    EventControllerMotion, HeaderBar, Overlay, Picture, Revealer, RevealerTransitionType, Window,
+    gdk,
     gdk::MemoryFormat,
     gio::ActionEntry,
     gio::Cancellable,
@@ -160,6 +161,12 @@ fn build_overlay(window: &Window) -> Overlay {
         }
     ));
     overlay_bar.add_controller(bar_controller);
+
+    let key_controller = EventControllerKey::new();
+    key_controller.connect_key_pressed(move |x, key, i, modifier_type| {
+        info!("[key_controller] Key: {key:?}, i:{i}");
+        Propagation::Proceed
+    });
 
     let overlay_controller = EventControllerMotion::new();
     overlay_controller.connect_motion(glib::clone!(
