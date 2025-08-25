@@ -13,6 +13,8 @@ use devices::virtio::CacheType;
 use env_logger::{Env, Target};
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
+#[cfg(feature = "input")]
+use krun_input::{InputBackend, InputBackendWrapper};
 use libc::c_char;
 #[cfg(feature = "net")]
 use libc::c_int;
@@ -1327,6 +1329,59 @@ pub extern "C" fn krun_set_display_backend(
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
             cfg.vmr.display_backend = Some(display_backend);
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
+}
+
+#[cfg(not(feature = "input"))]
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub extern "C" fn krun_add_input_device(
+    _ctx_id: u32,
+    _input_backend: *const c_void,
+    _backend_size: usize,
+) -> i32 {
+    -libc::ENOTSUP
+}
+
+#[cfg(feature = "input")]
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub extern "C" fn krun_add_input_device(
+    ctx_id: u32,
+    input_backend: *const c_void,
+    backend_size: usize,
+) -> i32 {
+    if backend_size < size_of::<InputBackend>() {
+        return -libc::EINVAL;
+    }
+
+    // SAFETY: We have checked the backend size is fine, otherwise we have to trust the user.
+    let input_backend: InputBackend =
+        unsafe { std::ptr::read_unaligned(input_backend as *const InputBackend) };
+
+    // TODO: Add verification similar to display backend if needed
+    // if !input_backend.verify() {
+    //     return -libc::EINVAL;
+    // }
+
+    let input_backend_wrapper = InputBackendWrapper {
+        features: input_backend.features,
+        create_userdata: input_backend.create_userdata,
+        create_userdata_lifetime: std::marker::PhantomData,
+        create_events_fn: input_backend.create_events,
+        create_config_fn: input_backend.create_config,
+        events_vtable: input_backend.events_vtable.into(),
+        config_vtable: input_backend.config_vtable.into(),
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            cfg.vmr.input_backends.push(input_backend_wrapper);
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
