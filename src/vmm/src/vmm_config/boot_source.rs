@@ -3,6 +3,8 @@
 
 use std::fmt::{Display, Formatter, Result};
 
+// console=tty0 video=virtiofb
+
 #[cfg(target_os = "linux")]
 pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodule console=hvc0 \
                                           rootfstype=virtiofs rw quiet no-kvmapf";

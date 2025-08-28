@@ -1,9 +1,10 @@
 use log::{debug, error};
+use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::thread::{self, JoinHandle};
-
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
+use virtio_bindings::virtio_input;
 use vm_memory::{ByteValued, GuestMemoryMmap};
 
 use super::super::Queue;
@@ -85,6 +86,10 @@ impl InputWorker {
             }
         };
 
+        const EVENTQ: u64 = 1;
+        const STATUSQ: u64 = 2;
+        const EVENTQ_USER: u64 = 3;
+        const QUIT: u64 = 4;
         // Set up epoll to wait for events
         let epoll = Epoll::new().expect("Failed to create epoll");
 
@@ -100,27 +105,32 @@ impl InputWorker {
             .ctl(
                 ControlOperation::Add,
                 ready_fd,
-                &EpollEvent::new(EventSet::IN, 3),
+                &EpollEvent::new(EventSet::IN, EVENTQ_USER),
             )
             .expect("Failed to add ready fd to epoll");
-
         epoll
             .ctl(
                 ControlOperation::Add,
-                ready_fd,
-                &EpollEvent::new(EventSet::IN, 3),
+                self.event_queue_efd.as_raw_fd(),
+                &EpollEvent::new(EventSet::IN, EVENTQ),
             )
             .expect("Failed to add ready fd to epoll");
-
+        epoll
+            .ctl(
+                ControlOperation::Add,
+                self.status_queue_efd.as_raw_fd(),
+                &EpollEvent::new(EventSet::IN, STATUSQ),
+            )
+            .expect("Failed to add ready fd to epoll");
         epoll
             .ctl(
                 ControlOperation::Add,
                 self.stop_fd.as_raw_fd(),
-                &EpollEvent::new(EventSet::IN, 4),
+                &EpollEvent::new(EventSet::IN, QUIT),
             )
             .expect("Failed to add stop fd to epoll");
 
-        let mut events = vec![EpollEvent::default(); 2];
+        let mut events = vec![EpollEvent::default(); 16];
 
         'event_loop: loop {
             let num_events = match epoll.wait(events.len(), 1000, &mut events) {
@@ -131,24 +141,37 @@ impl InputWorker {
                 }
             };
 
-            let mut event_queue_needs_interrupt = false;
+            let mut needs_interrupt = false;
 
             for event in &events[..num_events] {
                 match event.data() {
-                    3 => {
+                    EVENTQ_USER => {
+                        debug!("eventq event!");
                         // Input events available from backend
-                        event_queue_needs_interrupt |= self.send_events(&mut events_instance);
+                        needs_interrupt |= self.process_event_queue(&mut events_instance);
                     }
-                    4 => {
+                    EVENTQ => {
+                        self.event_queue_efd.read().unwrap();
+                        debug!("eventq event!");
+                        // Input events available from backend
+                        needs_interrupt |= self.process_event_queue(&mut events_instance);
+                    }
+                    STATUSQ => {
+                        self.status_queue_efd.read().unwrap();
+                        needs_interrupt |= self.process_status_queue().unwrap();
+                    }
+                    QUIT => {
                         // Stop signal received
                         let _ = self.stop_fd.read();
                         break 'event_loop;
                     }
-                    _ => {}
+                    x => {
+                        error!("TODO: {x}")
+                    }
                 }
             }
 
-            if event_queue_needs_interrupt {
+            if needs_interrupt {
                 self.interrupt.signal_used_queue();
             }
         }
@@ -161,9 +184,11 @@ impl InputWorker {
         &mut self,
         events_instance: &mut InputEventsInstance,
         writer: &mut Writer,
-    ) -> Result<usize, ()> {
+    ) -> Result<(usize, bool), ()> {
         let avail_bytes = writer.available_bytes();
+        let mut eof = false;
         while writer.bytes_written() + size_of::<VirtioInputEvent>() <= avail_bytes {
+            dbg!(writer.bytes_written());
             match events_instance.next_event() {
                 Ok(Some(event)) => {
                     let virtio_event = VirtioInputEvent {
@@ -171,22 +196,25 @@ impl InputWorker {
                         code: event.code,
                         value: event.value as i32,
                     };
+                    dbg!(virtio_event);
                     writer
                         .write_obj(virtio_event)
                         .expect("Failed to write input event to virtqueue");
                 }
-                Ok(None) => break, // No more events available
+                Ok(None) => {
+                    eof = true;
+                    break;
+                } // No more events available
                 Err(e) => {
                     error!("Error getting next event: {:?}", e);
                     break;
                 }
             }
         }
-        Ok(writer.bytes_written())
+        Ok((writer.bytes_written(), eof))
     }
 
-    /// Send events from the source to the guest
-    fn send_events(&mut self, events_instance: &mut InputEventsInstance) -> bool {
+    fn process_event_queue(&mut self, events_instance: &mut InputEventsInstance) -> bool {
         let mut needs_interrupt = false;
         let mem = self.mem.clone();
 
@@ -200,35 +228,45 @@ impl InputWorker {
                 }
             };
 
-            let Ok(bytes_written) = self.fill_event_virtqueue(events_instance, &mut writer) else {
+            let Ok((bytes_written, eof)) = self.fill_event_virtqueue(events_instance, &mut writer)
+            else {
                 break;
             };
 
-            self.event_queue
-                .add_used(&mem, desc_chain.index, bytes_written as u32);
-            needs_interrupt = true;
+            if bytes_written != 0 {
+                self.event_queue
+                    .add_used(&mem, desc_chain.index, bytes_written as u32)
+                    .expect("TODO");
+                needs_interrupt = true;
+            }
 
-            // If we didn't write any events, stop processing for now
             if bytes_written == 0 {
+                self.event_queue.undo_pop();
+                break;
+            }
+
+            if eof {
                 break;
             }
         }
-
+        debug!("QUEUE SIZE !!!!! {}", self.event_queue.len(&mem));
         needs_interrupt
     }
 
     /// Reads events from guest and sends them to the event source (currently no-op)
-    fn read_event_virtqueue(
+    fn read_status_virtqueue(
         &mut self,
         reader: &mut Reader,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         while reader.available_bytes() >= std::mem::size_of::<VirtioInputEvent>() {
-            // Skip reading for now - would need ByteValued implementation
-            //let _evt: virtio_bindings::virtio_input::virtio_input_event = reader.read_obj()?;
+            let mut buffer: [u8; size_of::<virtio_input::virtio_input_event>()] =
+                [0; size_of::<virtio_input::virtio_input_event>()];
+            reader.read_exact(&mut buffer)?;
+            debug!("Read garbage collect: {:?}", &buffer);
             // For now, we don't send events back to the input source
             // This would be used for things like setting LEDs on keyboards, haptic feedback, etc.
         }
-        Ok(())
+        Ok(reader.bytes_read())
     }
 
     /// Process the status queue (guest -> device events)
@@ -238,12 +276,17 @@ impl InputWorker {
 
         while let Some(desc_chain) = self.status_queue.pop(&mem) {
             let mut reader = Reader::new(&mem, desc_chain.clone())?;
-
-            if let Err(e) = self.read_event_virtqueue(&mut reader) {
-                error!("Input: failed to read events from virtqueue: {:?}", e);
+            match self.read_status_virtqueue(&mut reader) {
+                Ok(bytes_read) => {
+                    self.status_queue
+                        .add_used(&mem, desc_chain.index, bytes_read as u32)
+                        .unwrap();
+                }
+                Err(e) => {
+                    error!("Input: failed to read events from virtqueue: {:?}", e);
+                }
             }
 
-            self.status_queue.add_used(&mem, desc_chain.index, 0);
             needs_interrupt = true;
         }
 

@@ -40,6 +40,7 @@ impl<T: Send> PollableChannelSender<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct PollableChannelReciever<T: Send> {
     inner: Arc<Inner<T>>,
 }

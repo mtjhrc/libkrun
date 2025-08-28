@@ -4,9 +4,12 @@ use std::rc::Rc;
 
 use super::scanout_paintable::ScanoutPaintable;
 use crate::DisplayEvent;
+use crate::input_backend::gtk_key_to_linux;
 use krun_display::Rect;
+use krun_input::{InputEvent, InputEventType};
 use log::{debug, info, trace, warn};
-use utils::pollable_channel::PollableChannelReciever;
+use std::sync::Arc;
+use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender};
 
 use gtk::{
     AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey,
@@ -37,6 +40,7 @@ impl ScanoutWindow {
         width: i32,
         height: i32,
         format: MemoryFormat,
+        input_forwarder: Option<PollableChannelSender<InputEvent>>,
     ) -> Self {
         let header_bar = HeaderBar::new();
         let window = ApplicationWindow::builder()
@@ -97,7 +101,7 @@ impl ScanoutWindow {
         window.set_titlebar(Some(&header_bar));
         header_bar.pack_end(&fullscreen_btn);
 
-        let overlay = build_overlay(window.as_ref());
+        let overlay = build_overlay(window.as_ref(), input_forwarder);
         overlay.set_child(Some(&picture));
         window.set_child(Some(&overlay));
         window.set_visible(true);
@@ -129,7 +133,10 @@ impl Drop for ScanoutWindow {
     }
 }
 
-fn build_overlay(window: &Window) -> Overlay {
+fn build_overlay(
+    window: &Window,
+    input_event_tx: Option<PollableChannelSender<InputEvent>>,
+) -> Overlay {
     let overlay_bar = HeaderBar::builder()
         .valign(Align::Start)
         .hexpand_set(false)
@@ -163,10 +170,48 @@ fn build_overlay(window: &Window) -> Overlay {
     overlay_bar.add_controller(bar_controller);
 
     let key_controller = EventControllerKey::new();
-    key_controller.connect_key_pressed(move |x, key, i, modifier_type| {
-        info!("[key_controller] Key: {key:?}, i:{i}");
-        Propagation::Proceed
-    });
+
+    // Set up keyboard event forwarding to input backend
+    if let Some(event_tx) = input_event_tx {
+        // Handle key press events
+        let forwarder_press = event_tx.clone();
+        key_controller.connect_key_pressed(move |_controller, key, keycode, _modifiers| {
+            let linux_keycode = gtk_key_to_linux(keycode);
+            let input_event = InputEvent {
+                type_: InputEventType::Key as u16,
+                code: linux_keycode,
+                value: 1, // Key press
+            };
+
+            debug!(
+                "Forwarding key press: GTK key={}, code={}, Linux code={}",
+                key, keycode, linux_keycode
+            );
+
+            forwarder_press.send(input_event).unwrap();
+            Propagation::Proceed
+        });
+
+        // Handle key release events
+        let forwarder_release = event_tx.clone();
+        key_controller.connect_key_released(move |_controller, key, keycode, _modifiers| {
+            let linux_keycode = gtk_key_to_linux(keycode);
+            let input_event = InputEvent {
+                type_: InputEventType::Key as u16,
+                code: linux_keycode,
+                value: 0, // Key release
+            };
+            debug!(
+                "Forwarding key release: GTK key={}, code={}, Linux code={}",
+                key, keycode, linux_keycode
+            );
+
+            forwarder_release.send(input_event).unwrap();
+            debug!("sent!");
+        });
+    }
+
+    window.add_controller(key_controller);
 
     let overlay_controller = EventControllerMotion::new();
     overlay_controller.connect_motion(glib::clone!(
@@ -192,6 +237,7 @@ pub struct DisplayWorker {
     app: Application,
     app_name: String,
     rx: PollableChannelReciever<DisplayEvent>,
+    input_event_tx: Option<PollableChannelSender<InputEvent>>,
     scanouts: RefCell<[Option<ScanoutWindow>; MAX_DISPLAYS]>,
 }
 
@@ -200,11 +246,13 @@ impl DisplayWorker {
         app: Application,
         app_name: String,
         rx: PollableChannelReciever<DisplayEvent>,
+        input_event_tx: Option<PollableChannelSender<InputEvent>>,
     ) -> Self {
         Self {
             app,
             app_name,
             rx,
+            input_event_tx,
             scanouts: Default::default(),
         }
     }
@@ -241,6 +289,7 @@ impl DisplayWorker {
                             width as i32,
                             height as i32,
                             format,
+                            self.input_event_tx.clone(),
                         ));
                     }
                 }
@@ -266,7 +315,11 @@ impl DisplayWorker {
 
     /// Run a GTK application in the current thread handling the krun_gtk_display events send over the channel.
     /// The events are produces by the `DisplayBackend` which is hooked up into libkrun.
-    pub fn run(app_name: String, rx: PollableChannelReciever<DisplayEvent>) {
+    pub fn run(
+        app_name: String,
+        rx: PollableChannelReciever<DisplayEvent>,
+        input_event_tx: Option<PollableChannelSender<InputEvent>>,
+    ) {
         let app = Application::builder().build();
 
         // Hold the application so it doesn't close when we don't have any windows open. We hold the
@@ -275,7 +328,12 @@ impl DisplayWorker {
         let _app_hold = app.hold();
         let rx_fd = rx.as_raw_fd();
 
-        let display_worker = Rc::new(DisplayWorker::new(app.clone(), app_name, rx));
+        let display_worker = Rc::new(DisplayWorker::new(
+            app.clone(),
+            app_name,
+            rx,
+            input_event_tx,
+        ));
         app.connect_activate(move |_app| {
             let display_worker = display_worker.clone();
             unix_fd_add_local(rx_fd, IOCondition::IN, move |_, _| {
