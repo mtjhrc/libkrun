@@ -87,9 +87,44 @@ impl InputConfigImpl for GtkInputConfig {
         event_type: u16,
         buffer: &mut [u8],
     ) -> Result<usize, InputBackendError> {
+        const EV_KEY: u16 = 0x01;
+        const EV_REL: u16 = 0x02;
+        const EV_REP: u16 = 0x14;
+
+        const REL_X: u16 = 0x00;
+        const REL_Y: u16 = 0x01;
+        const REL_Z: u16 = 0x02;
+        const REL_RX: u16 = 0x03;
+        const REL_RY: u16 = 0x04;
+        const REL_RZ: u16 = 0x05;
+        const REL_HWHEEL: u16 = 0x06;
+        const REL_DIAL: u16 = 0x07;
+        const REL_WHEEL: u16 = 0x08;
+
+        const REP_DELAY: u16 = 0x00;
+        const REP_PERIOD: u16 = 0x01;
+
+        fn write_bits(buffer: &mut [u8], indices: &[u16]) -> usize {
+            let mut len = 0;
+            for idx in indices {
+                let byte_pos = (idx / 8) as usize;
+                let bit_byte = 1u8 << (idx % 8);
+                if byte_pos < buffer.len() {
+                    len = std::cmp::max(len, byte_pos + 1);
+                    buffer[byte_pos] |= bit_byte;
+                } else {
+                    // This would only happen if new event codes (or types, or ABS_*, etc) are defined
+                    // to be larger than or equal to 1024, in which case a new version
+                    // of the virtio input protocol needs to be defined.
+                    // There is nothing we can do about this error except log it.
+                    error!("Attempted to set an out of bounds bit: {}", idx);
+                }
+            }
+            len as usize
+        }
+
         match event_type {
-            0x01 => {
-                // EV_KEY
+            EV_KEY => {
                 // For a keyboard, we support all key codes (0-767)
                 // This requires 768 bits = 96 bytes
                 let required_bytes = 96;
@@ -101,11 +136,18 @@ impl InputConfigImpl for GtkInputConfig {
                 buffer[..required_bytes].fill(0xFF);
                 Ok(required_bytes)
             }
-            0x14 => {
-                buffer[0] = 0x3;
+            EV_REP => {
+                write_bits(buffer, &[REP_DELAY, REP_PERIOD]);
                 Ok(1)
-            },
-            _ => Ok(0), // No other event types supported
+            }
+            EV_REL => {
+                write_bits(buffer, &[REL_X, REL_Y, REL_WHEEL]);
+                Ok(1)
+            }
+            _ => {
+                error!("Unsupported: {}", event_type);
+                Ok(0)
+            } // No other event types supported
         }
     }
 
