@@ -1,11 +1,13 @@
-use crate::{InputBackendError, InputEvent, InputEventsVtable, InputConfigVtable, InputDeviceIds, InputAbsInfo, header};
+use crate::{
+    InputAbsInfo, InputBackendError, InputConfigImpl, InputConfigVtable, InputDeviceIds,
+    InputEvent, InputEventsVtable, header,
+};
 use log::error;
 use static_assertions::assert_not_impl_any;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::os::fd::RawFd;
 use std::ptr::{null, null_mut};
-
 
 #[macro_export]
 macro_rules! into_rust_result {
@@ -52,10 +54,13 @@ pub struct InputConfigInstance {
     vtable: InputConfigVtable,
 }
 
+unsafe impl Send for InputConfigInstance {}
+unsafe impl Sync for InputConfigInstance {}
+
 // By design the structs are !Send and !Sync to allow for the implementation to safely assume that
 // the methods are always called on the appropriate worker thread
 assert_not_impl_any!(InputEventsInstance: Sync, Send);
-assert_not_impl_any!(InputConfigInstance: Sync, Send);
+//assert_not_impl_any!(InputConfigInstance: Sync, Send);
 
 impl Drop for InputEventsInstance {
     fn drop(&mut self) {
@@ -87,12 +92,10 @@ impl InputEventsInstance {
         let fd = method_call! {
             self.get_ready_efd()
         };
-        
-        if fd < 0 {
-            into_rust_result!(fd, _ => unreachable!())
-        } else {
-            Ok(fd)
-        }
+
+        into_rust_result!(fd,
+            fd if fd >= 0 => Ok(fd)
+        )
     }
 
     /// Fetch the next available input event, returns None if no events are available
@@ -107,57 +110,50 @@ impl InputEventsInstance {
             self.next_event(&raw mut event)
         };
 
-        match result {
+        into_rust_result!(result,
             1 => Ok(Some(InputEvent {
                 type_: event.type_,
                 code: event.code,
                 value: event.value,
             })),
-            0 => Ok(None),
-            _ => into_rust_result!(result, _ => unreachable!()),
-        }
+            0 => Ok(None)
+        )
     }
 }
 
-impl InputConfigInstance {
-    /// Write the device name to the provided buffer (low-level, allocation-free)
+impl InputConfigImpl for InputConfigInstance {
+    /// Write the device name to the provided buffer
     /// Returns the number of bytes written (excluding null terminator)
-    pub fn write_device_name(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
+    fn write_device_name(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
         if buffer.is_empty() {
             return Err(InputBackendError::InvalidParam);
         }
-        
+
         let result = method_call! {
             self.get_device_name(buffer.as_mut_ptr() as *mut i8, buffer.len())
         };
-        into_rust_result!(result)?;
-        
-        // Find the length (excluding null terminator)
-        let len = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
-        Ok(len)
+        into_rust_result!(result,
+            result if result >= 0 => Ok(result as usize)
+        )
     }
-    
+
     /// Write the device serial to the provided buffer (low-level, allocation-free)  
     /// Returns the number of bytes written (excluding null terminator)
-    pub fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
+    fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
         if buffer.is_empty() {
             return Err(InputBackendError::InvalidParam);
         }
-        
+
         let result = method_call! {
             self.get_device_serial(buffer.as_mut_ptr() as *mut i8, buffer.len())
         };
-        into_rust_result!(result)?;
-        
-        // Find the length (excluding null terminator)
-        let len = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
-        Ok(len)
+        into_rust_result!(result,
+            result if result >= 0 => Ok(result as usize)
+        )
     }
 
-
-
     /// Write the device IDs (vendor, product, etc.)
-    pub fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
+    fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
         let result = method_call! {
             self.get_device_ids(ids)
         };
@@ -165,7 +161,11 @@ impl InputConfigInstance {
     }
 
     /// Write absolute axis information for a specific axis
-    pub fn write_abs_info(&self, axis: u16, abs_info: &mut InputAbsInfo) -> Result<(), InputBackendError> {
+    fn write_abs_info(
+        &self,
+        axis: u16,
+        abs_info: &mut InputAbsInfo,
+    ) -> Result<(), InputBackendError> {
         let result = method_call! {
             self.get_abs_info(axis, abs_info)
         };
@@ -174,31 +174,33 @@ impl InputConfigInstance {
 
     /// Write event bits bitmap to the provided buffer (low-level, allocation-free)
     /// Returns the number of bytes written
-    pub fn write_event_bits(&self, event_type: u16, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
+    fn write_event_bits(
+        &self,
+        event_type: u16,
+        buffer: &mut [u8],
+    ) -> Result<usize, InputBackendError> {
         let mut actual_len = 0usize;
-        
+
         let result = method_call! {
             self.get_event_bits(event_type, buffer.as_mut_ptr(), buffer.len(), &raw mut actual_len)
         };
-        into_rust_result!(result)?;
-        
-        Ok(actual_len.min(buffer.len()))
+        into_rust_result!(result,
+            result if result >= 0 => Ok(result as usize)
+        )
     }
-    
+
     /// Write property bits bitmap to the provided buffer (low-level, allocation-free)
     /// Returns the number of bytes written
-    pub fn write_property_bits(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
+    fn write_property_bits(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
         let mut actual_len = 0usize;
-        
+
         let result = method_call! {
             self.get_property_bits(buffer.as_mut_ptr(), buffer.len(), &raw mut actual_len)
         };
-        into_rust_result!(result)?;
-        
-        Ok(actual_len.min(buffer.len()))
+        into_rust_result!(result,
+            result if result >= 0 => Ok(result as usize)
+        )
     }
-
-
 }
 
 #[derive(Copy, Clone)]

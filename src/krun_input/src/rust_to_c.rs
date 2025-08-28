@@ -1,10 +1,9 @@
 use crate::{
-    InputBackend, InputBackendError, InputConfigVtable, InputDeviceIds, InputEvent,
-    InputEventsVtable, InputAbsInfo, header,
+    InputAbsInfo, InputBackend, InputBackendError, InputConfigVtable, InputDeviceIds, InputEvent,
+    InputEventsVtable, header,
 };
 // use log::error;
 use std::ffi::c_void;
-use std::marker::PhantomData;
 use std::os::fd::RawFd;
 use std::ptr;
 use std::ptr::null_mut;
@@ -29,18 +28,20 @@ pub trait InputConfigImpl {
 
     /// Write the device serial number to the provided buffer
     /// Returns the number of bytes written (excluding null terminator)  
-    /// If buffer is too small, returns the required size
     fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError>;
 
     /// Write the device IDs (vendor, product, etc.)
     fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError>;
 
     /// Write absolute axis information for a specific axis
-    fn write_abs_info(&self, axis: u16, abs_info: &mut InputAbsInfo) -> Result<(), InputBackendError>;
+    fn write_abs_info(
+        &self,
+        axis: u16,
+        abs_info: &mut InputAbsInfo,
+    ) -> Result<(), InputBackendError>;
 
     /// Write event bits bitmap for a specific event type to the provided buffer
     /// Returns the number of bytes written
-    /// If buffer is too small, returns the required size  
     fn write_event_bits(
         &self,
         event_type: u16,
@@ -49,7 +50,6 @@ pub trait InputConfigImpl {
 
     /// Write property bits bitmap to the provided buffer
     /// Returns the number of bytes written
-    /// If buffer is too small, returns the required size
     fn write_property_bits(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError>;
 }
 
@@ -57,13 +57,20 @@ pub trait IntoInputBackend<T: Sync> {
     fn into_input_backend(userdata: Option<&T>) -> InputBackend;
 }
 
-// Helper struct to pair events and config implementations
-pub struct InputBackendPair<E, C>(pub PhantomData<E>, pub PhantomData<C>);
+pub trait InputBackendProvider {
+    type EventsObject;
+    type ConfigObject;
+}
 
-impl<T: Send + Sync, E: InputEventsImpl + InputBackendNew<T>, C: InputConfigImpl + InputBackendNew<T>>
-    IntoInputBackend<T> for InputBackendPair<E, C>
+impl<
+    I,
+    UserData: Send + Sync,
+    EventsObject: InputEventsImpl + InputBackendNew<UserData>,
+    ConfigObject: InputConfigImpl + InputBackendNew<UserData>,
+> IntoInputBackend<UserData> for I
+    where I: InputBackendProvider<EventsObject=EventsObject, ConfigObject = ConfigObject>
 {
-    fn into_input_backend(userdata: Option<&T>) -> InputBackend {
+    fn into_input_backend(userdata: Option<&UserData>) -> InputBackend {
         extern "C" fn create_events_fn<T: Send + Sync, E: InputBackendNew<T>>(
             instance: *mut *mut c_void,
             userdata: *const c_void,
@@ -194,7 +201,7 @@ impl<T: Send + Sync, E: InputEventsImpl + InputBackendNew<T>, C: InputConfigImpl
             out_ids: *mut header::krun_input_device_ids,
         ) -> i32 {
             assert_ne!(out_ids, null_mut());
-            
+
             let ids_ref = unsafe { &mut *out_ids };
             match cast_config_instance::<C>(instance).write_device_ids(ids_ref) {
                 Ok(()) => 0,
@@ -208,7 +215,7 @@ impl<T: Send + Sync, E: InputEventsImpl + InputBackendNew<T>, C: InputConfigImpl
             out_abs_info: *mut header::krun_input_absinfo,
         ) -> i32 {
             assert_ne!(out_abs_info, null_mut());
-            
+
             let abs_info_ref = unsafe { &mut *out_abs_info };
             match cast_config_instance::<C>(instance).write_abs_info(axis, abs_info_ref) {
                 Ok(()) => 0,
@@ -264,21 +271,21 @@ impl<T: Send + Sync, E: InputEventsImpl + InputBackendNew<T>, C: InputConfigImpl
             create_userdata: userdata.map_or(null_mut(), |t| {
                 ptr::from_ref(t) as *const c_void as *mut c_void
             }),
-            create_events: Some(create_events_fn::<T, E>),
-            create_config: Some(create_config_fn::<T, C>),
+            create_events: Some(create_events_fn::<UserData, EventsObject>),
+            create_config: Some(create_config_fn::<UserData, ConfigObject>),
             events_vtable: InputEventsVtable {
-                destroy: Some(destroy_fn::<E>),
-                get_ready_efd: Some(get_ready_efd_fn::<E>),
-                next_event: Some(next_event_fn::<E>),
+                destroy: Some(destroy_fn::<EventsObject>),
+                get_ready_efd: Some(get_ready_efd_fn::<EventsObject>),
+                next_event: Some(next_event_fn::<EventsObject>),
             },
             config_vtable: InputConfigVtable {
-                destroy: Some(destroy_fn::<C>),
-                get_device_name: Some(get_device_name_fn::<C>),
-                get_device_serial: Some(get_device_serial_fn::<C>),
-                get_device_ids: Some(get_device_ids_fn::<C>),
-                get_abs_info: Some(get_abs_info_fn::<C>),
-                get_event_bits: Some(get_event_bits_fn::<C>),
-                get_property_bits: Some(get_property_bits_fn::<C>),
+                destroy: Some(destroy_fn::<ConfigObject>),
+                get_device_name: Some(get_device_name_fn::<ConfigObject>),
+                get_device_serial: Some(get_device_serial_fn::<ConfigObject>),
+                get_device_ids: Some(get_device_ids_fn::<ConfigObject>),
+                get_abs_info: Some(get_abs_info_fn::<ConfigObject>),
+                get_event_bits: Some(get_event_bits_fn::<ConfigObject>),
+                get_property_bits: Some(get_property_bits_fn::<ConfigObject>),
             },
         }
     }

@@ -269,6 +269,7 @@ int main(int argc, char *const argv[])
     }
 
     // Map port 18000 in the host to 8000 in the guest (if networking uses TSI)
+    /*
     if (cmdline.net_mode == NET_MODE_TSI) {
         if (err = krun_set_port_map(ctx_id, &port_map[0])) {
             errno = -err;
@@ -296,7 +297,7 @@ int main(int argc, char *const argv[])
                 return -1;
             }
         }
-    }
+    }*/
 
     // Configure the rlimits that will be set in the guest
     if (err = krun_set_rlimits(ctx_id, &rlimits[0])) {
@@ -316,6 +317,13 @@ int main(int argc, char *const argv[])
     if (err = krun_set_exec(ctx_id, cmdline.guest_argv[0], (const char* const*) &cmdline.guest_argv[1], &envp[0])) {
         errno = -err;
         perror("Error configuring the parameters for the executable to be run");
+        return -1;
+    }
+
+    uint8_t mac[] = {0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee};
+    if (err = krun_add_net_tap(ctx_id, "mytap", mac, NET_FEATURE_CSUM | NET_FEATURE_GUEST_CSUM | NET_FEATURE_GUEST_TSO4 | NET_FEATURE_GUEST_TSO6 | NET_FEATURE_GUEST_UFO, 0)) {
+        errno = -err;
+        perror("Error configuring the tap");
         return -1;
     }
 

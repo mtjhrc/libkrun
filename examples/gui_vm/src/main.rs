@@ -1,19 +1,23 @@
 use clap::Parser;
 use clap_derive::Parser;
-use gtk_display::DisplayBackendHandle;
+use gtk_display::{DisplayBackendHandle, InputBackendHandle};
 use krun_sys::{
-    krun_add_display, krun_add_input_device, krun_create_ctx, krun_display_set_dpi, krun_display_set_physical_size,
-    krun_display_set_refresh_rate, krun_set_display_backend, krun_set_exec, krun_set_gpu_options,
-    krun_set_log_level, krun_set_root, krun_start_enter, VIRGLRENDERER_RENDER_SERVER,
-    VIRGLRENDERER_THREAD_SYNC, VIRGLRENDERER_USE_ASYNC_FENCE_CB, VIRGLRENDERER_USE_EGL,
-    VIRGLRENDERER_VENUS,
+    krun_add_display, krun_add_input_device, krun_create_ctx, krun_display_set_dpi,
+    krun_display_set_physical_size, krun_display_set_refresh_rate, krun_set_display_backend,
+    krun_set_exec, krun_set_gpu_options2, krun_set_log_level, krun_set_passt_fd, krun_set_root,
+    krun_set_vm_config, krun_start_enter, VIRGLRENDERER_RENDER_SERVER, VIRGLRENDERER_THREAD_SYNC,
+    VIRGLRENDERER_USE_ASYNC_FENCE_CB, VIRGLRENDERER_USE_EGL, VIRGLRENDERER_VENUS,
 };
-use krun_input::{InputEvent, InputDeviceIds, InputBackendPair, IntoInputBackend, InputEventsImpl, InputConfigImpl, InputBackendNew, InputBackendError, InputAbsInfo};
+// Input functionality is handled through the gtk_display module
 use log::LevelFilter;
 use regex::{Captures, Regex};
 use std::ffi::{c_void, CString};
 use std::fmt::Display;
+use std::fs::File;
 use std::mem::size_of_val;
+use std::net::SocketAddr;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixStream;
 use std::process::exit;
 use std::ptr::null;
 use std::str::FromStr;
@@ -21,81 +25,6 @@ use std::sync::LazyLock;
 use std::thread;
 
 mod krun_utils;
-
-// Stubbed input backend implementation for testing using krun_input crate
-mod stub_input_backend {
-    use super::*;
-    use std::os::fd::RawFd;
-    
-    pub struct StubEvents;
-    pub struct StubConfig;
-    
-    // Implement InputBackendNew for StubEvents
-    impl InputBackendNew<()> for StubEvents {
-        fn new(_userdata: Option<&()>) -> Self {
-            StubEvents
-        }
-    }
-    
-    // Implement InputBackendNew for StubConfig  
-    impl InputBackendNew<()> for StubConfig {
-        fn new(_userdata: Option<&()>) -> Self {
-            StubConfig
-        }
-    }
-    
-    impl InputEventsImpl for StubEvents {
-        fn get_ready_efd(&self) -> Result<RawFd, InputBackendError> {
-            // Return an error to indicate not ready
-            Err(InputBackendError::MethodNotSupported)
-        }
-        
-        fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError> {
-            // No events available
-            Ok(None)
-        }
-    }
-    
-    impl InputConfigImpl for StubConfig {
-        fn write_device_name(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-            let name = b"Stubbed Input Device";
-            let copy_len = name.len().min(buffer.len());
-            buffer[..copy_len].copy_from_slice(&name[..copy_len]);
-            Ok(copy_len)
-        }
-        
-        fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-            let serial = b"STUB001";
-            let copy_len = serial.len().min(buffer.len());
-            buffer[..copy_len].copy_from_slice(&serial[..copy_len]);
-            Ok(copy_len)
-        }
-        
-        fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
-            ids.bustype = 0x03;
-            ids.vendor = 0x1234;
-            ids.product = 0x5678;
-            ids.version = 0x0100;
-            Ok(())
-        }
-        
-        fn write_abs_info(&self, _axis: u16, _abs_info: &mut InputAbsInfo) -> Result<(), InputBackendError> {
-            Err(InputBackendError::MethodNotSupported) // No absolute axis info
-        }
-        
-        fn write_event_bits(&self, _event_type: u16, _buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-            Err(InputBackendError::MethodNotSupported) // No event bits
-        }
-        
-        fn write_property_bits(&self, _buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-            Err(InputBackendError::MethodNotSupported) // No property bits
-        }
-    }
-    
-    pub fn create_stub_input_backend() -> InputBackendPair<StubEvents, StubConfig> {
-        InputBackendPair(std::marker::PhantomData, std::marker::PhantomData)
-    }
-}
 
 #[derive(Debug, Copy, Clone)]
 pub enum PhysicalSize {
@@ -170,18 +99,31 @@ struct Args {
     display: Vec<DisplayArg>,
 }
 
-fn krun_thread(args: &Args, display_backend_handle: DisplayBackendHandle) -> anyhow::Result<()> {
+fn krun_thread(
+    args: &Args,
+    display_backend_handle: DisplayBackendHandle,
+    input_backend_handle: InputBackendHandle,
+) -> anyhow::Result<()> {
     unsafe {
         krun_call!(krun_set_log_level(3))?;
         let ctx = krun_call_u32!(krun_create_ctx())?;
 
-        krun_call!(krun_set_gpu_options(
+        krun_call!(krun_set_vm_config(ctx, 4, 4096))?;
+
+        krun_call!(krun_set_passt_fd(
+            ctx,
+            UnixStream::connect("/tmp/passt_1.socket")
+                .unwrap()
+                .into_raw_fd()
+        ))?;
+        krun_call!(krun_set_gpu_options2(
             ctx,
             VIRGLRENDERER_USE_EGL
                 | VIRGLRENDERER_VENUS
                 | VIRGLRENDERER_RENDER_SERVER
                 | VIRGLRENDERER_THREAD_SYNC
-                | VIRGLRENDERER_USE_ASYNC_FENCE_CB
+                | VIRGLRENDERER_USE_ASYNC_FENCE_CB,
+            4096
         ))?;
 
         if let Some(root_dir) = &args.root_dir {
@@ -221,31 +163,31 @@ fn krun_thread(args: &Args, display_backend_handle: DisplayBackendHandle) -> any
             &raw const display_backend as *const c_void,
             size_of_val(&display_backend),
         ))?;
-        
-        // Add a stubbed input device for testing
-        let _input_backend_pair = stub_input_backend::create_stub_input_backend();
-        let input_backend = <InputBackendPair<stub_input_backend::StubEvents, stub_input_backend::StubConfig> as IntoInputBackend<()>>::into_input_backend(None);
+
+        let input_backend = input_backend_handle.get();
         krun_call!(krun_add_input_device(
             ctx,
             &raw const input_backend as *const c_void,
             size_of_val(&input_backend),
         ))?;
-        
+
         krun_call!(krun_start_enter(ctx))?;
     };
     Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::builder().filter_level(LevelFilter::Info).init();
+    env_logger::builder()
+        .filter_level(LevelFilter::Debug)
+        .init();
     let args = Args::parse();
 
-    let (display_backend, display_worker) =
-        gtk_display::crate_display("libkrun examples/gui_vm".to_string());
+    let (display_backend, input_backend, display_worker) =
+        gtk_display::create_display_with_input("libkrun examples/gui_vm".to_string());
 
     thread::scope(|s| {
         s.spawn(|| {
-            if let Err(e) = krun_thread(&args, display_backend) {
+            if let Err(e) = krun_thread(&args, display_backend, input_backend) {
                 eprintln!("{e}");
                 exit(1);
             }

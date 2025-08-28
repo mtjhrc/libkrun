@@ -1,18 +1,19 @@
+use std::cmp::max;
 use std::thread::JoinHandle;
 
 use log::{debug, error};
 use utils::eventfd::EventFd;
-use vm_memory::{ByteValued, GuestMemoryMmap};
+use vm_memory::{ByteValued, Bytes, GuestMemoryMmap};
 
-use super::super::{
-    ActivateError, ActivateResult, DeviceState, Queue as VirtQueue, VirtioDevice,
-};
+use super::super::{ActivateError, ActivateResult, DeviceState, Queue as VirtQueue, VirtioDevice};
 use super::worker::InputWorker;
 use super::{defs, defs::uapi, InputError};
 use crate::legacy::IrqChip;
 
-use krun_input::{InputBackendWrapper, InputConfigInstance, InputDeviceIds, InputAbsInfo};
 use crate::virtio::InterruptTransport;
+use krun_input::{
+    InputAbsInfo, InputBackendWrapper, InputConfigImpl, InputConfigInstance, InputDeviceIds,
+};
 
 // Simple struct for VirtIO input device configuration
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +24,12 @@ pub struct virtio_input_config {
     pub reserved: [u8; 5],
     pub payload: [u8; 128],
 }
+
+/*
+union VirtioInputConfig {
+    cfg: virtio_input_config,
+    raw_bytes: virtio_input_config,
+}*/
 
 unsafe impl ByteValued for virtio_input_config {}
 
@@ -56,12 +63,12 @@ impl virtio_input_device_ids {
             version,
         }
     }
-    
+
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
             std::slice::from_raw_parts(
                 self as *const Self as *const u8,
-                std::mem::size_of::<Self>()
+                std::mem::size_of::<Self>(),
             )
         }
     }
@@ -79,14 +86,20 @@ pub struct virtio_input_absinfo {
 
 impl virtio_input_absinfo {
     pub fn new(min: u32, max: u32, fuzz: u32, flat: u32) -> Self {
-        Self { min, max, fuzz, flat, res: 0 }
+        Self {
+            min,
+            max,
+            fuzz,
+            flat,
+            res: 0,
+        }
     }
-    
+
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
             std::slice::from_raw_parts(
                 self as *const Self as *const u8,
-                std::mem::size_of::<Self>()
+                std::mem::size_of::<Self>(),
             )
         }
     }
@@ -115,10 +128,10 @@ pub struct Input {
     device_state: DeviceState,
     cfg: virtio_input_config,
     backend: InputBackendWrapper<'static>,
+    config_instance: InputConfigInstance,
 
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
-    intc: Option<IrqChip>,
 }
 
 impl Input {
@@ -144,10 +157,9 @@ impl Input {
             backend: backend_wrapper,
             device_state: DeviceState::Inactive,
             cfg,
+            config_instance: backend_wrapper.create_config_instance().expect("TODO"),
             worker_thread: None,
-            worker_stopfd: EventFd::new(libc::EFD_NONBLOCK)
-                .map_err(InputError::EventFd)?,
-            intc: None,
+            worker_stopfd: EventFd::new(libc::EFD_NONBLOCK).map_err(InputError::EventFd)?,
         })
     }
 
@@ -163,102 +175,109 @@ impl Input {
         defs::INPUT_DEV_ID
     }
 
-    pub fn set_intc(&mut self, intc: IrqChip) {
-        self.intc = Some(intc);
-    }
-
-    fn ensure_config_instance(&mut self) -> Option<InputConfigInstance> {
-        match self.backend.create_config_instance() {
-            Ok(instance) => Some(instance),
-            Err(e) => {
-                error!("Failed to create config instance: {:?}", e);
-                None
-            }
-        }
-    }
-
     fn update_config(&mut self, select: u8, subsel: u8) -> virtio_input_config {
         use crate::virtio::input::defs::config_select;
 
         self.cfg.select = select;
         self.cfg.subsel = subsel;
 
-        if let Some(config_instance) = self.ensure_config_instance() {
-            match select {
-                config_select::VIRTIO_INPUT_CFG_ID_NAME => {
-                    if let Ok(len) = config_instance.write_device_name(&mut self.cfg.payload) {
-                        self.cfg.size = len as u8;
-                    }
-                }
-                config_select::VIRTIO_INPUT_CFG_ID_SERIAL => {
-                    if let Ok(len) = config_instance.write_device_serial(&mut self.cfg.payload) {
-                        self.cfg.size = len as u8;
-                    }
-                }
-                config_select::VIRTIO_INPUT_CFG_ID_DEVIDS => {
-                    let mut device_ids = InputDeviceIds {
-                        bustype: 0,
-                        vendor: 0,
-                        product: 0,
-                        version: 0,
-                    };
-                    if config_instance.write_device_ids(&mut device_ids).is_ok() {
-                        // Convert to byte representation for VirtIO config
-                        let device_ids_bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &device_ids as *const _ as *const u8,
-                                std::mem::size_of::<InputDeviceIds>()
-                            )
-                        };
-                        self.cfg.payload[..device_ids_bytes.len()].copy_from_slice(device_ids_bytes);
-                        self.cfg.size = device_ids_bytes.len() as u8;
-                    }
-                }
-                config_select::VIRTIO_INPUT_CFG_PROP_BITS => {
-                    if let Ok(len) = config_instance.write_property_bits(&mut self.cfg.payload) {
-                        // Find the minimum size needed by finding the last non-zero byte
-                        self.cfg.size = self.cfg.payload[..len].iter()
-                            .rposition(|&v| v != 0)
-                            .map_or(0, |i| i + 1) as u8;
-                    }
-                }
-                config_select::VIRTIO_INPUT_CFG_EV_BITS => {
-                    if let Ok(len) = config_instance.write_event_bits(subsel as u16, &mut self.cfg.payload) {
-                        // Find the minimum size needed by finding the last non-zero byte
-                        self.cfg.size = self.cfg.payload[..len].iter()
-                            .rposition(|&v| v != 0)
-                            .map_or(0, |i| i + 1) as u8;
-                    }
-                }
-                config_select::VIRTIO_INPUT_CFG_ABS_INFO => {
-                    let mut abs_info = InputAbsInfo {
-                        min: 0,
-                        max: 0,
-                        fuzz: 0,
-                        flat: 0,
-                        res: 0,
-                    };
-                    if config_instance.write_abs_info(subsel as u16, &mut abs_info).is_ok() {
-                        // Convert to byte representation for VirtIO config
-                        let abs_info_bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &abs_info as *const _ as *const u8,
-                                std::mem::size_of::<InputAbsInfo>()
-                            )
-                        };
-                        self.cfg.payload[..abs_info_bytes.len()].copy_from_slice(abs_info_bytes);
-                        self.cfg.size = abs_info_bytes.len() as u8;
-                    }
-                }
-                config_select::VIRTIO_INPUT_CFG_UNSET => {
-                    // No action required per the spec
-                }
-                _ => {
-                    warn!("Unsupported virtio input config selection: {}", select);
+        match select {
+            config_select::VIRTIO_INPUT_CFG_ID_NAME => {
+                if let Ok(len) = self
+                    .config_instance
+                    .write_device_name(&mut self.cfg.payload)
+                {
+                    self.cfg.size = len as u8;
                 }
             }
+            config_select::VIRTIO_INPUT_CFG_ID_SERIAL => {
+                if let Ok(len) = self
+                    .config_instance
+                    .write_device_serial(&mut self.cfg.payload)
+                {
+                    self.cfg.size = len as u8;
+                }
+            }
+            config_select::VIRTIO_INPUT_CFG_ID_DEVIDS => {
+                let mut device_ids = InputDeviceIds {
+                    bustype: 0,
+                    vendor: 0,
+                    product: 0,
+                    version: 0,
+                };
+                if self
+                    .config_instance
+                    .write_device_ids(&mut device_ids)
+                    .is_ok()
+                {
+                    // Convert to byte representation for VirtIO config
+                    let device_ids_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            &device_ids as *const _ as *const u8,
+                            std::mem::size_of::<InputDeviceIds>(),
+                        )
+                    };
+                    self.cfg.payload[..device_ids_bytes.len()].copy_from_slice(device_ids_bytes);
+                    self.cfg.size = device_ids_bytes.len() as u8;
+                }
+            }
+            config_select::VIRTIO_INPUT_CFG_PROP_BITS => {
+                if let Ok(len) = self
+                    .config_instance
+                    .write_property_bits(&mut self.cfg.payload)
+                {
+                    // Find the minimum size needed by finding the last non-zero byte
+                    self.cfg.size = self.cfg.payload[..len]
+                        .iter()
+                        .rposition(|&v| v != 0)
+                        .map_or(0, |i| i + 1) as u8;
+                }
+            }
+            config_select::VIRTIO_INPUT_CFG_EV_BITS => {
+                if let Ok(len) = self
+                    .config_instance
+                    .write_event_bits(subsel as u16, &mut self.cfg.payload)
+                {
+                    // Find the minimum size needed by finding the last non-zero byte
+                    self.cfg.size = self.cfg.payload[..len]
+                        .iter()
+                        .rposition(|&v| v != 0)
+                        .map_or(0, |i| i + 1) as u8;
+                }
+            }
+            config_select::VIRTIO_INPUT_CFG_ABS_INFO => {
+                let mut abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 0,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 0,
+                };
+                if self
+                    .config_instance
+                    .write_abs_info(subsel as u16, &mut abs_info)
+                    .is_ok()
+                {
+                    // Convert to byte representation for VirtIO config
+                    let abs_info_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            &abs_info as *const _ as *const u8,
+                            std::mem::size_of::<InputAbsInfo>(),
+                        )
+                    };
+                    self.cfg.payload[..abs_info_bytes.len()].copy_from_slice(abs_info_bytes);
+                    self.cfg.size = abs_info_bytes.len() as u8;
+                }
+            }
+            config_select::VIRTIO_INPUT_CFG_UNSET => {
+                // No action required per the spec
+            }
+            _ => {
+                warn!("Unsupported virtio input config selection: {}", select);
+            }
         }
-        
+        dbg!(self.cfg);
+
         self.cfg
     }
 }
@@ -297,12 +316,11 @@ impl VirtioDevice for Input {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        debug!("input: read_config: offset={offset}");
         let cfg = self.cfg.as_slice();
         let cfg_len = cfg.len();
         let offset = offset as usize;
         let data_len = data.len();
-        
+
         let read_len = std::cmp::min(cfg_len - offset, data_len);
         if read_len > 0 {
             data[..read_len].copy_from_slice(&cfg[offset..offset + read_len]);
@@ -317,12 +335,26 @@ impl VirtioDevice for Input {
 
         // TODO: don't panic here, on out-of-bounds
         // We only allow overriding the first 2 bytes - the select and subsel!
-        let cfg_slice = self.cfg.as_mut_slice();
-        let copy_len = std::cmp::min(2 - offset, data.len());
-        if copy_len > 0 {
-            cfg_slice[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
+        if offset == 0 {
+            if data.len() >= 1 {
+                self.cfg.select = data[0];
+            }
+            if data.len() >= 2 {
+                self.cfg.subsel = data[1];
+            }
+        } else if offset == 1 {
+            if data.len() >= 1 {
+                self.cfg.select = data[0];
+            }
         }
 
+        /*let cfg_slice = self.cfg.as_bytes();
+        // FIXME make this more robust
+        cfg_slice.write_slice(data, offset).unwrap();*/
+
+        //cfg_slice[offset..offset + data.len()].copy_from_slice(&data);
+        //dbg!(&cfg_slice[offset..offset + data.len()]);
+        dbg!(old_select, self.cfg.select, old_subsel, self.cfg.subsel, offset, data);
         if old_select != self.cfg.select || old_subsel != self.cfg.subsel {
             // Build config using the backend
             self.cfg = self.update_config(self.cfg.select, self.cfg.subsel);
@@ -340,9 +372,9 @@ impl VirtioDevice for Input {
         }
 
         let worker = InputWorker::new(
-            self.queues[0].clone(),  // Event queue (device -> guest)
+            self.queues[0].clone(), // Event queue (device -> guest)
             self.queue_events[0].try_clone().unwrap(),
-            self.queues[1].clone(),  // Status queue (guest -> device)
+            self.queues[1].clone(), // Status queue (guest -> device)
             self.queue_events[1].try_clone().unwrap(),
             interrupt.clone(),
             mem.clone(),
