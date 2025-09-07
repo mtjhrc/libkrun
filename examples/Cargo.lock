@@ -712,6 +712,7 @@ version = "0.1.0"
 dependencies = [
  "bindgen 0.72.0",
  "bitflags 2.9.1",
+ "libc",
  "log",
  "static_assertions",
  "thiserror",

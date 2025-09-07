@@ -1,7 +1,12 @@
 mod rust_to_c;
+
 pub use rust_to_c::*;
+use std::cmp::max;
+use std::ffi::c_void;
 mod c_to_rust;
-pub use c_to_rust::*;
+pub use c_to_rust::{
+    InputConfigBackend, InputConfigInstance, InputEventProviderBackend, InputEventProviderInstance,
+};
 
 use thiserror::Error;
 
@@ -33,15 +38,15 @@ pub enum InputBackendError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum InputEventType {
-    Syn = 0x00,     // EV_SYN
-    Key = 0x01,     // EV_KEY
-    Rel = 0x02,     // EV_REL
-    Abs = 0x03,     // EV_ABS
-    Msc = 0x04,     // EV_MSC
-    Sw = 0x05,      // EV_SW
-    Led = 0x11,     // EV_LED
-    Snd = 0x12,     // EV_SND
-    Rep = 0x14,     // EV_REP
+    Syn = 0x00, // EV_SYN
+    Key = 0x01, // EV_KEY
+    Rel = 0x02, // EV_REL
+    Abs = 0x03, // EV_ABS
+    Msc = 0x04, // EV_MSC
+    Sw = 0x05,  // EV_SW
+    Led = 0x11, // EV_LED
+    Snd = 0x12, // EV_SND
+    Rep = 0x14, // EV_REP
 }
 
 impl TryFrom<u16> for InputEventType {
@@ -63,15 +68,40 @@ impl TryFrom<u16> for InputEventType {
     }
 }
 
-impl Into<u16> for InputEventType {
-    fn into(self) -> u16 {
-        self as u16
+impl From<InputEventType> for u16 {
+    fn from(val: InputEventType) -> Self {
+        val as u16
     }
 }
 
 pub type InputEvent = header::krun_input_event;
 pub type InputDeviceIds = header::krun_input_device_ids;
 pub type InputAbsInfo = header::krun_input_absinfo;
-pub type InputEventsVtable = header::krun_input_events_vtable;
-pub type InputConfigVtable = header::krun_input_config_vtable;
-pub type InputBackend = header::krun_input_backend;
+pub type InputDeviceConfig = header::krun_input_device_config;
+pub type InputVtable = header::krun_input_vtable;
+
+// Explicit bindings for krun_input_config
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KrunInputConfig {
+    pub features: u64,
+    pub create_userdata: *const c_void,
+    pub create: Option<header::krun_input_config_create_fn>,
+    pub vtable: header::krun_input_config_vtable,
+}
+
+/// Writes the specific bits in bitmap, given the indices of the bits
+/// Return the "length" of the newly constructed bitmap
+pub fn write_bitmap(bitmap: &mut [u8], active_bits: &[u16]) -> u8 {
+    let mut max_byte: u8 = 0;
+    for idx in active_bits {
+        let byte_pos = (idx / 8).try_into().unwrap();
+        let additional_bit = 1 << (idx % 8);
+        if byte_pos as usize > bitmap.len() {
+            panic!("Bit index {idx} out of bounds");
+        }
+        bitmap[byte_pos as usize] |= additional_bit;
+        max_byte = max(max_byte, byte_pos);
+    }
+    max_byte.checked_add(1).unwrap()
+}

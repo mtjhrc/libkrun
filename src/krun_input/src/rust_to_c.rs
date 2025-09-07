@@ -1,291 +1,269 @@
-use crate::{
-    InputAbsInfo, InputBackend, InputBackendError, InputConfigVtable, InputDeviceIds, InputEvent,
-    InputEventsVtable, header,
-};
-// use log::error;
+use crate::{InputAbsInfo, InputBackendError, InputConfigBackend, InputDeviceIds, InputEvent, InputEventProviderBackend};
 use std::ffi::c_void;
+use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
+use std::path::PathBuf;
 use std::ptr;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
+use crate::header::{krun_input_config_vtable, krun_input_vtable};
 
-pub trait InputBackendNew<T: Send + Sync> {
+pub trait ObjectNew<T: Sync> {
     fn new(userdata: Option<&T>) -> Self;
+}
+
+// Remove InputConfigNew - we'll use InputBackendNew<()> for static configs
+
+pub trait InputQueryConfig {
+    /// Query device name into provided buffer
+    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError>;
+
+    /// Query device name into provided buffer
+    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError>;
+
+    /// Query device IDs into provided structure  
+    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<u8, InputBackendError>;
+
+    /// Query event capabilities bitmap for specific event type into provided buffer
+    fn query_event_capabilities(
+        &self,
+        event_type: u8,
+        bitmap_buf: &mut [u8],
+    ) -> Result<u8, InputBackendError>;
+
+    /// Query absolute axis information into provided structure
+    fn query_abs_info(
+        &self,
+        abs_axis: u8,
+        abs_info: &mut InputAbsInfo,
+    ) -> Result<u8, InputBackendError>;
+
+    /// Query device properties into provided u32
+    fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError>;
 }
 
 pub trait InputEventsImpl {
     /// Get the file descriptor that becomes ready when input events are available
-    fn get_ready_efd(&self) -> Result<RawFd, InputBackendError>;
+    fn get_read_notify_fd(&self) -> Result<RawFd, InputBackendError>;
 
     /// Fetch the next available input event, returns None if no events are available
     fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError>;
 }
 
-pub trait InputConfigImpl {
-    /// Write the device name to the provided buffer
-    /// Returns the number of bytes written (excluding null terminator)
-    /// If buffer is too small, returns the required size
-    fn write_device_name(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError>;
-
-    /// Write the device serial number to the provided buffer
-    /// Returns the number of bytes written (excluding null terminator)  
-    fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError>;
-
-    /// Write the device IDs (vendor, product, etc.)
-    fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError>;
-
-    /// Write absolute axis information for a specific axis
-    fn write_abs_info(
-        &self,
-        axis: u16,
-        abs_info: &mut InputAbsInfo,
-    ) -> Result<(), InputBackendError>;
-
-    /// Write event bits bitmap for a specific event type to the provided buffer
-    /// Returns the number of bytes written
-    fn write_event_bits(
-        &self,
-        event_type: u16,
-        buffer: &mut [u8],
-    ) -> Result<usize, InputBackendError>;
-
-    /// Write property bits bitmap to the provided buffer
-    /// Returns the number of bytes written
-    fn write_property_bits(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError>;
+pub trait IntoInputConfig<T: Sync> {
+    fn into_input_config(userdata: Option<&T>) -> InputConfigBackend;
 }
 
-pub trait IntoInputBackend<T: Sync> {
-    fn into_input_backend(userdata: Option<&T>) -> InputBackend;
-}
-
-pub trait InputBackendProvider {
-    type EventsObject;
-    type ConfigObject;
-}
-
-impl<
-    I,
-    UserData: Send + Sync,
-    EventsObject: InputEventsImpl + InputBackendNew<UserData>,
-    ConfigObject: InputConfigImpl + InputBackendNew<UserData>,
-> IntoInputBackend<UserData> for I
-    where I: InputBackendProvider<EventsObject=EventsObject, ConfigObject = ConfigObject>
+// Single implementation that handles both static and dynamic config backends
+impl<I, UserData: Send + Sync> IntoInputConfig<UserData> for I
+where
+    I: InputQueryConfig + ObjectNew<UserData>,
 {
-    fn into_input_backend(userdata: Option<&UserData>) -> InputBackend {
-        extern "C" fn create_events_fn<T: Send + Sync, E: InputBackendNew<T>>(
+    fn into_input_config(userdata: Option<&UserData>) -> crate::InputConfigBackend {
+        extern "C" fn create_config_fn<T: Sync, I: InputQueryConfig + ObjectNew<T>>(
             instance: *mut *mut c_void,
             userdata: *const c_void,
             _reserved: *const c_void,
         ) -> i32 {
-            unsafe {
-                assert_ne!(
-                    instance,
-                    null_mut(),
-                    "Pointer to location where to create instance cannot be null"
-                );
-                let userdata_ref = (userdata as *const T).as_ref();
-                *(instance as *mut *mut E) = Box::into_raw(Box::new(E::new(userdata_ref)));
-            }
+            let actual_userdata = if userdata.is_null() {
+                None
+            } else {
+                Some(unsafe { &*(userdata as *const T) })
+            };
+
+            let config_obj = I::new(actual_userdata);
+            let boxed_config = Box::into_raw(Box::new(config_obj));
+            unsafe { *instance = boxed_config as *mut c_void };
             0
         }
 
-        extern "C" fn create_config_fn<T: Send + Sync, C: InputBackendNew<T>>(
+        extern "C" fn config_destroy_fn<I>(instance: *mut c_void) -> i32 {
+            if instance.is_null() {
+                return 0;
+            }
+            let _ = unsafe { Box::from_raw(instance as *mut I) };
+            0
+        }
+
+        extern "C" fn query_device_name_fn<T: Sync, I: InputQueryConfig + ObjectNew<T>>(
+            instance: *mut c_void,
+            name_buf: *mut u8,
+            name_buf_len: usize,
+        ) -> i32 {
+            let config_obj = unsafe { &*(instance as *const I) };
+            let name_buf_slice =
+                unsafe { std::slice::from_raw_parts_mut(name_buf, name_buf_len) };
+
+            match config_obj.query_device_name(name_buf_slice) {
+                Ok(len) => len as i32,
+                Err(e) => e as i32,
+            }
+        }
+
+        extern "C" fn query_serial_name_fn<T: Sync, I: InputQueryConfig + ObjectNew<T>>(
+            instance: *mut c_void,
+            name_buf: *mut u8,
+            name_buf_len: usize,
+        ) -> i32 {
+            let config_obj = unsafe { &*(instance as *const I) };
+            let name_buf_slice =
+                unsafe { std::slice::from_raw_parts_mut(name_buf, name_buf_len) };
+
+            match config_obj.query_serial_name(name_buf_slice) {
+                Ok(len) => len as i32,
+                Err(e) => e as i32,
+            }
+        }
+
+        extern "C" fn query_device_ids_fn<T: Sync, I: InputQueryConfig + ObjectNew<T>>(
+            instance: *mut c_void,
+            ids: *mut InputDeviceIds,
+        ) -> i32 {
+            let config_obj = unsafe { &*(instance as *const I) };
+            let ids = unsafe { &mut *ids };
+
+            match config_obj.query_device_ids(ids) {
+                Ok(len) => len as i32,
+                Err(e) => e as i32,
+            }
+        }
+
+        extern "C" fn query_event_capabilities_fn<
+            T: Sync,
+            I: InputQueryConfig + ObjectNew<T>,
+        >(
+            instance: *mut c_void,
+            event_type: u8,
+            bitmap_buf: *mut u8,
+            bitmap_buf_len: usize,
+        ) -> i32 {
+            let config_obj = unsafe { &*(instance as *const I) };
+            let bitmap_buf_slice =
+                unsafe { std::slice::from_raw_parts_mut(bitmap_buf, bitmap_buf_len) };
+
+            match config_obj.query_event_capabilities(event_type, bitmap_buf_slice) {
+                Ok(len) => len as i32,
+                Err(e) => e as i32,
+            }
+        }
+
+        extern "C" fn query_abs_info_fn<T: Sync, I: InputQueryConfig + ObjectNew<T>>(
+            instance: *mut c_void,
+            abs_axis: u8,
+            abs_info: *mut InputAbsInfo,
+        ) -> i32 {
+            let config_obj = unsafe { &*(instance as *const I) };
+            let abs_info = unsafe { &mut *abs_info };
+
+            match config_obj.query_abs_info(abs_axis, abs_info) {
+                Ok(len) => len as i32,
+                Err(e) => e as i32,
+            }
+        }
+
+        extern "C" fn query_properties_fn<T: Sync, I: InputQueryConfig + ObjectNew<T>>(
+            instance: *mut c_void,
+            bitmap_buf: *mut u8,
+            bitmap_buf_len: usize,
+        ) -> i32 {
+            let config_obj = unsafe { &*(instance as *const I) };
+            let bitmap_buf_slice =
+                unsafe { std::slice::from_raw_parts_mut(bitmap_buf, bitmap_buf_len) };
+
+            match config_obj.query_properties(bitmap_buf_slice) {
+                Ok(len) => len as i32,
+                Err(e) => e as i32,
+            }
+        }
+
+        let x = userdata.map_or(null(), |t| ptr::from_ref(t) as *const c_void);
+
+        InputConfigBackend {
+            features: 0,
+            create_userdata: x,
+            create_userdata_lifetime: PhantomData,
+            create_fn: Some(create_config_fn::<UserData, I>),
+            vtable: krun_input_config_vtable {
+                destroy: Some(config_destroy_fn::<I>),
+                query_device_name: Some(query_serial_name_fn::<UserData, I>),
+                query_serial_name: Some(query_serial_name_fn::<UserData, I>),
+                query_device_ids: Some(query_device_ids_fn::<UserData, I>),
+                query_event_capabilities: Some(query_event_capabilities_fn::<UserData, I>),
+                query_abs_info: Some(query_abs_info_fn::<UserData, I>),
+                query_properties: Some(query_properties_fn::<UserData, I>),
+            },
+        }
+    }
+}
+
+pub trait IntoInputEvents<T: Sync> {
+    fn into_input_events(userdata: Option<&T>) -> InputEventProviderBackend;
+}
+
+impl<I, UserData: Send + Sync> IntoInputEvents<UserData> for I
+where
+    I: InputEventsImpl + ObjectNew<UserData>,
+{
+    fn into_input_events(userdata: Option<&UserData>) -> InputEventProviderBackend {
+        extern "C" fn create_events_fn<T: Sync, I: InputEventsImpl + ObjectNew<T>>(
             instance: *mut *mut c_void,
             userdata: *const c_void,
             _reserved: *const c_void,
         ) -> i32 {
-            unsafe {
-                assert_ne!(
-                    instance,
-                    null_mut(),
-                    "Pointer to location where to create instance cannot be null"
-                );
-                let userdata_ref = (userdata as *const T).as_ref();
-                *(instance as *mut *mut C) = Box::into_raw(Box::new(C::new(userdata_ref)));
+            let actual_userdata = if userdata.is_null() {
+                None
+            } else {
+                Some(unsafe { &*(userdata as *const T) })
+            };
+
+            let events_obj = I::new(actual_userdata);
+            let boxed_events = Box::into_raw(Box::new(events_obj));
+            unsafe { *instance = boxed_events as *mut c_void };
+            0
+        }
+
+        extern "C" fn events_destroy_fn<I>(instance: *mut c_void) -> i32 {
+            if instance.is_null() {
+                return 0;
             }
+            let _ = unsafe { Box::from_raw(instance as *mut I) };
             0
         }
 
-        extern "C" fn destroy_fn<E>(instance: *mut c_void) -> i32 {
-            drop(unsafe { Box::from_raw(instance as *mut E) });
-            0
-        }
-
-        fn cast_events_instance<'a, E: InputEventsImpl>(instance: *mut c_void) -> &'a mut E {
-            assert_ne!(instance, null_mut());
-            unsafe { &mut *(instance as *mut E) }
-        }
-
-        fn cast_config_instance<'a, C: InputConfigImpl>(instance: *mut c_void) -> &'a C {
-            assert_ne!(instance, null_mut());
-            unsafe { &*(instance as *mut C) }
-        }
-
-        extern "C" fn get_ready_efd_fn<E: InputEventsImpl>(instance: *mut c_void) -> i32 {
-            match cast_events_instance::<E>(instance).get_ready_efd() {
+        extern "C" fn get_ready_efd_fn<I: InputEventsImpl>(instance: *mut c_void) -> i32 {
+            let events_obj = unsafe { &*(instance as *const I) };
+            match events_obj.get_read_notify_fd() {
                 Ok(fd) => fd,
                 Err(e) => e as i32,
             }
         }
 
-        extern "C" fn next_event_fn<E: InputEventsImpl>(
+        extern "C" fn next_event_fn<I: InputEventsImpl>(
             instance: *mut c_void,
-            out_event: *mut header::krun_input_event,
+            out_event: *mut crate::InputEvent,
         ) -> i32 {
-            assert_ne!(out_event, null_mut());
+            let events_obj = unsafe { &mut *(instance as *mut I) };
+            let out_event = unsafe { &mut *out_event };
 
-            match cast_events_instance::<E>(instance).next_event() {
+            match events_obj.next_event() {
                 Ok(Some(event)) => {
-                    unsafe {
-                        (*out_event).type_ = event.type_;
-                        (*out_event).code = event.code;
-                        (*out_event).value = event.value;
-                    }
-                    1 // Event available
+                    *out_event = event;
+                    1
                 }
-                Ok(None) => 0, // No events available
+                Ok(None) => 0,
                 Err(e) => e as i32,
             }
         }
-
-        extern "C" fn get_device_name_fn<C: InputConfigImpl>(
-            instance: *mut c_void,
-            out_name: *mut i8,
-            name_len: usize,
-        ) -> i32 {
-            assert_ne!(out_name, null_mut());
-            if name_len == 0 {
-                return -4; // KRUN_INPUT_ERR_INVALID_PARAM
-            }
-
-            let buffer = unsafe { std::slice::from_raw_parts_mut(out_name as *mut u8, name_len) };
-            match cast_config_instance::<C>(instance).write_device_name(buffer) {
-                Ok(written) => {
-                    if written < name_len {
-                        unsafe {
-                            *(out_name.add(written)) = 0;
-                        } // Null terminate if space
-                    }
-                    0
-                }
-                Err(e) => e as i32,
-            }
-        }
-
-        extern "C" fn get_device_serial_fn<C: InputConfigImpl>(
-            instance: *mut c_void,
-            out_serial: *mut i8,
-            serial_len: usize,
-        ) -> i32 {
-            assert_ne!(out_serial, null_mut());
-            if serial_len == 0 {
-                return -4; // KRUN_INPUT_ERR_INVALID_PARAM
-            }
-
-            let buffer =
-                unsafe { std::slice::from_raw_parts_mut(out_serial as *mut u8, serial_len) };
-            match cast_config_instance::<C>(instance).write_device_serial(buffer) {
-                Ok(written) => {
-                    if written < serial_len {
-                        unsafe {
-                            *(out_serial.add(written)) = 0;
-                        } // Null terminate if space
-                    }
-                    0
-                }
-                Err(e) => e as i32,
-            }
-        }
-
-        extern "C" fn get_device_ids_fn<C: InputConfigImpl>(
-            instance: *mut c_void,
-            out_ids: *mut header::krun_input_device_ids,
-        ) -> i32 {
-            assert_ne!(out_ids, null_mut());
-
-            let ids_ref = unsafe { &mut *out_ids };
-            match cast_config_instance::<C>(instance).write_device_ids(ids_ref) {
-                Ok(()) => 0,
-                Err(e) => e as i32,
-            }
-        }
-
-        extern "C" fn get_abs_info_fn<C: InputConfigImpl>(
-            instance: *mut c_void,
-            axis: u16,
-            out_abs_info: *mut header::krun_input_absinfo,
-        ) -> i32 {
-            assert_ne!(out_abs_info, null_mut());
-
-            let abs_info_ref = unsafe { &mut *out_abs_info };
-            match cast_config_instance::<C>(instance).write_abs_info(axis, abs_info_ref) {
-                Ok(()) => 0,
-                Err(e) => e as i32,
-            }
-        }
-
-        extern "C" fn get_event_bits_fn<C: InputConfigImpl>(
-            instance: *mut c_void,
-            event_type: u16,
-            out_bitmap: *mut u8,
-            bitmap_len: usize,
-            actual_len: *mut usize,
-        ) -> i32 {
-            assert_ne!(out_bitmap, null_mut());
-            assert_ne!(actual_len, null_mut());
-
-            let buffer = unsafe { std::slice::from_raw_parts_mut(out_bitmap, bitmap_len) };
-            match cast_config_instance::<C>(instance).write_event_bits(event_type, buffer) {
-                Ok(written) => {
-                    unsafe {
-                        *actual_len = written;
-                    }
-                    0
-                }
-                Err(e) => e as i32,
-            }
-        }
-
-        extern "C" fn get_property_bits_fn<C: InputConfigImpl>(
-            instance: *mut c_void,
-            out_bitmap: *mut u8,
-            bitmap_len: usize,
-            actual_len: *mut usize,
-        ) -> i32 {
-            assert_ne!(out_bitmap, null_mut());
-            assert_ne!(actual_len, null_mut());
-
-            let buffer = unsafe { std::slice::from_raw_parts_mut(out_bitmap, bitmap_len) };
-            match cast_config_instance::<C>(instance).write_property_bits(buffer) {
-                Ok(written) => {
-                    unsafe {
-                        *actual_len = written;
-                    }
-                    0
-                }
-                Err(e) => e as i32,
-            }
-        }
-
-        InputBackend {
-            features: 0, // No features defined yet
-            create_userdata: userdata.map_or(null_mut(), |t| {
-                ptr::from_ref(t) as *const c_void as *mut c_void
-            }),
-            create_events: Some(create_events_fn::<UserData, EventsObject>),
-            create_config: Some(create_config_fn::<UserData, ConfigObject>),
-            events_vtable: InputEventsVtable {
-                destroy: Some(destroy_fn::<EventsObject>),
-                get_ready_efd: Some(get_ready_efd_fn::<EventsObject>),
-                next_event: Some(next_event_fn::<EventsObject>),
-            },
-            config_vtable: InputConfigVtable {
-                destroy: Some(destroy_fn::<ConfigObject>),
-                get_device_name: Some(get_device_name_fn::<ConfigObject>),
-                get_device_serial: Some(get_device_serial_fn::<ConfigObject>),
-                get_device_ids: Some(get_device_ids_fn::<ConfigObject>),
-                get_abs_info: Some(get_abs_info_fn::<ConfigObject>),
-                get_event_bits: Some(get_event_bits_fn::<ConfigObject>),
-                get_property_bits: Some(get_property_bits_fn::<ConfigObject>),
+        let x: *const c_void = userdata.map_or(null(), |t| ptr::from_ref(t) as *const c_void);
+        InputEventProviderBackend {
+            features: 0,
+            create_userdata: x,
+            create_userdata_lifetime: PhantomData,
+            create_fn: Some(create_events_fn::<UserData, I>),
+            vtable: krun_input_vtable {
+                destroy: Some(events_destroy_fn::<I>),
+                get_ready_efd: Some(get_ready_efd_fn::<I>),
+                next_event: Some(next_event_fn::<I>),
             },
         }
     }

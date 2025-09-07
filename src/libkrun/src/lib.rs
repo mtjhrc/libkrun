@@ -13,8 +13,7 @@ use devices::virtio::CacheType;
 use env_logger::{Env, Target};
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
-#[cfg(feature = "input")]
-use krun_input::{InputBackend, InputBackendWrapper};
+
 use libc::c_char;
 #[cfg(feature = "net")]
 use libc::c_int;
@@ -62,6 +61,7 @@ use nitro::enclaves::NitroEnclave;
 
 #[cfg(feature = "gpu")]
 use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
+use krun_input::{InputConfigBackend, InputEventProviderBackend};
 #[cfg(feature = "nitro")]
 use nitro_enclaves::launch::StartFlags;
 
@@ -1350,43 +1350,56 @@ pub extern "C" fn krun_add_input_device(
 #[cfg(feature = "input")]
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
-pub extern "C" fn krun_add_input_device(
-    ctx_id: u32,
-    input_backend: *const c_void,
-    backend_size: usize,
-) -> i32 {
-    if backend_size < size_of::<InputBackend>() {
+pub extern "C" fn krun_add_input_device_fd(ctx_id: u32, input_fd: i32) -> i32 {
+    use devices::virtio::input::passthrough::PassthroughInputBackend;
+    use krun_input::{IntoInputConfig, IntoInputEvents};
+
+    if input_fd < 0 {
         return -libc::EINVAL;
     }
 
-    // SAFETY: We have checked the backend size is fine, otherwise we have to trust the user.
-    let input_backend: InputBackend =
-        unsafe { std::ptr::read_unaligned(input_backend as *const InputBackend) };
+    // FIXME: we need a better design
+    let raw_fd: &'static RawFd = Box::leak(Box::new(input_fd));
+    let config_backend = PassthroughInputBackend::into_input_config(Some(&raw_fd));
+    let events_backend = PassthroughInputBackend::into_input_events(Some(&raw_fd));
 
-    // TODO: Add verification similar to display backend if needed
-    // if !input_backend.verify() {
-    //     return -libc::EINVAL;
-    // }
+    with_cfg(ctx_id, |cfg| {
+        cfg.vmr
+            .input_backends
+            .push((config_backend, events_backend));
+        KRUN_SUCCESS
+    })
+}
 
-    let input_backend_wrapper = InputBackendWrapper {
-        features: input_backend.features,
-        create_userdata: input_backend.create_userdata,
-        create_userdata_lifetime: std::marker::PhantomData,
-        create_events_fn: input_backend.create_events,
-        create_config_fn: input_backend.create_config,
-        events_vtable: input_backend.events_vtable.into(),
-        config_vtable: input_backend.config_vtable.into(),
-    };
-
-    match CTX_MAP.lock().unwrap().entry(ctx_id) {
-        Entry::Occupied(mut ctx_cfg) => {
-            let cfg = ctx_cfg.get_mut();
-            cfg.vmr.input_backends.push(input_backend_wrapper);
-        }
-        Entry::Vacant(_) => return -libc::ENOENT,
+#[cfg(feature = "input")]
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub extern "C" fn krun_add_input_device(
+    ctx_id: u32,
+    config_backend: *const InputConfigBackend<'static>,
+    event_provider_backend: *const InputEventProviderBackend<'static>,
+    //FIXME: check lengths of objects (vtables?)
+) -> i32 {
+    if config_backend.is_null() || event_provider_backend.is_null() {
+        return -libc::EINVAL;
     }
 
-    KRUN_SUCCESS
+    let config_backend = unsafe { *config_backend };
+    let events_backend = unsafe { *event_provider_backend };
+
+    with_cfg(ctx_id, |cfg| {
+        cfg.vmr
+            .input_backends
+            .push((config_backend, events_backend));
+        KRUN_SUCCESS
+    })
+}
+
+#[cfg(not(feature = "input"))]
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub extern "C" fn krun_add_input_device_fd(_ctx_id: u32, _input_fd: i32) -> i32 {
+    -libc::ENOTSUP
 }
 
 #[cfg(feature = "gpu")]

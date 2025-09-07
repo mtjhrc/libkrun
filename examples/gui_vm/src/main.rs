@@ -1,21 +1,21 @@
 use clap::Parser;
 use clap_derive::Parser;
 use gtk_display::{DisplayBackendHandle, InputBackendHandle};
+
 use krun_sys::{
-    krun_add_display, krun_add_input_device, krun_create_ctx, krun_display_set_dpi,
-    krun_display_set_physical_size, krun_display_set_refresh_rate, krun_set_display_backend,
-    krun_set_exec, krun_set_gpu_options2, krun_set_log_level, krun_set_passt_fd, krun_set_root,
-    krun_set_vm_config, krun_start_enter, VIRGLRENDERER_RENDER_SERVER, VIRGLRENDERER_THREAD_SYNC,
-    VIRGLRENDERER_USE_ASYNC_FENCE_CB, VIRGLRENDERER_USE_EGL, VIRGLRENDERER_VENUS,
+    VIRGLRENDERER_RENDER_SERVER, VIRGLRENDERER_THREAD_SYNC, VIRGLRENDERER_USE_ASYNC_FENCE_CB,
+    VIRGLRENDERER_USE_EGL, VIRGLRENDERER_VENUS, krun_add_display, krun_add_input_device,
+    krun_create_ctx, krun_display_set_dpi, krun_display_set_physical_size,
+    krun_display_set_refresh_rate, krun_set_display_backend, krun_set_exec, krun_set_gpu_options2,
+    krun_set_log_level, krun_set_passt_fd, krun_set_root, krun_set_vm_config, krun_start_enter,
 };
-// Input functionality is handled through the gtk_display module
 use log::LevelFilter;
 use regex::{Captures, Regex};
-use std::ffi::{c_void, CString};
+use std::ffi::{CString, c_void};
 use std::fmt::Display;
-use std::fs::File;
+
 use std::mem::size_of_val;
-use std::net::SocketAddr;
+
 use std::os::fd::IntoRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::exit;
@@ -102,7 +102,7 @@ struct Args {
 fn krun_thread(
     args: &Args,
     display_backend_handle: DisplayBackendHandle,
-    input_backend_handle: InputBackendHandle,
+    input_device_handles: Vec<InputBackendHandle>,
 ) -> anyhow::Result<()> {
     unsafe {
         krun_call!(krun_set_log_level(3))?;
@@ -164,12 +164,17 @@ fn krun_thread(
             size_of_val(&display_backend),
         ))?;
 
-        let input_backend = input_backend_handle.get();
-        krun_call!(krun_add_input_device(
-            ctx,
-            &raw const input_backend as *const c_void,
-            size_of_val(&input_backend),
-        ))?;
+        // Configure all input devices
+        for handle in &input_device_handles {
+            let config_backend = handle.get_config();
+            let event_provider_backend = handle.get_events();
+
+            krun_call!(krun_add_input_device(
+                ctx,
+                &raw const config_backend as *const c_void,
+                &raw const event_provider_backend as *const c_void,
+            ))?;
+        }
 
         krun_call!(krun_start_enter(ctx))?;
     };
@@ -182,12 +187,12 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let (display_backend, input_backend, display_worker) =
-        gtk_display::create_display_with_input("libkrun examples/gui_vm".to_string());
+    let (display_backend, input_devices, display_worker) =
+        gtk_display::create_display_with_input("libkrun examples/gui_vm".to_string())?;
 
     thread::scope(|s| {
         s.spawn(|| {
-            if let Err(e) = krun_thread(&args, display_backend, input_backend) {
+            if let Err(e) = krun_thread(&args, display_backend, input_devices) {
                 eprintln!("{e}");
                 exit(1);
             }

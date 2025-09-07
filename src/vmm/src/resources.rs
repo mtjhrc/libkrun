@@ -34,7 +34,7 @@ use kbs_types::Tee;
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
 #[cfg(feature = "input")]
-use krun_input::InputBackendWrapper;
+use krun_input::InputEventProviderBackend;
 
 type Result<E> = std::result::Result<(), E>;
 
@@ -122,7 +122,7 @@ pub struct VmResources {
     #[cfg(feature = "gpu")]
     pub displays: Vec<DisplayInfo>,
     #[cfg(feature = "input")]
-    pub input_backends: Vec<InputBackendWrapper<'static>>,
+    pub input_backends: Vec<(krun_input::InputConfigBackend<'static>, krun_input::InputEventProviderBackend<'static>)>,
     #[cfg(feature = "snd")]
     /// Enable the virtio-snd device.
     pub snd_device: bool,

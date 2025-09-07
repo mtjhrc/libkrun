@@ -4,11 +4,11 @@ use std::rc::Rc;
 
 use super::scanout_paintable::ScanoutPaintable;
 use crate::DisplayEvent;
-use crate::input_backend::gtk_key_to_linux;
+use crate::input_constants::gtk_keycode_to_linux;
 use krun_display::Rect;
 use krun_input::{InputEvent, InputEventType};
-use log::{debug, info, trace, warn};
-use std::sync::Arc;
+use log::{debug, trace, warn};
+
 use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender};
 
 use gtk::{
@@ -32,6 +32,7 @@ struct ScanoutWindow {
 }
 
 impl ScanoutWindow {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: &Application,
         title: &str,
@@ -40,7 +41,8 @@ impl ScanoutWindow {
         width: i32,
         height: i32,
         format: MemoryFormat,
-        input_forwarder: Option<PollableChannelSender<InputEvent>>,
+        keyboard_forwarder: Option<PollableChannelSender<InputEvent>>,
+        mouse_forwarder: Option<PollableChannelSender<InputEvent>>,
     ) -> Self {
         let header_bar = HeaderBar::new();
         let window = ApplicationWindow::builder()
@@ -101,7 +103,7 @@ impl ScanoutWindow {
         window.set_titlebar(Some(&header_bar));
         header_bar.pack_end(&fullscreen_btn);
 
-        let overlay = build_overlay(window.as_ref(), input_forwarder);
+        let overlay = build_overlay(window.as_ref(), keyboard_forwarder, mouse_forwarder);
         overlay.set_child(Some(&picture));
         window.set_child(Some(&overlay));
         window.set_visible(true);
@@ -135,7 +137,8 @@ impl Drop for ScanoutWindow {
 
 fn build_overlay(
     window: &Window,
-    input_event_tx: Option<PollableChannelSender<InputEvent>>,
+    keyboard_event_tx: Option<PollableChannelSender<InputEvent>>,
+    mouse_event_tx: Option<PollableChannelSender<InputEvent>>,
 ) -> Overlay {
     let overlay_bar = HeaderBar::builder()
         .valign(Align::Start)
@@ -169,33 +172,36 @@ fn build_overlay(
     ));
     overlay_bar.add_controller(bar_controller);
 
-    let key_controller = EventControllerKey::new();
+    // Set up keyboard event forwarding to keyboard input backend
+    if let Some(keyboard_tx) = keyboard_event_tx {
+        let key_controller = EventControllerKey::new();
 
-    // Set up keyboard event forwarding to input backend
-    if let Some(event_tx) = input_event_tx {
         // Handle key press events
-        let forwarder_press = event_tx.clone();
+        let forwarder_press = keyboard_tx.clone();
         key_controller.connect_key_pressed(move |_controller, key, keycode, _modifiers| {
-            let linux_keycode = gtk_key_to_linux(keycode);
+            let linux_keycode = gtk_keycode_to_linux(keycode);
+            if linux_keycode == 0 {
+                debug!("Unknown key GTK key={}, code={}", key, keycode);
+                return Propagation::Proceed;
+            } else {
+                debug!(
+                    "Forwarding key press: GTK key={}, code={}, Linux code={}",
+                    key, keycode, linux_keycode
+                );
+            }
             let input_event = InputEvent {
                 type_: InputEventType::Key as u16,
                 code: linux_keycode,
                 value: 1, // Key press
             };
-
-            debug!(
-                "Forwarding key press: GTK key={}, code={}, Linux code={}",
-                key, keycode, linux_keycode
-            );
-
             forwarder_press.send(input_event).unwrap();
-            Propagation::Proceed
+            Propagation::Stop
         });
 
         // Handle key release events
-        let forwarder_release = event_tx.clone();
+        let forwarder_release = keyboard_tx.clone();
         key_controller.connect_key_released(move |_controller, key, keycode, _modifiers| {
-            let linux_keycode = gtk_key_to_linux(keycode);
+            let linux_keycode = gtk_keycode_to_linux(keycode);
             let input_event = InputEvent {
                 type_: InputEventType::Key as u16,
                 code: linux_keycode,
@@ -209,9 +215,34 @@ fn build_overlay(
             forwarder_release.send(input_event).unwrap();
             debug!("sent!");
         });
+        window.add_controller(key_controller);
     }
 
-    window.add_controller(key_controller);
+    if let Some(mouse_tx) = mouse_event_tx {
+        let mouse_controller = EventControllerMotion::new();
+
+        let motion_forwarder = mouse_tx.clone();
+        mouse_controller.connect_motion(move |_controller, x, y| {
+            // Convert relative motion (this is a simplified version - might need proper relative tracking)
+            let rel_x_event = InputEvent {
+                type_: InputEventType::Rel as u16,
+                code: 0, // REL_X
+                value: x as u32,
+            };
+
+            let rel_y_event = InputEvent {
+                type_: InputEventType::Rel as u16,
+                code: 1, // REL_Y
+                value: y as u32,
+            };
+
+            debug!("Forwarding mouse motion: x={}, y={}", x, y);
+            let _ = motion_forwarder.send(rel_x_event);
+            let _ = motion_forwarder.send(rel_y_event);
+        });
+
+        window.add_controller(mouse_controller);
+    }
 
     let overlay_controller = EventControllerMotion::new();
     overlay_controller.connect_motion(glib::clone!(
@@ -237,7 +268,8 @@ pub struct DisplayWorker {
     app: Application,
     app_name: String,
     rx: PollableChannelReciever<DisplayEvent>,
-    input_event_tx: Option<PollableChannelSender<InputEvent>>,
+    keyboard_event_tx: Option<PollableChannelSender<InputEvent>>,
+    mouse_event_tx: Option<PollableChannelSender<InputEvent>>,
     scanouts: RefCell<[Option<ScanoutWindow>; MAX_DISPLAYS]>,
 }
 
@@ -246,13 +278,15 @@ impl DisplayWorker {
         app: Application,
         app_name: String,
         rx: PollableChannelReciever<DisplayEvent>,
-        input_event_tx: Option<PollableChannelSender<InputEvent>>,
+        keyboard_event_tx: Option<PollableChannelSender<InputEvent>>,
+        mouse_event_tx: Option<PollableChannelSender<InputEvent>>,
     ) -> Self {
         Self {
             app,
             app_name,
             rx,
-            input_event_tx,
+            keyboard_event_tx,
+            mouse_event_tx,
             scanouts: Default::default(),
         }
     }
@@ -289,7 +323,8 @@ impl DisplayWorker {
                             width as i32,
                             height as i32,
                             format,
-                            self.input_event_tx.clone(),
+                            self.keyboard_event_tx.clone(),
+                            self.mouse_event_tx.clone(),
                         ));
                     }
                 }
@@ -318,7 +353,8 @@ impl DisplayWorker {
     pub fn run(
         app_name: String,
         rx: PollableChannelReciever<DisplayEvent>,
-        input_event_tx: Option<PollableChannelSender<InputEvent>>,
+        keyboard_tx: Option<PollableChannelSender<InputEvent>>,
+        mouse_tx: Option<PollableChannelSender<InputEvent>>,
     ) {
         let app = Application::builder().build();
 
@@ -332,7 +368,8 @@ impl DisplayWorker {
             app.clone(),
             app_name,
             rx,
-            input_event_tx,
+            keyboard_tx,
+            mouse_tx,
         ));
         app.connect_activate(move |_app| {
             let display_worker = display_worker.clone();
