@@ -1,3 +1,5 @@
+use std::error::Error;
+use std::io;
 use log::{debug, error};
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -10,7 +12,7 @@ use vm_memory::{ByteValued, GuestMemoryMmap};
 use super::super::Queue;
 use crate::virtio::descriptor_utils::{Reader, Writer};
 use crate::virtio::InterruptTransport;
-use krun_input::{InputBackendWrapper, InputEventsInstance};
+use krun_input::{InputEventProviderBackend, InputEventProviderInstance, InputEventsImpl};
 
 const EV_SYN: u8 = 0x00;
 const EV_KEY: u8 = 0x01;
@@ -37,7 +39,7 @@ pub struct InputWorker {
     status_queue: Queue, // Guest -> Device events
     interrupt: InterruptTransport,
     mem: GuestMemoryMmap,
-    backend_wrapper: InputBackendWrapper<'static>,
+    backend_wrapper: InputEventProviderBackend<'static>,
     stop_fd: EventFd,
     pub event_queue_efd: EventFd,
     pub status_queue_efd: EventFd,
@@ -52,7 +54,7 @@ impl InputWorker {
         status_queue_efd: EventFd,
         interrupt: InterruptTransport,
         mem: GuestMemoryMmap,
-        backend: InputBackendWrapper<'static>,
+        backend: InputEventProviderBackend<'static>,
         stop_fd: EventFd,
     ) -> Self {
         Self {
@@ -78,7 +80,7 @@ impl InputWorker {
         debug!("input worker: starting");
 
         // Create the events instance in this thread
-        let mut events_instance = match self.backend_wrapper.create_events_instance() {
+        let mut events_instance = match self.backend_wrapper.create_instance() {
             Ok(instance) => instance,
             Err(e) => {
                 error!("Failed to create events instance: {:?}", e);
@@ -93,7 +95,7 @@ impl InputWorker {
         // Set up epoll to wait for events
         let epoll = Epoll::new().expect("Failed to create epoll");
 
-        let ready_fd = match events_instance.get_ready_efd() {
+        let ready_fd = match events_instance.get_read_notify_fd() {
             Ok(fd) => fd,
             Err(e) => {
                 error!("Failed to get ready fd: {:?}", e);
@@ -158,7 +160,7 @@ impl InputWorker {
                     }
                     STATUSQ => {
                         self.status_queue_efd.read().unwrap();
-                        needs_interrupt |= self.process_status_queue().unwrap();
+                        needs_interrupt |= self.process_status_queue();
                     }
                     QUIT => {
                         // Stop signal received
@@ -182,7 +184,7 @@ impl InputWorker {
     /// Fills a virtqueue with events from the source. Returns the number of bytes written.
     fn fill_event_virtqueue(
         &mut self,
-        events_instance: &mut InputEventsInstance,
+        events_instance: &mut InputEventProviderInstance,
         writer: &mut Writer,
     ) -> Result<(usize, bool), ()> {
         let avail_bytes = writer.available_bytes();
@@ -214,7 +216,7 @@ impl InputWorker {
         Ok((writer.bytes_written(), eof))
     }
 
-    fn process_event_queue(&mut self, events_instance: &mut InputEventsInstance) -> bool {
+    fn process_event_queue(&mut self, events_instance: &mut InputEventProviderInstance) -> bool {
         let mut needs_interrupt = false;
         let mem = self.mem.clone();
 
@@ -257,12 +259,12 @@ impl InputWorker {
     fn read_status_virtqueue(
         &mut self,
         reader: &mut Reader,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        while reader.available_bytes() >= std::mem::size_of::<VirtioInputEvent>() {
+    ) -> Result<usize, io::Error> {
+        while reader.available_bytes() >= size_of::<VirtioInputEvent>() {
             let mut buffer: [u8; size_of::<virtio_input::virtio_input_event>()] =
                 [0; size_of::<virtio_input::virtio_input_event>()];
             reader.read_exact(&mut buffer)?;
-            debug!("Read garbage collect: {:?}", &buffer);
+            debug!("Not implemented status queue request: {:?}", &buffer);
             // For now, we don't send events back to the input source
             // This would be used for things like setting LEDs on keyboards, haptic feedback, etc.
         }
@@ -270,12 +272,18 @@ impl InputWorker {
     }
 
     /// Process the status queue (guest -> device events)
-    fn process_status_queue(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    fn process_status_queue(&mut self) -> bool {
         let mut needs_interrupt = false;
         let mem = self.mem.clone();
 
         while let Some(desc_chain) = self.status_queue.pop(&mem) {
-            let mut reader = Reader::new(&mem, desc_chain.clone())?;
+            let mut reader = match Reader::new(&mem, desc_chain.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("Failed to create reader for status queue: {e}");
+                    return false;
+                }
+            };
             match self.read_status_virtqueue(&mut reader) {
                 Ok(bytes_read) => {
                     self.status_queue
@@ -290,6 +298,6 @@ impl InputWorker {
             needs_interrupt = true;
         }
 
-        Ok(needs_interrupt)
+        needs_interrupt
     }
 }

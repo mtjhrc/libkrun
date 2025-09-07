@@ -99,17 +99,7 @@ struct krun_input_vtable {
 };
 
 /**
- * Called to get the device name
- */
-typedef int32_t (*krun_input_get_device_name_fn)(void *instance, char *out_name, size_t name_len);
-
-/**
- * Called to get the device serial number
- */
-typedef int32_t (*krun_input_get_device_serial_fn)(void *instance, char *out_serial, size_t serial_len);
-
-/**
- * Called to get the device IDs
+ * Device IDs structure for input devices
  */
 struct krun_input_device_ids {
     uint16_t bustype;
@@ -118,10 +108,8 @@ struct krun_input_device_ids {
     uint16_t version;
 };
 
-typedef int32_t (*krun_input_get_device_ids_fn)(void *instance, struct krun_input_device_ids *out_ids);
-
 /**
- * Called to get absolute axis information
+ * Absolute axis information structure
  */
 struct krun_input_absinfo {
     uint32_t min;
@@ -131,51 +119,95 @@ struct krun_input_absinfo {
     uint32_t res;
 };
 
-typedef int32_t (*krun_input_get_abs_info_fn)(void *instance, uint16_t axis, struct krun_input_absinfo *out_abs_info);
-
 /**
- * Called to get event bits for a specific event type
+ * Event capability entry for a specific event type
  */
-typedef int32_t (*krun_input_get_event_bits_fn)(void *instance, uint16_t event_type, uint8_t *out_bitmap, size_t bitmap_len, size_t *actual_len);
+struct krun_input_event_capability {
+    uint8_t *bitmap;         // Bitmap of supported events for this type
+    size_t bitmap_len;       // Length of bitmap in bytes
+};
 
 /**
- * Called to get property bits
+ * Input device configuration structure
+ * Users should populate this structure directly to configure the input device.
  */
-typedef int32_t (*krun_input_get_property_bits_fn)(void *instance, uint8_t *out_bitmap, size_t bitmap_len, size_t *actual_len);
+// See uapi/linux/input.h for the constants
+ struct krun_input_device_config {
+    // Device identification
+    const char *device_name;    // Device name
+    const char *device_serial;  // Device serial number
+    struct krun_input_device_ids device_ids;  // Device IDs
+
+    // Indexed by: EV_KEY=1, EV_REL=2, EV_ABS=3, EV_MSC=4, EV_SW=5, EV_LED=17, EV_SND=18, EV_REP=20, etc.
+    struct krun_input_event_capability event_capabilities[32]; // EV_CNT
+    
+    // Absolute axis information (for touchscreen, joystick, etc.)
+    // Linux constants: ABS_X=0, ABS_Y=1, ABS_Z=2, ABS_RX=3, ABS_RY=4, ABS_RZ=5, ABS_PRESSURE=24, etc.
+    // ABS_MAX is 0x3f (63), so we need 64 entries (0-63) indexed by axis code
+    struct krun_input_absinfo abs_info[64]; // ABS_CNT
+    
+    uint32_t property_bits; // INPUT_PROP_CNT is 32 so we need 4 bytes
+};
 
 /**
- * Configuration vtable with high-level getter methods
+ * Called to create an input config instance.
+ * 
+ * Arguments:
+ *  "instance"    - (Output) pointer to userdata which can be used to represent this/self argument.
+ *  "userdata"    - userdata specified in the config object
+ *  "reserved"    - reserved/unused for now
+ * 
+ * Returns:
+ *  Zero on success or a negative error code (KRUN_INPUT_ERR_*) otherwise.
+ */
+typedef int32_t (*krun_input_config_create_fn)(void **instance, const void *userdata, const void *reserved);
+
+/**
+ * Called to destroy the input config instance.
+ */
+typedef int32_t (*krun_input_config_destroy_fn)(void *instance);
+
+/**
+ * Function pointer types for querying device configuration
+ */
+typedef int32_t (*krun_input_query_device_name_fn)(void *instance, uint8_t *name_buf, size_t name_buf_len);
+typedef int32_t (*krun_input_query_serial_name_fn)(void *instance, uint8_t *name_buf, size_t name_buf_len);
+typedef int32_t (*krun_input_query_device_ids_fn)(void *instance, struct krun_input_device_ids *ids);
+typedef int32_t (*krun_input_query_event_capabilities_fn)(void *instance, uint8_t event_type, uint8_t *bitmap_buf, size_t bitmap_buf_len);
+typedef int32_t (*krun_input_query_abs_info_fn)(void *instance, uint8_t abs_axis, struct krun_input_absinfo *abs_info);
+typedef int32_t (*krun_input_query_properties_fn)(void *instance, uint8_t *bitmap_buf, size_t bitmap_buf_len);
+
+/**
+ * Config vtable structure  
  */
 struct krun_input_config_vtable {
-    krun_input_destroy_fn                 destroy;          // (optional)
-    krun_input_get_device_name_fn         get_device_name;  // (optional)
-    krun_input_get_device_serial_fn       get_device_serial; // (optional)
-    krun_input_get_device_ids_fn          get_device_ids;   // (optional)
-    krun_input_get_abs_info_fn            get_abs_info;     // (optional)
-    krun_input_get_event_bits_fn          get_event_bits;   // (optional)
-    krun_input_get_property_bits_fn       get_property_bits; // (optional)
+    krun_input_config_destroy_fn           destroy;
+    krun_input_query_device_name_fn        query_device_name;
+    krun_input_query_serial_name_fn        query_serial_name;
+    krun_input_query_device_ids_fn         query_device_ids;
+    krun_input_query_event_capabilities_fn query_event_capabilities;
+    krun_input_query_abs_info_fn           query_abs_info;
+    krun_input_query_properties_fn         query_properties;
 };
 
 /**
- * Events vtable for event handling
+ * Config object structure
  */
-struct krun_input_events_vtable {
-    krun_input_destroy_fn         destroy;        // (optional)
-    krun_input_get_ready_efd_fn   get_ready_efd;  // (required)
-    krun_input_next_event_fn      next_event;     // (required)
-};
-
-/**
- * The main input backend structure with separate objects for events and configuration.
- * Configuration methods use high-level getters, not raw select/subsel.
- */
-struct krun_input_backend {
+struct krun_input_config {
     uint64_t features; // reserved/unused for now
     void *create_userdata; // (optional)
-    krun_input_create_fn create_events; // Creates the events object (optional)
-    krun_input_create_fn create_config; // Creates the config object (optional)
-    struct krun_input_events_vtable events_vtable;
-    struct krun_input_config_vtable config_vtable;
+    krun_input_config_create_fn create; // Creates the config object (optional)
+    struct krun_input_config_vtable vtable;
+};
+
+/**
+ * Events object structure
+ */
+struct krun_input_events {
+    uint64_t features; // reserved/unused for now
+    void *create_userdata; // (optional)
+    krun_input_create_fn create; // Creates the events object (optional)
+    struct krun_input_vtable vtable;
 };
 
 #ifdef __cplusplus

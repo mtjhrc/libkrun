@@ -2,14 +2,17 @@ mod display_backend;
 mod display_worker;
 mod input_backend;
 mod scanout_paintable;
+mod input_constants;
 
 use crate::display_worker::DisplayWorker;
-use crate::input_backend::{GtkInputConfig, GtkInputEvents};
+pub use crate::input_backend::DeviceType;
+use crate::input_backend::{GtkInputEventProvider, GtkKeyboardConfig, GtkMouseConfig};
 use anyhow::Context;
 pub use display_backend::DisplayEvent;
 pub use display_backend::GtkDisplayBackend;
 use krun_display::{DisplayBackend, IntoDisplayBackend};
-use krun_input::{InputBackend, InputBackendProvider, InputEvent as KrunInputEvent, InputEvent, IntoInputBackend};
+use krun_input::{InputConfigBackend, InputEventProviderBackend};
+use krun_input::{InputEvent, IntoInputConfig, IntoInputEvents};
 use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender, pollable_channel};
 
 pub struct DisplayBackendHandle {
@@ -23,74 +26,72 @@ impl DisplayBackendHandle {
 }
 
 pub struct InputBackendHandle {
-    input_event_rx: PollableChannelReciever<KrunInputEvent>,
+    rx: PollableChannelReciever<InputEvent>,
+    device_type: DeviceType,
 }
 
 impl InputBackendHandle {
-    pub fn get(&self) -> InputBackend {
-        struct Foo;
-        impl InputBackendProvider for Foo {
-            type EventsObject = GtkInputEvents;
-            type ConfigObject = GtkInputConfig;
-        }
+    fn new(rx: PollableChannelReciever<InputEvent>, device_type: DeviceType) -> Self {
+        Self { rx, device_type }
+    }
 
-        Foo::into_input_backend(Some(
-            &self.input_event_rx,
-        ))
+    pub fn get_events(&self) -> InputEventProviderBackend {
+        GtkInputEventProvider::into_input_events(Some(&self.rx))
+    }
+
+    pub fn get_config(&self) -> InputConfigBackend {
+        match self.device_type {
+            DeviceType::Keyboard => GtkKeyboardConfig::into_input_config(None),
+            DeviceType::Mouse => GtkMouseConfig::into_input_config(None),
+        }
     }
 }
 
 pub struct DisplayBackendWorker {
     app_name: String,
-    rx: PollableChannelReciever<DisplayEvent>,
-    input_event_tx: Option<PollableChannelSender<InputEvent>>,
+    display_rx: PollableChannelReciever<DisplayEvent>,
+    mouse_tx: Option<PollableChannelSender<InputEvent>>,
+    keyboard_tx: Option<PollableChannelSender<InputEvent>>,
 }
 
 impl DisplayBackendWorker {
     /// NOTE: on macOS GTK has to run on the main thread of the application.
     pub fn run(self) {
-        DisplayWorker::run(self.app_name, self.rx, self.input_event_tx)
+        DisplayWorker::run(
+            self.app_name,
+            self.display_rx,
+            self.keyboard_tx,
+            self.mouse_tx,
+        );
     }
 }
 
-pub fn crate_display(app_name: String) -> (DisplayBackendHandle, DisplayBackendWorker) {
-    let (tx, rx) = pollable_channel()
-        .context("Failed to create channel")
-        .unwrap();
-
-    (
-        DisplayBackendHandle { tx },
-        DisplayBackendWorker {
-            app_name,
-            rx,
-            input_event_tx: None,
-        },
-    )
-}
-
+/// Create gtk display and input backends
 pub fn create_display_with_input(
     app_name: String,
-) -> (
+) -> anyhow::Result<(
     DisplayBackendHandle,
-    InputBackendHandle,
+    Vec<InputBackendHandle>,
     DisplayBackendWorker,
-) {
-    let (display_tx, display_rx) = pollable_channel()
-        .context("Failed to create display channel")
-        .unwrap();
+)> {
+    let (display_tx, display_rx) =
+        pollable_channel().context("Failed to create display events channel")?;
+    let (keyboard_tx, keyboard_rx) =
+        pollable_channel().context("Failed to create keyboard events channel")?;
+    let (mouse_tx, mouse_rx) =
+        pollable_channel().context("Failed to create mouse events channel")?;
 
-    // Create the input event channel and forwarder
-    let (input_event_tx, input_event_rx) = pollable_channel()
-        .context("Failed to create input channel")
-        .unwrap();
+    let display_backend = DisplayBackendHandle { tx: display_tx };
+    let input_handles = vec![
+        InputBackendHandle::new(keyboard_rx, DeviceType::Keyboard),
+        InputBackendHandle::new(mouse_rx, DeviceType::Mouse),
+    ];
+    let worker = DisplayBackendWorker {
+        app_name,
+        display_rx,
+        keyboard_tx: Some(keyboard_tx),
+        mouse_tx: Some(mouse_tx),
+    };
 
-    (
-        DisplayBackendHandle { tx: display_tx },
-        InputBackendHandle { input_event_rx },
-        DisplayBackendWorker {
-            app_name,
-            rx: display_rx,
-            input_event_tx: Some(input_event_tx),
-        },
-    )
+    Ok((display_backend, input_handles, worker))
 }

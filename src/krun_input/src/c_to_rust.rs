@@ -1,7 +1,4 @@
-use crate::{
-    InputAbsInfo, InputBackendError, InputConfigImpl, InputConfigVtable, InputDeviceIds,
-    InputEvent, InputEventsVtable, header,
-};
+use crate::{InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent, InputQueryConfig, header, InputEventsImpl};
 use log::error;
 use static_assertions::assert_not_impl_any;
 use std::ffi::c_void;
@@ -44,25 +41,57 @@ macro_rules! method_call {
     };
 }
 
-pub struct InputEventsInstance {
+pub struct InputEventProviderInstance {
     instance: *mut c_void,
-    vtable: InputEventsVtable,
+    vtable: header::krun_input_vtable,
 }
+impl InputEventsImpl for InputEventProviderInstance {
+    /// Get the ready event file descriptor that becomes readable when input events are available
+    fn get_read_notify_fd(&self) -> Result<RawFd, InputBackendError> {
+        let fd = method_call! {
+            self.get_ready_efd()
+        };
+
+        into_rust_result!(fd,
+            fd if fd >= 0 => Ok(fd)
+        )
+    }
+
+    /// Fetch the next available input event, returns None if no events are available
+    fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError> {
+        let mut event = header::krun_input_event {
+            type_: 0,
+            code: 0,
+            value: 0,
+        };
+
+        let result = method_call! {
+            self.next_event(&raw mut event)
+        };
+
+        into_rust_result!(result,
+            1 => Ok(Some(InputEvent {
+                type_: event.type_,
+                code: event.code,
+                value: event.value,
+            })),
+            0 => Ok(None)
+        )
+    }
+}
+
 
 pub struct InputConfigInstance {
     instance: *mut c_void,
-    vtable: InputConfigVtable,
+    vtable: header::krun_input_config_vtable,
 }
 
 unsafe impl Send for InputConfigInstance {}
 unsafe impl Sync for InputConfigInstance {}
 
-// By design the structs are !Send and !Sync to allow for the implementation to safely assume that
-// the methods are always called on the appropriate worker thread
-assert_not_impl_any!(InputEventsInstance: Sync, Send);
-//assert_not_impl_any!(InputConfigInstance: Sync, Send);
+assert_not_impl_any!(InputEventProviderInstance: Sync, Send);
 
-impl Drop for InputEventsInstance {
+impl Drop for InputEventProviderInstance {
     fn drop(&mut self) {
         let Some(destroy_fn) = self.vtable.destroy else {
             return;
@@ -86,156 +115,96 @@ impl Drop for InputConfigInstance {
     }
 }
 
-impl InputEventsInstance {
-    /// Get the ready event file descriptor that becomes readable when input events are available
-    pub fn get_ready_efd(&self) -> Result<RawFd, InputBackendError> {
-        let fd = method_call! {
-            self.get_ready_efd()
-        };
+// Remove the old InputConfigImpl methods as they're not needed
 
-        into_rust_result!(fd,
-            fd if fd >= 0 => Ok(fd)
-        )
-    }
-
-    /// Fetch the next available input event, returns None if no events are available
-    pub fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError> {
-        let mut event = header::krun_input_event {
-            type_: 0,
-            code: 0,
-            value: 0,
-        };
-
+impl InputQueryConfig for InputConfigInstance {
+    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
         let result = method_call! {
-            self.next_event(&raw mut event)
+            self.query_device_name(name_buf.as_mut_ptr(), name_buf.len())
         };
 
         into_rust_result!(result,
-            1 => Ok(Some(InputEvent {
-                type_: event.type_,
-                code: event.code,
-                value: event.value,
-            })),
-            0 => Ok(None)
+            len if len >= 0 => Ok(len as u8)
         )
     }
-}
 
-impl InputConfigImpl for InputConfigInstance {
-    /// Write the device name to the provided buffer
-    /// Returns the number of bytes written (excluding null terminator)
-    fn write_device_name(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-        if buffer.is_empty() {
-            return Err(InputBackendError::InvalidParam);
-        }
-
+    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
         let result = method_call! {
-            self.get_device_name(buffer.as_mut_ptr() as *mut i8, buffer.len())
+            self.query_serial_name(name_buf.as_mut_ptr(), name_buf.len())
         };
+
         into_rust_result!(result,
-            result if result >= 0 => Ok(result as usize)
+            len if len >= 0 => Ok(len as u8)
         )
     }
 
-    /// Write the device serial to the provided buffer (low-level, allocation-free)  
-    /// Returns the number of bytes written (excluding null terminator)
-    fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-        if buffer.is_empty() {
-            return Err(InputBackendError::InvalidParam);
-        }
-
+    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<u8, InputBackendError> {
         let result = method_call! {
-            self.get_device_serial(buffer.as_mut_ptr() as *mut i8, buffer.len())
+            self.query_device_ids(ids as *mut InputDeviceIds)
         };
+
         into_rust_result!(result,
-            result if result >= 0 => Ok(result as usize)
+            len if len >= 0 => Ok(len as u8)
         )
     }
 
-    /// Write the device IDs (vendor, product, etc.)
-    fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
-        let result = method_call! {
-            self.get_device_ids(ids)
-        };
-        into_rust_result!(result)
-    }
-
-    /// Write absolute axis information for a specific axis
-    fn write_abs_info(
+    fn query_event_capabilities(
         &self,
-        axis: u16,
+        event_type: u8,
+        bitmap_buf: &mut [u8],
+    ) -> Result<u8, InputBackendError> {
+        let result = method_call! {
+            self.query_event_capabilities(event_type, bitmap_buf.as_mut_ptr(), bitmap_buf.len())
+        };
+
+        into_rust_result!(result,
+            len if len >= 0 => Ok(len as u8)
+        )
+    }
+
+    fn query_abs_info(
+        &self,
+        abs_axis: u8,
         abs_info: &mut InputAbsInfo,
-    ) -> Result<(), InputBackendError> {
+    ) -> Result<u8, InputBackendError> {
         let result = method_call! {
-            self.get_abs_info(axis, abs_info)
+            self.query_abs_info(abs_axis, abs_info as *mut InputAbsInfo)
         };
-        into_rust_result!(result)
-    }
 
-    /// Write event bits bitmap to the provided buffer (low-level, allocation-free)
-    /// Returns the number of bytes written
-    fn write_event_bits(
-        &self,
-        event_type: u16,
-        buffer: &mut [u8],
-    ) -> Result<usize, InputBackendError> {
-        let mut actual_len = 0usize;
-
-        let result = method_call! {
-            self.get_event_bits(event_type, buffer.as_mut_ptr(), buffer.len(), &raw mut actual_len)
-        };
         into_rust_result!(result,
-            result if result >= 0 => Ok(result as usize)
+            len if len >= 0 => Ok(len as u8)
         )
     }
 
-    /// Write property bits bitmap to the provided buffer (low-level, allocation-free)
-    /// Returns the number of bytes written
-    fn write_property_bits(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-        let mut actual_len = 0usize;
-
+    fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError> {
         let result = method_call! {
-            self.get_property_bits(buffer.as_mut_ptr(), buffer.len(), &raw mut actual_len)
+            self.query_properties(properties.as_mut_ptr(), properties.len())
         };
+
         into_rust_result!(result,
-            result if result >= 0 => Ok(result as usize)
+            len if len >= 0 => Ok(len as u8)
         )
     }
 }
 
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub struct InputBackendWrapper<'userdata> {
+pub struct InputConfigBackend<'userdata> {
     pub features: u64,
     pub create_userdata: *const c_void,
     pub create_userdata_lifetime: PhantomData<&'userdata c_void>,
-    pub create_events_fn: header::krun_input_create_fn,
-    pub create_config_fn: header::krun_input_create_fn,
-    pub events_vtable: InputEventsVtable,
-    pub config_vtable: InputConfigVtable,
+    pub create_fn: header::krun_input_config_create_fn,
+    pub vtable: header::krun_input_config_vtable,
 }
+unsafe impl<'a> Send for InputConfigBackend<'a> {}
+unsafe impl<'a> Sync for InputConfigBackend<'a> {}
 
-impl<'a> InputBackendWrapper<'a> {
-    /// Create an InputEventsInstance for handling input events
-    pub fn create_events_instance(&self) -> Result<InputEventsInstance, InputBackendError> {
-        let mut instance = null_mut();
-        if let Some(create_fn) = self.create_events_fn {
-            into_rust_result!(unsafe {
-                create_fn(&raw mut instance, self.create_userdata, null())
-            })?;
-        }
-        assert!(self.verify_events());
 
-        Ok(InputEventsInstance {
-            instance,
-            vtable: self.events_vtable,
-        })
-    }
-
+impl<'a> InputConfigBackend<'a> {
     /// Create an InputConfigInstance for handling device configuration
-    pub fn create_config_instance(&self) -> Result<InputConfigInstance, InputBackendError> {
+    pub fn create_instance(&self) -> Result<InputConfigInstance, InputBackendError> {
         let mut instance = null_mut();
-        if let Some(create_fn) = self.create_config_fn {
+        if let Some(create_fn) = self.create_fn {
             into_rust_result!(unsafe {
                 create_fn(&raw mut instance, self.create_userdata, null())
             })?;
@@ -244,27 +213,55 @@ impl<'a> InputBackendWrapper<'a> {
 
         Ok(InputConfigInstance {
             instance,
-            vtable: self.config_vtable,
+            vtable: self.vtable,
+        })
+    }
+
+    pub fn verify_config(&self) -> bool {
+        self.vtable.query_device_name.is_some()
+            && self.vtable.query_serial_name.is_some()
+            && self.vtable.query_device_ids.is_some()
+            && self.vtable.query_event_capabilities.is_some()
+            && self.vtable.query_abs_info.is_some()
+            && self.vtable.query_properties.is_some()
+    }
+}
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct InputEventProviderBackend<'userdata> {
+    pub features: u64,
+    pub create_userdata: *const c_void,
+    pub create_userdata_lifetime: PhantomData<&'userdata c_void>,
+    pub create_fn: header::krun_input_create_fn,
+    pub vtable: header::krun_input_vtable,
+}
+
+unsafe impl<'a> Send for InputEventProviderBackend<'a> {}
+unsafe impl<'a> Sync for InputEventProviderBackend<'a> {}
+
+impl<'a> InputEventProviderBackend<'a> {
+    /// Create an InputEventsInstance for handling input events
+    pub fn create_instance(&self) -> Result<InputEventProviderInstance, InputBackendError> {
+        let mut instance = null_mut();
+        if let Some(create_fn) = self.create_fn {
+            into_rust_result!(unsafe {
+                create_fn(&raw mut instance, self.create_userdata, null())
+            })?;
+        }
+        assert!(self.verify_events());
+
+        Ok(InputEventProviderInstance {
+            instance,
+            vtable: self.vtable,
         })
     }
 
     pub fn verify_events(&self) -> bool {
-        // Check that required methods are present for events
-        if self.events_vtable.get_ready_efd.is_none() || self.events_vtable.next_event.is_none() {
-            error!("Missing required methods for input events backend");
-            return false;
-        }
-        true
-    }
-
-    pub fn verify_config(&self) -> bool {
-        // Config methods are all optional, so always return true
-        true
+        self.vtable.get_ready_efd.is_some() || self.vtable.next_event.is_some()
     }
 
     pub fn verify(&self) -> bool {
-        self.verify_events() && self.verify_config()
+        self.verify_events()
     }
 }
-
-unsafe impl<'a> Send for InputBackendWrapper<'a> {}

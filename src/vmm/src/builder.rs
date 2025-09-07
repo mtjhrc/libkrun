@@ -2029,14 +2029,14 @@ fn attach_gpu_device(
 #[cfg(feature = "input")]
 fn attach_input_devices(
     vmm: &mut Vmm,
-    input_backends: &[krun_input::InputBackendWrapper<'static>],
+    input_backends: &[(krun_input::InputConfigBackend<'static>, krun_input::InputEventProviderBackend<'static>)],
     intc: IrqChip,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
-    for (index, input_backend) in input_backends.iter().enumerate() {
+    for (index, (config_backend, events_backend)) in input_backends.iter().enumerate() {
         let input_device = Arc::new(Mutex::new(
-            devices::virtio::input::Input::new(*input_backend)
+            devices::virtio::input::Input::new(*config_backend, *events_backend)
                 .unwrap(),
         ));
         

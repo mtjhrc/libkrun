@@ -1,39 +1,39 @@
+use crate::input_constants::*;
 use krun_input::{
-    InputAbsInfo, InputBackendError, InputBackendNew, InputConfigImpl, InputDeviceIds,
-    InputEvent as KrunInputEvent, InputEvent, InputEventsImpl, IntoInputBackend,
+    InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent as KrunInputEvent, InputEventType,
+    InputEventsImpl, InputQueryConfig, ObjectNew, write_bitmap,
 };
-use log::{debug, error};
-use std::os::fd::{AsRawFd, RawFd};
-use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender};
+use std::cmp::max;
+use std::os::fd::RawFd;
+use utils::pollable_channel::PollableChannelReciever;
 
-pub struct GtkInputEvents {
-    event_rx: PollableChannelReciever<KrunInputEvent>,
+#[derive(Clone)]
+pub enum DeviceType {
+    Keyboard,
+    Mouse,
 }
 
-impl InputBackendNew<PollableChannelReciever<InputEvent>> for GtkInputEvents {
-    fn new(userdata: Option<&PollableChannelReciever<InputEvent>>) -> Self {
-        debug!("Created GtkInputEvents");
+pub struct GtkInputEventProvider {
+    rx: PollableChannelReciever<KrunInputEvent>,
+}
+
+impl ObjectNew<PollableChannelReciever<KrunInputEvent>> for GtkInputEventProvider {
+    fn new(userdata: Option<&PollableChannelReciever<KrunInputEvent>>) -> Self {
         Self {
-            event_rx: userdata.expect("Invalid param").clone(),
+            rx: userdata.expect("GtkInputEvents requires receiver").clone(),
         }
     }
 }
 
-impl InputEventsImpl for GtkInputEvents {
-    fn get_ready_efd(&self) -> Result<RawFd, InputBackendError> {
-        debug!("get_ready_efd");
-        Ok(self.event_rx.as_raw_fd())
+impl InputEventsImpl for GtkInputEventProvider {
+    fn get_read_notify_fd(&self) -> Result<RawFd, InputBackendError> {
+        use std::os::fd::AsRawFd;
+        Ok(self.rx.as_raw_fd())
     }
 
     fn next_event(&mut self) -> Result<Option<KrunInputEvent>, InputBackendError> {
-        match self.event_rx.try_recv() {
-            Ok(Some(event)) => {
-                debug!(
-                    "Retrieved input event: type={}, code={}, value={}",
-                    event.type_, event.code, event.value
-                );
-                Ok(Some(event))
-            }
+        match self.rx.try_recv() {
+            Ok(Some(event)) => Ok(Some(event)),
             Ok(None) => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(_) => Err(InputBackendError::InternalError),
@@ -41,129 +41,131 @@ impl InputEventsImpl for GtkInputEvents {
     }
 }
 
-pub struct GtkInputConfig {}
+#[derive(Clone)]
+pub struct GtkKeyboardConfig;
 
-impl<T: Send + Sync> InputBackendNew<T> for GtkInputConfig {
-    fn new(_userdata: Option<&T>) -> Self {
-        Self {}
+impl ObjectNew<()> for GtkKeyboardConfig {
+    fn new(_userdata: Option<&()>) -> Self {
+        Self
     }
 }
 
-impl InputConfigImpl for GtkInputConfig {
-    fn write_device_name(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-        let name = b"libkrun/gui_vm virtual keyboard";
-        let copy_len = name.len().min(buffer.len());
-        buffer[..copy_len].copy_from_slice(&name[..copy_len]);
-        Ok(copy_len)
+impl InputQueryConfig for GtkKeyboardConfig {
+    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
+        let copy_len = std::cmp::min(KEYBOARD_DEVICE_NAME.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&KEYBOARD_DEVICE_NAME[..copy_len]);
+        Ok(copy_len as u8)
     }
 
-    fn write_device_serial(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-        let serial = b"virtio-keyboard-1";
-        let copy_len = serial.len().min(buffer.len());
-        buffer[..copy_len].copy_from_slice(&serial[..copy_len]);
-        Ok(copy_len)
+    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
+        let copy_len = std::cmp::min(KEYBOARD_SERIAL_NAME.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&KEYBOARD_SERIAL_NAME[..copy_len]);
+        Ok(copy_len as u8)
     }
 
-    fn write_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
+    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<u8, InputBackendError> {
         *ids = InputDeviceIds {
-            bustype: 0,
-            vendor: 0,
-            product: 0,
-            version: 0,
+            bustype: BUS_VIRTUAL,
+            vendor: KRUN_VENDOR_ID,
+            product: KRUN_KEYBOARD_PRODUCT_ID,
+            version: KRUN_DEVICE_VERSION,
         };
-        Ok(())
+        Ok(size_of::<InputDeviceIds>() as u8)
     }
 
-    fn write_abs_info(
+    fn query_event_capabilities(
         &self,
-        _axis: u16,
+        event_type: u8,
+        bitmap_buf: &mut [u8],
+    ) -> Result<u8, InputBackendError> {
+        let event_type_enum = InputEventType::try_from(event_type as u16)
+            .map_err(|_| InputBackendError::InvalidParam)?;
+        match event_type_enum {
+            InputEventType::Syn => {
+                let key_events = write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS);
+                let rep_events = write_bitmap(bitmap_buf, &[REP_DELAY, REP_PERIOD]);
+                Ok(max(key_events, rep_events))
+            }
+            InputEventType::Key => Ok(write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS)),
+            InputEventType::Rep => Ok(write_bitmap(bitmap_buf, &[REP_DELAY, REP_PERIOD])),
+            _ => Ok(0),
+        }
+    }
+
+    fn query_abs_info(
+        &self,
+        _abs_axis: u8,
         _abs_info: &mut InputAbsInfo,
-    ) -> Result<(), InputBackendError> {
-        Err(InputBackendError::MethodNotSupported) // Keyboard doesn't have absolute axes
+    ) -> Result<u8, InputBackendError> {
+        Ok(0)
     }
 
-    fn write_event_bits(
-        &self,
-        event_type: u16,
-        buffer: &mut [u8],
-    ) -> Result<usize, InputBackendError> {
-        const EV_KEY: u16 = 0x01;
-        const EV_REL: u16 = 0x02;
-        const EV_REP: u16 = 0x14;
-
-        const REL_X: u16 = 0x00;
-        const REL_Y: u16 = 0x01;
-        const REL_Z: u16 = 0x02;
-        const REL_RX: u16 = 0x03;
-        const REL_RY: u16 = 0x04;
-        const REL_RZ: u16 = 0x05;
-        const REL_HWHEEL: u16 = 0x06;
-        const REL_DIAL: u16 = 0x07;
-        const REL_WHEEL: u16 = 0x08;
-
-        const REP_DELAY: u16 = 0x00;
-        const REP_PERIOD: u16 = 0x01;
-
-        fn write_bits(buffer: &mut [u8], indices: &[u16]) -> usize {
-            let mut len = 0;
-            for idx in indices {
-                let byte_pos = (idx / 8) as usize;
-                let bit_byte = 1u8 << (idx % 8);
-                if byte_pos < buffer.len() {
-                    len = std::cmp::max(len, byte_pos + 1);
-                    buffer[byte_pos] |= bit_byte;
-                } else {
-                    // This would only happen if new event codes (or types, or ABS_*, etc) are defined
-                    // to be larger than or equal to 1024, in which case a new version
-                    // of the virtio input protocol needs to be defined.
-                    // There is nothing we can do about this error except log it.
-                    error!("Attempted to set an out of bounds bit: {}", idx);
-                }
-            }
-            len as usize
-        }
-
-        match event_type {
-            EV_KEY => {
-                // For a keyboard, we support all key codes (0-767)
-                // This requires 768 bits = 96 bytes
-                let required_bytes = 96;
-                if buffer.len() < required_bytes {
-                    return Ok(required_bytes);
-                }
-
-                // Set all bits to 1 (all keys supported)
-                buffer[..required_bytes].fill(0xFF);
-                Ok(required_bytes)
-            }
-            EV_REP => {
-                write_bits(buffer, &[REP_DELAY, REP_PERIOD]);
-                Ok(1)
-            }
-            EV_REL => {
-                write_bits(buffer, &[REL_X, REL_Y, REL_WHEEL]);
-                Ok(1)
-            }
-            _ => {
-                error!("Unsupported: {}", event_type);
-                Ok(0)
-            } // No other event types supported
-        }
-    }
-
-    fn write_property_bits(&self, buffer: &mut [u8]) -> Result<usize, InputBackendError> {
-        buffer.fill(0);
-        Ok(buffer.len())
+    fn query_properties(&self, bitmap: &mut [u8]) -> Result<u8, InputBackendError> {
+        Ok(write_bitmap(bitmap, &[]))
     }
 }
 
-/// Convert GTK key code to Linux input key code
-pub fn gtk_key_to_linux(gtk_key: u32) -> u16 {
-    // GTK key codes are offset by 8 from Linux input key codes
-    if gtk_key >= 8 {
-        (gtk_key - 8) as u16
-        //(gtk_key - 8) as u16 //TODO: check if this way or other way around
-    } else {
-        0 // Invalid key
+#[derive(Clone)]
+pub struct GtkMouseConfig;
+
+impl ObjectNew<()> for GtkMouseConfig {
+    fn new(_userdata: Option<&()>) -> Self {
+        Self
+    }
+}
+
+impl InputQueryConfig for GtkMouseConfig {
+    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
+        let copy_len = std::cmp::min(MOUSE_DEVICE_NAME.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&MOUSE_DEVICE_NAME[..copy_len]);
+        Ok(copy_len as u8)
+    }
+
+    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
+        let copy_len = std::cmp::min(MOUSE_SERIAL_NAME.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&MOUSE_SERIAL_NAME[..copy_len]);
+        Ok(copy_len as u8)
+    }
+
+    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<u8, InputBackendError> {
+        *ids = InputDeviceIds {
+            bustype: BUS_USB,
+            vendor: KRUN_VENDOR_ID,
+            product: KRUN_MOUSE_PRODUCT_ID,
+            version: KRUN_DEVICE_VERSION,
+        };
+        Ok(size_of::<InputDeviceIds>() as u8)
+    }
+
+    fn query_event_capabilities(
+        &self,
+        event_type: u8,
+        bitmap_buf: &mut [u8],
+    ) -> Result<u8, InputBackendError> {
+        let event_type_enum = InputEventType::try_from(event_type as u16)
+            .map_err(|_| InputBackendError::InvalidParam)?;
+
+        match event_type_enum {
+            InputEventType::Syn => Ok(write_bitmap(
+                bitmap_buf,
+                &[REL_X, REL_Y, REL_WHEEL, BTN_LEFT, BTN_RIGHT, BTN_MIDDLE],
+            )),
+            InputEventType::Key => Ok(write_bitmap(bitmap_buf, &[BTN_LEFT, BTN_RIGHT, BTN_MIDDLE])),
+            InputEventType::Rel => Ok(write_bitmap(bitmap_buf, &[REL_X, REL_Y, REL_WHEEL])),
+            _ => Ok(0),
+        }
+    }
+
+    fn query_abs_info(
+        &self,
+        _abs_axis: u8,
+        _abs_info: &mut InputAbsInfo,
+    ) -> Result<u8, InputBackendError> {
+        // We emit relative movement (REL events), not absolute positioning (ABS events), hence we don't specify the axis
+        Ok(0)
+    }
+
+    fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError> {
+        Ok(write_bitmap(properties, &[INPUT_PROP_POINTER]))
     }
 }
