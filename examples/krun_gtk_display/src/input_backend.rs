@@ -166,6 +166,9 @@ impl InputQueryConfig for GtkMouseConfig {
     }
 
     fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError> {
-        Ok(write_bitmap(properties, &[INPUT_PROP_POINTER]))
+        Ok(write_bitmap(
+            properties,
+            &[INPUT_PROP_POINTER, INPUT_PROP_DIRECT],
+        ))
     }
 }

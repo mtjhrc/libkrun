@@ -190,7 +190,7 @@ impl InputWorker {
         let avail_bytes = writer.available_bytes();
         let mut eof = false;
         while writer.bytes_written() + size_of::<VirtioInputEvent>() <= avail_bytes {
-            dbg!(writer.bytes_written());
+            writer.bytes_written();
             match events_instance.next_event() {
                 Ok(Some(event)) => {
                     let virtio_event = VirtioInputEvent {
@@ -198,7 +198,7 @@ impl InputWorker {
                         code: event.code,
                         value: event.value as i32,
                     };
-                    dbg!(virtio_event);
+                    debug!("Writing: {virtio_event:?}");
                     writer
                         .write_obj(virtio_event)
                         .expect("Failed to write input event to virtqueue");

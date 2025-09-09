@@ -62,6 +62,7 @@ use nitro::enclaves::NitroEnclave;
 
 #[cfg(feature = "gpu")]
 use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
+#[cfg(feature = "input")]
 use krun_input::{InputConfigBackend, InputEventProviderBackend};
 #[cfg(feature = "nitro")]
 use nitro_enclaves::launch::StartFlags;

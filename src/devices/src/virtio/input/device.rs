@@ -53,13 +53,18 @@ impl InputConfig {
             return;
         }
 
+        /*
+        unsafe {
+            self.repr.payload.bytes.fill(0);
+        }*/
+
         let result = match select {
             config_select::VIRTIO_INPUT_CFG_ID_NAME => {
                 cfg.query_device_name(unsafe { &mut self.repr.payload.bytes })
             }
             config_select::VIRTIO_INPUT_CFG_ID_SERIAL => {
                 //FIXME
-                cfg.query_device_name(unsafe { &mut self.repr.payload.bytes })
+                cfg.query_serial_name(unsafe { &mut self.repr.payload.bytes })
             }
             config_select::VIRTIO_INPUT_CFG_ID_DEVIDS => {
                 cfg.query_device_ids(unsafe { &mut self.repr.payload.ids })
@@ -97,18 +102,19 @@ impl InputConfig {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct InputConfigRepr {
-    pub select: u8,
-    pub subsel: u8,
-    pub size: u8,
-    pub payload: ConfigPayload,
+    select: u8,
+    subsel: u8,
+    size: u8,
+    reserved: [u8; 5],
+    payload: ConfigPayload,
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
 union ConfigPayload {
-    pub bytes: [u8; 128],
-    pub abs: InputAbsInfo,
-    pub ids: InputDeviceIds,
+    bytes: [u8; 128],
+    abs: InputAbsInfo,
+    ids: InputDeviceIds,
 }
 
 /// VirtIO Input device state

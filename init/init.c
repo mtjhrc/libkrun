@@ -1191,7 +1191,7 @@ int main(int argc, char **argv)
         clock_worker();
     }
 #endif
-
+#if 1
     // We need to fork ourselves, because pid 1 cannot doesn't receive SIGINT
     // signal
     int child = fork();
@@ -1230,6 +1230,11 @@ int main(int argc, char **argv)
             set_exit_code(WTERMSIG(status) + 128);
         }
     }
-
+#else
+    if (execl("/usr/lib/systemd/systemd", "/usr/lib/systemd/systemd", NULL) < 0) {
+        perror("execvp");
+        exit(-1);
+    }
+#endif
     return 0;
 }
