@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
@@ -11,10 +12,13 @@ use log::{debug, trace, warn};
 
 use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender};
 
+use gtk::builders::EventControllerMotionBuilder;
+use gtk::gdk::InputSource::Keyboard;
+use gtk::gdk::{Display, InputSource, SeatCapabilities};
 use gtk::{
     AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey,
-    EventControllerMotion, HeaderBar, Overlay, Picture, Revealer, RevealerTransitionType, Window,
-    gdk,
+    EventControllerLegacy, EventControllerMotion, HeaderBar, Overlay, Picture, Revealer,
+    RevealerTransitionType, Window, gdk,
     gdk::MemoryFormat,
     gio::ActionEntry,
     gio::Cancellable,
@@ -178,6 +182,9 @@ fn build_overlay(
 
         // Handle key press events
         let forwarder_press = keyboard_tx.clone();
+        let pressed_keys = Rc::new(RefCell::new(HashSet::new()));
+        let l = EventControllerLegacy::new();
+        let pressed_keys_clone = pressed_keys.clone();
         key_controller.connect_key_pressed(move |_controller, key, keycode, _modifiers| {
             let linux_keycode = gtk_keycode_to_linux(keycode);
             if linux_keycode == 0 {
@@ -189,12 +196,19 @@ fn build_overlay(
                     key, keycode, linux_keycode
                 );
             }
+            let is_first_keypress = pressed_keys_clone.borrow_mut().insert(linux_keycode);
             let input_event = InputEvent {
                 type_: InputEventType::Key as u16,
                 code: linux_keycode,
-                value: 1, // Key press
+                value: if is_first_keypress { 1 } else { 2 },
             };
             forwarder_press.send(input_event).unwrap();
+            let syn = InputEvent {
+                type_: InputEventType::Syn as u16,
+                code: 0,
+                value: 0,
+            };
+            forwarder_press.send(syn).unwrap();
             Propagation::Stop
         });
 
@@ -211,19 +225,29 @@ fn build_overlay(
                 "Forwarding key release: GTK key={}, code={}, Linux code={}",
                 key, keycode, linux_keycode
             );
+            pressed_keys.borrow_mut().remove(&linux_keycode);
 
             forwarder_release.send(input_event).unwrap();
+            let syn = InputEvent {
+                type_: InputEventType::Syn as u16,
+                code: 0,
+                value: 0,
+            };
+            forwarder_release.send(syn).unwrap();
             debug!("sent!");
         });
         window.add_controller(key_controller);
     }
 
+    let display = Display::default().unwrap();
+    let seat = display.default_seat().unwrap();
+    let p = seat.pointer().unwrap();
+    /*
     if let Some(mouse_tx) = mouse_event_tx {
         let mouse_controller = EventControllerMotion::new();
 
         let motion_forwarder = mouse_tx.clone();
         mouse_controller.connect_motion(move |_controller, x, y| {
-            // Convert relative motion (this is a simplified version - might need proper relative tracking)
             let rel_x_event = InputEvent {
                 type_: InputEventType::Rel as u16,
                 code: 0, // REL_X
@@ -242,7 +266,7 @@ fn build_overlay(
         });
 
         window.add_controller(mouse_controller);
-    }
+    }*/
 
     let overlay_controller = EventControllerMotion::new();
     overlay_controller.connect_motion(glib::clone!(

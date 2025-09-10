@@ -83,11 +83,11 @@ impl InputQueryConfig for GtkKeyboardConfig {
         match event_type_enum {
             InputEventType::Syn => {
                 let key_events = write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS);
-                let rep_events = write_bitmap(bitmap_buf, &[REP_DELAY, REP_PERIOD]);
+                let rep_events = write_bitmap(bitmap_buf, &[/*REP_DELAY, REP_PERIOD*/]);
                 Ok(max(key_events, rep_events))
             }
             InputEventType::Key => Ok(write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS)),
-            InputEventType::Rep => Ok(write_bitmap(bitmap_buf, &[REP_DELAY, REP_PERIOD])),
+            InputEventType::Rep => Ok(write_bitmap(bitmap_buf, &[/*REP_DELAY, REP_PERIOD*/])),
             _ => Ok(0),
         }
     }
