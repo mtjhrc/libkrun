@@ -5,12 +5,6 @@
 pub const BUS_VIRTUAL: u16 = 0x00;
 pub const BUS_USB: u16 = 0x03;
 
-// Device vendor/product IDs
-pub const KRUN_VENDOR_ID: u16 = 0x1234;
-pub const KRUN_KEYBOARD_PRODUCT_ID: u16 = 0x0001;
-pub const KRUN_MOUSE_PRODUCT_ID: u16 = 0x0002;
-pub const KRUN_DEVICE_VERSION: u16 = 0x0001;
-
 // Relative axes (from <linux/input.h>)
 pub const REL_X: u16 = 0x00;
 pub const REL_Y: u16 = 0x01;
@@ -18,7 +12,7 @@ pub const REL_WHEEL: u16 = 0x08;
 
 // Button codes (from <linux/input.h>)
 pub const BTN_LEFT: u16 = 0x110;
-pub const BTN_RIGHT: u16 = 0x111; 
+pub const BTN_RIGHT: u16 = 0x111;
 pub const BTN_MIDDLE: u16 = 0x112;
 
 // Repeat event codes (from <linux/input.h>)
@@ -252,29 +246,3 @@ pub const SUPPORTED_KEYBOARD_KEYS: &[u16] = &[
     KEY_VOLUMEUP,
     KEY_BACK,
 ];
-
-// Device names
-pub const KEYBOARD_DEVICE_NAME: &[u8] = b"libkrun Virtual Keyboard";
-pub const KEYBOARD_SERIAL_NAME: &[u8] = b"KRUN-KBD";
-pub const MOUSE_DEVICE_NAME: &[u8] = b"libkrun Virtual Mouse";
-pub const MOUSE_SERIAL_NAME: &[u8] = b"KRUN-MOUSE";
-
-// GTK to Linux input key code mapping
-pub const GTK_KEY_OFFSET: u32 = 8;
-
-/// Convert GTK key code to Linux input key code
-/// Returns the Linux input key code or 0 if no mapping exists
-pub fn gtk_keycode_to_linux(gtk_key: u32) -> u16 {
-    // GTK key codes are typically offset by 8 from Linux input key codes
-    if gtk_key >= GTK_KEY_OFFSET {
-        let linux_key = (gtk_key - GTK_KEY_OFFSET) as u16;
-        // Verify the key is in our supported set
-        if SUPPORTED_KEYBOARD_KEYS.contains(&linux_key) {
-            linux_key
-        } else {
-            0 // Unsupported key
-        }
-    } else {
-        0 // Invalid key
-    }
-}

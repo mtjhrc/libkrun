@@ -11,7 +11,7 @@ use utils::pollable_channel::PollableChannelSender;
 // deal with dropping the frames if they are coming too quickly to render. If we set this to a lower
 // number could slow down the libkrun thread, by making it wait for the display thread when calling
 // DisplayBackendBasicFramebuffer::alloc_frame.
-const MAX_DISPLAY_BUFFERS: usize = 4;
+const MAX_DISPLAY_BUFFERS: usize = 32;
 const _: () = {
     if MAX_DISPLAY_BUFFERS < 2 {
         panic!("At least 2 buffers are required")

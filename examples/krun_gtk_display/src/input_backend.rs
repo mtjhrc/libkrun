@@ -13,6 +13,39 @@ pub enum DeviceType {
     Mouse,
 }
 
+pub const KRUN_VENDOR_ID: u16 = u16::from_le_bytes(*b"RH");
+pub const KEYBOARD_DEVICE_NAME: &[u8] = b"libkrun Virtual Keyboard";
+pub const KEYBOARD_SERIAL_NAME: &[u8] = b"KRUN-KBD";
+pub const KEYBOARD_PRODUCT_ID: u16 = 0x0001;
+
+pub const MOUSE_DEVICE_NAME: &[u8] = b"libkrun Virtual Mouse";
+pub const MOUSE_SERIAL_NAME: &[u8] = b"KRUN-MOUSE";
+pub const MOUSE_PRODUCT_ID: u16 = 0x0002;
+
+pub const TOUCHSCREEN_DEVICE_NAME: &[u8] = b"libkrun Touchscreen";
+pub const TOUCHSCREEN_SERIAL_NAME: &[u8] = b"KRUN-TOUCH";
+pub const TOUCHSCREEN_PRODUCT_ID: u16 = 0x0003;
+
+// GTK to Linux input key code mapping
+pub const GTK_KEY_OFFSET: u32 = 8;
+
+/// Convert GTK key code to Linux input key code
+/// Returns the Linux input key code or 0 if no mapping exists
+pub fn gtk_keycode_to_linux(gtk_key: u32) -> u16 {
+    // GTK key codes are typically offset by 8 from Linux input key codes
+    if gtk_key >= GTK_KEY_OFFSET {
+        let linux_key = (gtk_key - GTK_KEY_OFFSET) as u16;
+        // Verify the key is in our supported set
+        if SUPPORTED_KEYBOARD_KEYS.contains(&linux_key) {
+            linux_key
+        } else {
+            0 // Unsupported key
+        }
+    } else {
+        0 // Invalid key
+    }
+}
+
 pub struct GtkInputEventProvider {
     rx: PollableChannelReciever<KrunInputEvent>,
 }
@@ -67,8 +100,8 @@ impl InputQueryConfig for GtkKeyboardConfig {
         *ids = InputDeviceIds {
             bustype: BUS_VIRTUAL,
             vendor: KRUN_VENDOR_ID,
-            product: KRUN_KEYBOARD_PRODUCT_ID,
-            version: KRUN_DEVICE_VERSION,
+            product: KEYBOARD_PRODUCT_ID,
+            version: 1,
         };
         Ok(size_of::<InputDeviceIds>() as u8)
     }
@@ -129,10 +162,10 @@ impl InputQueryConfig for GtkMouseConfig {
 
     fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<u8, InputBackendError> {
         *ids = InputDeviceIds {
-            bustype: BUS_USB,
+            bustype: BUS_VIRTUAL,
             vendor: KRUN_VENDOR_ID,
-            product: KRUN_MOUSE_PRODUCT_ID,
-            version: KRUN_DEVICE_VERSION,
+            product: MOUSE_PRODUCT_ID,
+            version: 1,
         };
         Ok(size_of::<InputDeviceIds>() as u8)
     }
@@ -161,6 +194,77 @@ impl InputQueryConfig for GtkMouseConfig {
         _abs_axis: u8,
         _abs_info: &mut InputAbsInfo,
     ) -> Result<u8, InputBackendError> {
+        // We emit relative movement (REL events), not absolute positioning (ABS events), hence we don't specify the axis
+        Ok(0)
+    }
+
+    fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError> {
+        Ok(write_bitmap(
+            properties,
+            &[INPUT_PROP_POINTER, INPUT_PROP_DIRECT],
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct GtkTouchscreenConfig;
+
+impl ObjectNew<()> for GtkTouchscreenConfig {
+    fn new(_userdata: Option<&()>) -> Self {
+        Self
+    }
+}
+
+impl InputQueryConfig for GtkTouchscreenConfig {
+    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
+        let copy_len = std::cmp::min(TOUCHSCREEN_DEVICE_NAME.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&MOUSE_DEVICE_NAME[..copy_len]);
+        Ok(copy_len as u8)
+    }
+
+    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
+        let copy_len = std::cmp::min(TOUCHSCREEN_SERIAL_NAME.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&MOUSE_SERIAL_NAME[..copy_len]);
+        Ok(copy_len as u8)
+    }
+
+    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<u8, InputBackendError> {
+        *ids = InputDeviceIds {
+            bustype: BUS_VIRTUAL,
+            vendor: KRUN_VENDOR_ID,
+            product: TOUCHSCREEN_PRODUCT_ID,
+            version: 1,
+        };
+        Ok(size_of::<InputDeviceIds>() as u8)
+    }
+
+    fn query_event_capabilities(
+        &self,
+        event_type: u8,
+        bitmap_buf: &mut [u8],
+    ) -> Result<u8, InputBackendError> {
+        let event_type_enum = InputEventType::try_from(event_type as u16)
+            .map_err(|_| InputBackendError::InvalidParam)?;
+
+        match event_type_enum {
+            InputEventType::Syn => Ok(write_bitmap(
+                bitmap_buf,
+                &[REL_X, REL_Y, REL_WHEEL, BTN_LEFT, BTN_RIGHT, BTN_MIDDLE],
+            )),
+            InputEventType::Key => Ok(write_bitmap(bitmap_buf, &[BTN_LEFT, BTN_RIGHT, BTN_MIDDLE])),
+            InputEventType::Rel => Ok(write_bitmap(bitmap_buf, &[REL_X, REL_Y, REL_WHEEL])),
+            _ => Ok(0),
+        }
+    }
+
+    fn query_abs_info(
+        &self,
+        abs_axis: u8,
+        abs_info: &mut InputAbsInfo,
+    ) -> Result<u8, InputBackendError> {
+        match abs_axis {
+            
+        }
         // We emit relative movement (REL events), not absolute positioning (ABS events), hence we don't specify the axis
         Ok(0)
     }
