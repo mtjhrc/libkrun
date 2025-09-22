@@ -134,6 +134,24 @@ pub const KEY_VOLUMEDOWN: u16 = 114;
 pub const KEY_VOLUMEUP: u16 = 115;
 pub const KEY_BACK: u16 = 158;
 
+pub const ABS_X: u16 = 0x00;
+pub const ABS_Y: u16 = 0x01;
+pub const ABS_Z: u16 = 0x02;
+
+pub const BTN_TOUCH: u16 = 0x14a;
+
+pub const ABS_MT_SLOT: u16 = 0x2f; /* MT slot being modified */
+pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30; /* Major axis of touching ellipse */
+pub const ABS_MT_TOUCH_MINOR: u16 = 0x31; /* Minor axis (omit if circular) */
+pub const ABS_MT_WIDTH_MAJOR: u16 = 0x32; /* Major axis of approaching ellipse */
+pub const ABS_MT_WIDTH_MINOR: u16 = 0x33; /* Minor axis (omit if circular) */
+pub const ABS_MT_ORIENTATION: u16 = 0x34; /* Ellipse orientation */
+pub const ABS_MT_POSITION_X: u16 = 0x35; /* Center X touch position */
+pub const ABS_MT_POSITION_Y: u16 = 0x36; /* Center Y touch position */
+pub const ABS_MT_TOOL_TYPE: u16 = 0x37; /* Type of touching device */
+pub const ABS_MT_BLOB_ID: u16 = 0x38; /* Group a set of packets as a blob */
+pub const ABS_MT_TRACKING_ID: u16 = 0x39; /* Unique ID of initiated contact */
+
 // Supported keyboard keys array
 pub const SUPPORTED_KEYBOARD_KEYS: &[u16] = &[
     KEY_ESC,

@@ -1,6 +1,6 @@
+use log::{debug, error};
 use std::error::Error;
 use std::io;
-use log::{debug, error};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::thread::{self, JoinHandle};
@@ -148,14 +148,12 @@ impl InputWorker {
             for event in &events[..num_events] {
                 match event.data() {
                     EVENTQ_USER => {
-                        debug!("eventq event!");
-                        // Input events available from backend
+                        trace!("EVENTQ_USER");
                         needs_interrupt |= self.process_event_queue(&mut events_instance);
                     }
                     EVENTQ => {
                         self.event_queue_efd.read().unwrap();
-                        debug!("eventq event!");
-                        // Input events available from backend
+                        trace!("EVENTQ");
                         needs_interrupt |= self.process_event_queue(&mut events_instance);
                     }
                     STATUSQ => {
@@ -171,10 +169,9 @@ impl InputWorker {
                         error!("TODO: {x}")
                     }
                 }
-            }
-
-            if needs_interrupt {
-                self.interrupt.signal_used_queue();
+                if needs_interrupt {
+                    self.interrupt.signal_used_queue();
+                }
             }
         }
 
@@ -190,7 +187,6 @@ impl InputWorker {
         let avail_bytes = writer.available_bytes();
         let mut eof = false;
         while writer.bytes_written() + size_of::<VirtioInputEvent>() <= avail_bytes {
-            writer.bytes_written();
             match events_instance.next_event() {
                 Ok(Some(event)) => {
                     let virtio_event = VirtioInputEvent {
@@ -203,12 +199,14 @@ impl InputWorker {
                         .write_obj(virtio_event)
                         .expect("Failed to write input event to virtqueue");
                 }
+                // No more events available
                 Ok(None) => {
                     eof = true;
                     break;
-                } // No more events available
+                }
                 Err(e) => {
                     error!("Error getting next event: {:?}", e);
+                    eof = true;
                     break;
                 }
             }
@@ -220,7 +218,6 @@ impl InputWorker {
         let mut needs_interrupt = false;
         let mem = self.mem.clone();
 
-        // Only process the queue if we might have events to send
         while let Some(desc_chain) = self.event_queue.pop(&mem) {
             let mut writer = match Writer::new(&mem, desc_chain.clone()) {
                 Ok(w) => w,
@@ -230,10 +227,7 @@ impl InputWorker {
                 }
             };
 
-            let Ok((bytes_written, eof)) = self.fill_event_virtqueue(events_instance, &mut writer)
-            else {
-                break;
-            };
+            let (bytes_written, eof) = self.fill_event_virtqueue(events_instance, &mut writer).unwrap();
 
             if bytes_written != 0 {
                 self.event_queue
@@ -251,15 +245,11 @@ impl InputWorker {
                 break;
             }
         }
-        debug!("QUEUE SIZE !!!!! {}", self.event_queue.len(&mem));
         needs_interrupt
     }
 
     /// Reads events from guest and sends them to the event source (currently no-op)
-    fn read_status_virtqueue(
-        &mut self,
-        reader: &mut Reader,
-    ) -> Result<usize, io::Error> {
+    fn read_status_virtqueue(&mut self, reader: &mut Reader) -> Result<usize, io::Error> {
         while reader.available_bytes() >= size_of::<VirtioInputEvent>() {
             let mut buffer: [u8; size_of::<virtio_input::virtio_input_event>()] =
                 [0; size_of::<virtio_input::virtio_input_event>()];

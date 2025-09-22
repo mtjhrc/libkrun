@@ -1,17 +1,13 @@
+use crate::input_constants;
 use crate::input_constants::*;
 use krun_input::{
     InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent as KrunInputEvent, InputEventType,
     InputEventsImpl, InputQueryConfig, ObjectNew, write_bitmap,
 };
 use std::cmp::max;
+use std::mem;
 use std::os::fd::RawFd;
 use utils::pollable_channel::PollableChannelReciever;
-
-#[derive(Clone)]
-pub enum DeviceType {
-    Keyboard,
-    Mouse,
-}
 
 pub const KRUN_VENDOR_ID: u16 = u16::from_le_bytes(*b"RH");
 pub const KEYBOARD_DEVICE_NAME: &[u8] = b"libkrun Virtual Keyboard";
@@ -218,13 +214,13 @@ impl ObjectNew<()> for GtkTouchscreenConfig {
 impl InputQueryConfig for GtkTouchscreenConfig {
     fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
         let copy_len = std::cmp::min(TOUCHSCREEN_DEVICE_NAME.len(), name_buf.len());
-        name_buf[..copy_len].copy_from_slice(&MOUSE_DEVICE_NAME[..copy_len]);
+        name_buf[..copy_len].copy_from_slice(&TOUCHSCREEN_DEVICE_NAME[..copy_len]);
         Ok(copy_len as u8)
     }
 
     fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
         let copy_len = std::cmp::min(TOUCHSCREEN_SERIAL_NAME.len(), name_buf.len());
-        name_buf[..copy_len].copy_from_slice(&MOUSE_SERIAL_NAME[..copy_len]);
+        name_buf[..copy_len].copy_from_slice(&TOUCHSCREEN_SERIAL_NAME[..copy_len]);
         Ok(copy_len as u8)
     }
 
@@ -247,12 +243,16 @@ impl InputQueryConfig for GtkTouchscreenConfig {
             .map_err(|_| InputBackendError::InvalidParam)?;
 
         match event_type_enum {
-            InputEventType::Syn => Ok(write_bitmap(
+            InputEventType::Syn => Ok(write_bitmap(bitmap_buf, &[BTN_TOUCH, ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y])),
+            InputEventType::Key => Ok(write_bitmap(bitmap_buf, &[BTN_TOUCH])),
+            InputEventType::Abs => Ok(write_bitmap(
                 bitmap_buf,
-                &[REL_X, REL_Y, REL_WHEEL, BTN_LEFT, BTN_RIGHT, BTN_MIDDLE],
+                &[
+                    ABS_MT_SLOT,
+                    ABS_X,
+                    ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y
+                ],
             )),
-            InputEventType::Key => Ok(write_bitmap(bitmap_buf, &[BTN_LEFT, BTN_RIGHT, BTN_MIDDLE])),
-            InputEventType::Rel => Ok(write_bitmap(bitmap_buf, &[REL_X, REL_Y, REL_WHEEL])),
             _ => Ok(0),
         }
     }
@@ -262,17 +262,72 @@ impl InputQueryConfig for GtkTouchscreenConfig {
         abs_axis: u8,
         abs_info: &mut InputAbsInfo,
     ) -> Result<u8, InputBackendError> {
-        match abs_axis {
-            
+        match abs_axis as u16 {
+            input_constants::ABS_MT_SLOT => {
+                *abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 10,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 0,
+                };
+                Ok(mem::size_of::<InputAbsInfo>() as u8)
+            }
+            input_constants::ABS_MT_TOOL_TYPE => {
+                *abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 2,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 0,
+                };
+                Ok(mem::size_of::<InputAbsInfo>() as u8)
+            }
+            input_constants::ABS_MT_POSITION_X => {
+                *abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 13764,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 0,
+                };
+                Ok(mem::size_of::<InputAbsInfo>() as u8)
+            }
+            input_constants::ABS_MT_POSITION_Y => {
+                *abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 7740,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 0,
+                };
+                Ok(mem::size_of::<InputAbsInfo>() as u8)
+            }
+            input_constants::ABS_X => {
+                *abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 13764,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 40,
+                };
+                Ok(mem::size_of::<InputAbsInfo>() as u8)
+            }
+            input_constants::ABS_Y => {
+                *abs_info = InputAbsInfo {
+                    min: 0,
+                    max: 7740,
+                    fuzz: 0,
+                    flat: 0,
+                    res: 40,
+                };
+                Ok(mem::size_of::<InputAbsInfo>() as u8)
+            }
+            _ => Ok(0),
         }
-        // We emit relative movement (REL events), not absolute positioning (ABS events), hence we don't specify the axis
-        Ok(0)
     }
 
     fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError> {
-        Ok(write_bitmap(
-            properties,
-            &[INPUT_PROP_POINTER, INPUT_PROP_DIRECT],
-        ))
+        Ok(write_bitmap(properties, &[INPUT_PROP_DIRECT]))
     }
 }

@@ -1,20 +1,28 @@
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::os::fd::AsRawFd;
-use std::rc::Rc;
-
 use super::scanout_paintable::ScanoutPaintable;
 use crate::DisplayEvent;
-use crate::input_constants::gtk_keycode_to_linux;
 use krun_display::Rect;
 use krun_input::{InputEvent, InputEventType};
 use log::{debug, trace, warn};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::iter;
+use std::os::fd::AsRawFd;
+use std::rc::Rc;
+use std::time::Duration;
 
 use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender};
 
+use crate::input_backend::gtk_keycode_to_linux;
+use crate::input_constants::{
+    ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_X, ABS_Y, BTN_TOUCH,
+};
 use gtk::builders::EventControllerMotionBuilder;
+use gtk::ffi::gtk_file_dialog_get_accept_label;
 use gtk::gdk::InputSource::Keyboard;
-use gtk::gdk::{Display, InputSource, SeatCapabilities};
+use gtk::gdk::{Display, EventSequence, EventType, InputSource, SeatCapabilities, TouchEvent};
+use gtk::glib::{
+    idle_add_once, timeout_add, timeout_add_local, timeout_add_seconds, timeout_source_new,
+};
 use gtk::{
     AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey,
     EventControllerLegacy, EventControllerMotion, HeaderBar, Overlay, Picture, Revealer,
@@ -26,6 +34,180 @@ use gtk::{
     prelude::*,
 };
 use krun_display::MAX_DISPLAYS;
+
+type EventSender = PollableChannelSender<InputEvent>;
+
+struct FingerState {
+    seq: EventSequence,
+    current_position: Option<(u32, u32)>,
+}
+
+struct TouchSequencedSender {
+    fingers: Vec<FingerState>,
+    synced_pos: (u32, u32),
+    pending_pos: (u32, u32),
+    active_slot: u16,
+    queue: Vec<InputEvent>,
+    tx: EventSender,
+}
+
+impl TouchSequencedSender {
+    fn new(tx: EventSender) -> Self {
+        Self {
+            fingers: Vec::new(),
+            synced_pos: (0, 0),
+            pending_pos: (0, 0),
+            tx,
+            active_slot: u16::MAX,
+            queue: Vec::new(),
+        }
+    }
+
+    fn sync(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+
+        debug!("Sync: {:#?}", &self.queue);
+
+        let pending_events = [const {
+            InputEvent {
+                type_: 0,
+                code: 0,
+                value: 0,
+            }
+        }; 2];
+        let mut pending_events_len = 0;
+
+        if self.pending_pos.0 != self.synced_pos.0 {
+            self.queue.push(InputEvent {
+                type_: InputEventType::Abs as u16,
+                code: ABS_X,
+                value: self.pending_pos.0,
+            });
+            pending_events_len += 1;
+        }
+
+        if self.pending_pos.1 != self.synced_pos.1 {
+            self.queue.push(InputEvent {
+                type_: InputEventType::Abs as u16,
+                code: ABS_Y,
+                value: self.pending_pos.1,
+            });
+            pending_events_len += 1;
+        }
+
+        let final_sync_event = iter::once(InputEvent {
+            type_: InputEventType::Syn as u16,
+            code: 0,
+            value: 0,
+        });
+
+        let input_events = self.queue.drain(..);
+
+        self.synced_pos = self.pending_pos;
+
+        let iter = (&pending_events[..pending_events_len]).iter().copied();
+        self.tx
+            .send_many(
+                input_events
+                    .chain(final_sync_event)
+                    .chain(iter),
+            )
+            .unwrap();
+    }
+
+    fn clear_finger_positions(&mut self) {
+        for f in &mut self.fingers {
+            f.current_position = None;
+        }
+    }
+
+    // Map gtk coordinates to ours
+    fn map_position((x, y): (f64, f64)) -> (u32, u32) {
+        ((x * 13764.0 / 1280.0) as u32, (y * 7740.0 / 720.0) as u32)
+    }
+
+    fn emit_finger_id(&mut self, finger_id: u16) {
+        if self.active_slot == finger_id {
+            return;
+        }
+        self.queue.push(InputEvent {
+            type_: InputEventType::Abs as u16,
+            code: ABS_MT_SLOT,
+            value: finger_id as u32,
+        });
+        self.active_slot = finger_id;
+    }
+
+    fn push_event(&mut self, event: &TouchEvent) {
+        let finger_idx = self.track_finger(event.event_sequence());
+        let (x, y) = Self::map_position(event.position().unwrap());
+
+        if finger_idx == 0 {
+            self.pending_pos = (x, y);
+        }
+
+        // TODO: do we need to sync here, or just leave it up to the timer?
+        if self.fingers[finger_idx as usize].current_position.is_some() {
+            self.sync();
+        }
+
+        let ev_type = event.event_type();
+
+        let (old_x, old_y) = self.fingers[finger_idx as usize]
+            .current_position
+            .map(|(x, y)| (Some(x), Some(y)))
+            .unwrap_or((None, None));
+
+        self.emit_finger_id(finger_idx);
+
+        if old_x.is_none_or(|old_x| old_x == x) {
+            self.queue.push(InputEvent {
+                type_: InputEventType::Abs as u16,
+                code: ABS_MT_POSITION_X,
+                value: x,
+            });
+        }
+
+        if old_y.is_none_or(|old_y| old_y == y) {
+            self.queue.push(InputEvent {
+                type_: InputEventType::Abs as u16,
+                code: ABS_MT_POSITION_Y,
+                value: y,
+            });
+        }
+
+        if ev_type == EventType::TouchBegin {
+            self.queue.push(InputEvent {
+                type_: InputEventType::Key as u16,
+                code: BTN_TOUCH,
+                value: 1,
+            });
+            self.sync();
+        } else if ev_type == EventType::TouchEnd {
+            self.queue.push(InputEvent {
+                type_: InputEventType::Key as u16,
+                code: BTN_TOUCH,
+                value: 0,
+            });
+            self.sync();
+            self.clear_finger_positions();
+        }
+    }
+
+    fn track_finger(&mut self, seq: EventSequence) -> u16 {
+        if let Some(i) = self.fingers.iter().position(|s| s.seq == seq) {
+            return i as u16;
+        }
+
+        self.fingers.push(FingerState {
+            seq,
+            current_position: None,
+        });
+        (self.fingers.len() - 1) as u16
+    }
+}
 
 struct ScanoutWindow {
     window: ApplicationWindow,
@@ -45,8 +227,9 @@ impl ScanoutWindow {
         width: i32,
         height: i32,
         format: MemoryFormat,
-        keyboard_forwarder: Option<PollableChannelSender<InputEvent>>,
-        mouse_forwarder: Option<PollableChannelSender<InputEvent>>,
+        keyboard_forwarder: Option<EventSender>,
+        mouse_forwarder: Option<EventSender>,
+        touch_forwarder: Option<EventSender>,
     ) -> Self {
         let header_bar = HeaderBar::new();
         let window = ApplicationWindow::builder()
@@ -107,7 +290,12 @@ impl ScanoutWindow {
         window.set_titlebar(Some(&header_bar));
         header_bar.pack_end(&fullscreen_btn);
 
-        let overlay = build_overlay(window.as_ref(), keyboard_forwarder, mouse_forwarder);
+        let overlay = build_overlay(
+            window.as_ref(),
+            keyboard_forwarder,
+            mouse_forwarder,
+            touch_forwarder,
+        );
         overlay.set_child(Some(&picture));
         window.set_child(Some(&overlay));
         window.set_visible(true);
@@ -141,8 +329,9 @@ impl Drop for ScanoutWindow {
 
 fn build_overlay(
     window: &Window,
-    keyboard_event_tx: Option<PollableChannelSender<InputEvent>>,
-    mouse_event_tx: Option<PollableChannelSender<InputEvent>>,
+    keyboard_event_tx: Option<EventSender>,
+    mouse_event_tx: Option<EventSender>,
+    touch_event_tx: Option<EventSender>,
 ) -> Overlay {
     let overlay_bar = HeaderBar::builder()
         .valign(Align::Start)
@@ -183,7 +372,6 @@ fn build_overlay(
         // Handle key press events
         let forwarder_press = keyboard_tx.clone();
         let pressed_keys = Rc::new(RefCell::new(HashSet::new()));
-        let l = EventControllerLegacy::new();
         let pressed_keys_clone = pressed_keys.clone();
         key_controller.connect_key_pressed(move |_controller, key, keycode, _modifiers| {
             let linux_keycode = gtk_keycode_to_linux(keycode);
@@ -209,7 +397,7 @@ fn build_overlay(
                 value: 0,
             };
             forwarder_press.send(syn).unwrap();
-            Propagation::Stop
+            Propagation::Proceed
         });
 
         // Handle key release events
@@ -239,34 +427,26 @@ fn build_overlay(
         window.add_controller(key_controller);
     }
 
-    let display = Display::default().unwrap();
-    let seat = display.default_seat().unwrap();
-    let p = seat.pointer().unwrap();
-    /*
-    if let Some(mouse_tx) = mouse_event_tx {
-        let mouse_controller = EventControllerMotion::new();
-
-        let motion_forwarder = mouse_tx.clone();
-        mouse_controller.connect_motion(move |_controller, x, y| {
-            let rel_x_event = InputEvent {
-                type_: InputEventType::Rel as u16,
-                code: 0, // REL_X
-                value: x as u32,
-            };
-
-            let rel_y_event = InputEvent {
-                type_: InputEventType::Rel as u16,
-                code: 1, // REL_Y
-                value: y as u32,
-            };
-
-            debug!("Forwarding mouse motion: x={}, y={}", x, y);
-            let _ = motion_forwarder.send(rel_x_event);
-            let _ = motion_forwarder.send(rel_y_event);
+    if let Some(touch_event_tx) = touch_event_tx {
+        let input_controller = EventControllerLegacy::new();
+        let mut touch_sender = Rc::new(RefCell::new(TouchSequencedSender::new(touch_event_tx)));
+        let touch_sender_for_sync = touch_sender.clone();
+        input_controller.connect_event(move |_, event| {
+            if let Some(touch) = event.downcast_ref::<gdk::TouchEvent>() {
+                let seq_id = touch_sender.borrow_mut().push_event(touch);
+            }
+            glib::Propagation::Proceed
         });
+        //TODO: conditionally enable this timer only if we have a pending event?
+        let timer = timeout_add_local(Duration::from_millis(8), move || {
+            touch_sender_for_sync.borrow_mut().sync();
+            ControlFlow::Continue
+        });
+        // TODO call upon syncing
+        //timer.remove()
 
-        window.add_controller(mouse_controller);
-    }*/
+        overlay.add_controller(input_controller);
+    }
 
     let overlay_controller = EventControllerMotion::new();
     overlay_controller.connect_motion(glib::clone!(
@@ -292,8 +472,9 @@ pub struct DisplayWorker {
     app: Application,
     app_name: String,
     rx: PollableChannelReciever<DisplayEvent>,
-    keyboard_event_tx: Option<PollableChannelSender<InputEvent>>,
-    mouse_event_tx: Option<PollableChannelSender<InputEvent>>,
+    keyboard_event_tx: Option<EventSender>,
+    mouse_event_tx: Option<EventSender>,
+    touch_event_tx: Option<EventSender>,
     scanouts: RefCell<[Option<ScanoutWindow>; MAX_DISPLAYS]>,
 }
 
@@ -302,8 +483,9 @@ impl DisplayWorker {
         app: Application,
         app_name: String,
         rx: PollableChannelReciever<DisplayEvent>,
-        keyboard_event_tx: Option<PollableChannelSender<InputEvent>>,
-        mouse_event_tx: Option<PollableChannelSender<InputEvent>>,
+        keyboard_event_tx: Option<EventSender>,
+        mouse_event_tx: Option<EventSender>,
+        touch_event_tx: Option<EventSender>,
     ) -> Self {
         Self {
             app,
@@ -311,6 +493,7 @@ impl DisplayWorker {
             rx,
             keyboard_event_tx,
             mouse_event_tx,
+            touch_event_tx,
             scanouts: Default::default(),
         }
     }
@@ -349,6 +532,7 @@ impl DisplayWorker {
                             format,
                             self.keyboard_event_tx.clone(),
                             self.mouse_event_tx.clone(),
+                            self.touch_event_tx.clone(),
                         ));
                     }
                 }
@@ -377,8 +561,9 @@ impl DisplayWorker {
     pub fn run(
         app_name: String,
         rx: PollableChannelReciever<DisplayEvent>,
-        keyboard_tx: Option<PollableChannelSender<InputEvent>>,
-        mouse_tx: Option<PollableChannelSender<InputEvent>>,
+        keyboard_tx: Option<EventSender>,
+        mouse_tx: Option<EventSender>,
+        touch_tx: Option<EventSender>,
     ) {
         let app = Application::builder().build();
 
@@ -394,6 +579,7 @@ impl DisplayWorker {
             rx,
             keyboard_tx,
             mouse_tx,
+            touch_tx,
         ));
         app.connect_activate(move |_app| {
             let display_worker = display_worker.clone();

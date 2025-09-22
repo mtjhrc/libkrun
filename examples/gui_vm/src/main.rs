@@ -2,7 +2,7 @@ use clap::Parser;
 use clap_derive::Parser;
 use gtk_display::{DisplayBackendHandle, InputBackendHandle};
 
-use krun_sys::{KRUN_DISK_FORMAT_QCOW2, KRUN_DISK_FORMAT_RAW, VIRGLRENDERER_RENDER_SERVER, VIRGLRENDERER_THREAD_SYNC, VIRGLRENDERER_USE_ASYNC_FENCE_CB, VIRGLRENDERER_USE_EGL, VIRGLRENDERER_VENUS, krun_add_disk2, krun_add_display, krun_add_input_device, krun_create_ctx, krun_display_set_dpi, krun_display_set_physical_size, krun_display_set_refresh_rate, krun_set_display_backend, krun_set_exec, krun_set_gpu_options2, krun_set_log_level, krun_set_passt_fd, krun_set_root, krun_set_root_disk_remount, krun_set_vm_config, krun_start_enter, krun_init_log, KRUN_LOG_STYLE_ALWAYS, KRUN_LOG_LEVEL_TRACE};
+use krun_sys::{KRUN_DISK_FORMAT_QCOW2, KRUN_DISK_FORMAT_RAW, VIRGLRENDERER_RENDER_SERVER, VIRGLRENDERER_THREAD_SYNC, VIRGLRENDERER_USE_ASYNC_FENCE_CB, VIRGLRENDERER_USE_EGL, VIRGLRENDERER_VENUS, krun_add_disk2, krun_add_display, krun_add_input_device, krun_create_ctx, krun_display_set_dpi, krun_display_set_physical_size, krun_display_set_refresh_rate, krun_set_display_backend, krun_set_exec, krun_set_gpu_options2, krun_set_log_level, krun_set_passt_fd, krun_set_root, krun_set_root_disk_remount, krun_set_vm_config, krun_start_enter, krun_init_log, KRUN_LOG_STYLE_ALWAYS, KRUN_LOG_LEVEL_TRACE, krun_add_input_device_fd};
 use log::LevelFilter;
 use regex::{Captures, Regex};
 use std::ffi::{CStr, CString, c_void};
@@ -12,7 +12,7 @@ use std::io::PipeReader;
 use std::mem::size_of_val;
 
 use clap::ValueHint::CommandString;
-use std::os::fd::IntoRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::process::exit;
 use std::ptr::null;
@@ -137,32 +137,22 @@ fn krun_thread(
             krun_call!(krun_set_root_disk_remount(
                 ctx,
                 c"/dev/vda".as_ptr(),
-                null(),
+                c"btrfs".as_ptr(),
                 null()
             ))?;
-
-            let executable = args.executable.as_ref().unwrap().as_ptr();
-            let argv: Vec<_> = args.argv.iter().map(|a| a.as_ptr()).collect();
-            let argv_ptr = if argv.is_empty() {
-                null()
-            } else {
-                argv.as_ptr()
-            };
-            let envp = [null()];
-            krun_call!(krun_set_exec(ctx, executable, argv_ptr, envp.as_ptr()))?;
         } else if let Some(root_dir) = &args.root_dir {
             krun_call!(krun_set_root(ctx, root_dir.as_ptr()))?;
-            // Executable variable should be set if we have root_dir, this is verified by clap
-            let executable = args.executable.as_ref().unwrap().as_ptr();
-            let argv: Vec<_> = args.argv.iter().map(|a| a.as_ptr()).collect();
-            let argv_ptr = if argv.is_empty() {
-                null()
-            } else {
-                argv.as_ptr()
-            };
-            let envp = [null()];
-            krun_call!(krun_set_exec(ctx, executable, argv_ptr, envp.as_ptr()))?;
         }
+
+        let executable = args.executable.as_ref().unwrap().as_ptr();
+        let argv: Vec<_> = args.argv.iter().map(|a| a.as_ptr()).collect();
+        let argv_ptr = if argv.is_empty() {
+            null()
+        } else {
+            argv.as_ptr()
+        };
+        let envp = [null()];
+        krun_call!(krun_set_exec(ctx, executable, argv_ptr, envp.as_ptr()))?;
 
         for display in &args.display {
             let display_id = krun_call_u32!(krun_add_display(ctx, display.width, display.height))?;
@@ -188,6 +178,9 @@ fn krun_thread(
             size_of_val(&display_backend),
         ))?;
 
+        //let fd = File::open("/dev/input/event13").unwrap().into_raw_fd();
+        //krun_call!(krun_add_input_device_fd(ctx, fd));
+
         // Configure all input devices
         for handle in &input_device_handles {
             let config_backend = handle.get_config();
@@ -211,12 +204,12 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let (display_backend, input_devices, display_worker) =
+    let (display_backend, input_backends, display_worker) =
         gtk_display::create_display_with_input("libkrun examples/gui_vm".to_string())?;
 
     thread::scope(|s| {
         s.spawn(|| {
-            if let Err(e) = krun_thread(&args, display_backend, input_devices) {
+            if let Err(e) = krun_thread(&args, display_backend, input_backends) {
                 eprintln!("{e}");
                 exit(1);
             }

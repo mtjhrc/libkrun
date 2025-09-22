@@ -54,7 +54,6 @@ pub trait IntoInputConfig<T: Sync> {
     fn into_input_config(userdata: Option<&T>) -> InputConfigBackend;
 }
 
-// Single implementation that handles both static and dynamic config backends
 impl<I, UserData: Send + Sync> IntoInputConfig<UserData> for I
 where
     I: InputQueryConfig + ObjectNew<UserData>,
@@ -185,7 +184,7 @@ where
             create_fn: Some(create_config_fn::<UserData, I>),
             vtable: krun_input_config_vtable {
                 destroy: Some(config_destroy_fn::<I>),
-                query_device_name: Some(query_serial_name_fn::<UserData, I>),
+                query_device_name: Some(query_device_name_fn::<UserData, I>),
                 query_serial_name: Some(query_serial_name_fn::<UserData, I>),
                 query_device_ids: Some(query_device_ids_fn::<UserData, I>),
                 query_event_capabilities: Some(query_event_capabilities_fn::<UserData, I>),

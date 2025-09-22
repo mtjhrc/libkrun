@@ -1,12 +1,13 @@
 mod display_backend;
 mod display_worker;
 mod input_backend;
-mod scanout_paintable;
 mod input_constants;
+mod scanout_paintable;
 
 use crate::display_worker::DisplayWorker;
-pub use crate::input_backend::DeviceType;
-use crate::input_backend::{GtkInputEventProvider, GtkKeyboardConfig, GtkMouseConfig};
+use crate::input_backend::{
+    GtkInputEventProvider, GtkKeyboardConfig, GtkMouseConfig, GtkTouchscreenConfig,
+};
 use anyhow::Context;
 pub use display_backend::DisplayEvent;
 pub use display_backend::GtkDisplayBackend;
@@ -27,12 +28,12 @@ impl DisplayBackendHandle {
 
 pub struct InputBackendHandle {
     rx: PollableChannelReciever<InputEvent>,
-    device_type: DeviceType,
+    input_type: InputType,
 }
 
 impl InputBackendHandle {
-    fn new(rx: PollableChannelReciever<InputEvent>, device_type: DeviceType) -> Self {
-        Self { rx, device_type }
+    fn new(rx: PollableChannelReciever<InputEvent>, device_type: InputType) -> Self {
+        Self { rx, input_type: device_type }
     }
 
     pub fn get_events(&self) -> InputEventProviderBackend {
@@ -40,9 +41,13 @@ impl InputBackendHandle {
     }
 
     pub fn get_config(&self) -> InputConfigBackend {
-        match self.device_type {
-            DeviceType::Keyboard => GtkKeyboardConfig::into_input_config(None),
-            DeviceType::Mouse => GtkMouseConfig::into_input_config(None),
+        match self.input_type {
+            InputType::Keyboard => GtkKeyboardConfig::into_input_config(None),
+            InputType::Mouse => {
+                unreachable!();
+                GtkMouseConfig::into_input_config(None)
+            },
+            InputType::TouchScreen => GtkTouchscreenConfig::into_input_config(None),
         }
     }
 }
@@ -50,8 +55,9 @@ impl InputBackendHandle {
 pub struct DisplayBackendWorker {
     app_name: String,
     display_rx: PollableChannelReciever<DisplayEvent>,
-    mouse_tx: Option<PollableChannelSender<InputEvent>>,
     keyboard_tx: Option<PollableChannelSender<InputEvent>>,
+    mouse_tx: Option<PollableChannelSender<InputEvent>>,
+    touch_tx: Option<PollableChannelSender<InputEvent>>,
 }
 
 impl DisplayBackendWorker {
@@ -62,8 +68,17 @@ impl DisplayBackendWorker {
             self.display_rx,
             self.keyboard_tx,
             self.mouse_tx,
+            self.touch_tx,
         );
     }
+}
+
+
+#[derive(Clone)]
+pub enum InputType {
+    Keyboard,
+    Mouse,
+    TouchScreen,
 }
 
 /// Create gtk display and input backends
@@ -81,16 +96,21 @@ pub fn create_display_with_input(
     let (mouse_tx, mouse_rx) =
         pollable_channel().context("Failed to create mouse events channel")?;
 
+    let (touch_tx, touch_rx) =
+        pollable_channel().context("Failed to create mouse events channel")?;
+
     let display_backend = DisplayBackendHandle { tx: display_tx };
     let input_handles = vec![
-        InputBackendHandle::new(keyboard_rx, DeviceType::Keyboard),
-        InputBackendHandle::new(mouse_rx, DeviceType::Mouse),
+        InputBackendHandle::new(keyboard_rx, InputType::Keyboard),
+        //InputBackendHandle::new(mouse_rx, InputType::Mouse),
+        InputBackendHandle::new(touch_rx, InputType::TouchScreen),
     ];
     let worker = DisplayBackendWorker {
         app_name,
         display_rx,
         keyboard_tx: Some(keyboard_tx),
         mouse_tx: Some(mouse_tx),
+        touch_tx: Some(touch_tx),
     };
 
     Ok((display_backend, input_handles, worker))

@@ -53,24 +53,22 @@ impl InputConfig {
             return;
         }
 
-        /*
         unsafe {
             self.repr.payload.bytes.fill(0);
-        }*/
+        }
 
         let result = match select {
             config_select::VIRTIO_INPUT_CFG_ID_NAME => {
                 cfg.query_device_name(unsafe { &mut self.repr.payload.bytes })
             }
             config_select::VIRTIO_INPUT_CFG_ID_SERIAL => {
-                //FIXME
                 cfg.query_serial_name(unsafe { &mut self.repr.payload.bytes })
             }
             config_select::VIRTIO_INPUT_CFG_ID_DEVIDS => {
                 cfg.query_device_ids(unsafe { &mut self.repr.payload.ids })
             }
             config_select::VIRTIO_INPUT_CFG_PROP_BITS => {
-                cfg.query_event_capabilities(subsel, unsafe { &mut self.repr.payload.bytes })
+                cfg.query_properties(unsafe { &mut self.repr.payload.bytes })
             }
             config_select::VIRTIO_INPUT_CFG_EV_BITS => {
                 cfg.query_event_capabilities(subsel, unsafe { &mut self.repr.payload.bytes })

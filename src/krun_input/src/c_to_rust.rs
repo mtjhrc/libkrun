@@ -59,7 +59,7 @@ impl InputEventsImpl for InputEventProviderInstance {
 
     /// Fetch the next available input event, returns None if no events are available
     fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError> {
-        let mut event = header::krun_input_event {
+        let mut event = InputEvent {
             type_: 0,
             code: 0,
             value: 0,
@@ -70,11 +70,7 @@ impl InputEventsImpl for InputEventProviderInstance {
         };
 
         into_rust_result!(result,
-            1 => Ok(Some(InputEvent {
-                type_: event.type_,
-                code: event.code,
-                value: event.value,
-            })),
+            1 => Ok(Some(event)),
             0 => Ok(None)
         )
     }
