@@ -16,8 +16,6 @@ pub trait ObjectNew<T: Sync> {
     fn new(userdata: Option<&T>) -> Self;
 }
 
-// Remove InputConfigNew - we'll use InputBackendNew<()> for static configs
-
 pub trait InputQueryConfig {
     /// Query device name into provided buffer
     fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError>;
