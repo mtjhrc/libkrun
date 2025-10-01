@@ -177,17 +177,17 @@ impl TouchEventSequencedSender {
     fn map_position(
         TouchArea {
             x:
-            Axis {
-                min: min_x,
-                max: max_x,
-                ..
-            },
+                Axis {
+                    min: min_x,
+                    max: max_x,
+                    ..
+                },
             y:
-            Axis {
-                min: min_y,
-                max: max_y,
-                ..
-            },
+                Axis {
+                    min: min_y,
+                    max: max_y,
+                    ..
+                },
         }: TouchArea,
         (x, y): (f64, f64),
     ) -> (u32, u32) {
@@ -388,6 +388,10 @@ impl ScanoutWindow {
         let picture = Picture::for_paintable(&scanout_paintable);
         if let Some(keyboard_event_tx) = keyboard_event_tx {
             picture.set_focusable(true);
+            picture.set_can_focus(true);
+            picture.grab_focus();
+            picture.set_sensitive(true);
+            picture.set_focus_on_click(true);
             attach_keyboard(keyboard_event_tx, &picture);
         }
 
@@ -399,7 +403,7 @@ impl ScanoutWindow {
         window.set_child(Some(&overlay));
         window.set_visible(true);
 
-        attach_per_display_inputs(&picture, &overlay, per_display_inputs);
+        attach_per_display_inputs(&picture, window.as_ref(), per_display_inputs);
 
         Self {
             window,
@@ -492,13 +496,47 @@ fn attach_keyboard(keyboard_tx: EventSender, widget: &impl IsA<Widget>) {
 /// The returned coordinates are normalized where (0..1) corresponds to coords within the paintable
 fn compute_point_inside_paintable(
     widget: &Picture,
-    container: &Overlay,
+    container: &Window,
     (x, y): (f64, f64), // window coords
 ) -> Option<(f64, f64)> {
     let paintable = widget.paintable()?;
+    dbg!(x,y);
+
+    let img_rect_width = widget.width() as f64;
+    let img_rect_height = widget.height() as f64;
+    dbg!(img_rect_width, img_rect_height);
+    let paintable_width = paintable.intrinsic_width() as f64;
+    let paintable_height = paintable.intrinsic_height() as f64;
+
+    let x_scale = img_rect_width / paintable_width;
+    let y_scale = img_rect_height / paintable_height;
+    let scale = f64::min(x_scale, y_scale);
+    let x_offset = (img_rect_width - paintable_width * scale) / 2.0;
+    let y_offset = (img_rect_height - paintable_height * scale) / 2.0;
+    dbg!(x_offset, y_offset);
+
+    let p = container.compute_point(widget, &Point::new(x as f32, y as f32))?;
+    let px = p.x() as f64;
+    let py = p.y() as f64;
+    dbg!(px);
+    dbg!(py);
+
+    let px_ofs = px - x_offset;
+    let py_ofs = py - y_offset;
+    dbg!(px_ofs, py_ofs);
+
+    let px_rel = px / (img_rect_width-x_offset);
+    let py_rel = py / (img_rect_height-y_offset);
+
+    Some((px_rel, py_rel))
+}
+
+/*
+{
+    let paintable = widget.paintable()?;
 
     let img_rect = widget.compute_bounds(container)?;
-    let img_point = widget.compute_point(container, &Point::new(x as f32, y as f32))?;
+    //let img_point = widget.compute_point(container, &Point::new(x as f32, y as f32))?;
     debug!("RECT: {img_rect:?}");
     debug!(
         "WIDTH {} -> {}",
@@ -510,8 +548,10 @@ fn compute_point_inside_paintable(
         paintable.intrinsic_height(),
         img_rect.height()
     );
-    let img_rect_width = img_rect.width() as f64;
-    let img_rect_height = img_rect.height() as f64;
+    let img_rect_x = img_rect.x() as f64;
+    let img_rect_y = img_rect.y() as f64;
+    let img_rect_width = widget.width() as f64;
+    let img_rect_height = widget.height() as f64;
     let paintable_width = paintable.intrinsic_width() as f64;
     let paintable_height = paintable.intrinsic_height() as f64;
 
@@ -522,18 +562,25 @@ fn compute_point_inside_paintable(
     let x_offset = (img_rect_width - paintable_width * scale) / 2.0;
     let y_offset = (img_rect_height - paintable_height * scale) / 2.0;
 
-    let my_x = x + img_rect.x() as f64 - x_offset;
-    let my_y = y + img_rect.y() as f64 - y_offset;
-
-    debug!("X {}\t{my_x}\t\t(them: {})\t\toffsetting:{x_offset}", x, img_point.x());
-    debug!("Y {}\t{my_y}\t\t(them: {})\t\toffsetting:{y_offset}", y, img_point.y());
-
-    Some((img_point.x() as f64, img_point.y() as f64))
-}
+    let my_x = (x - img_rect_x - x_offset);
+    let my_y = (y - img_rect_y - y_offset);
+    dbg!(x_scale);
+    dbg!(y_scale);
+    dbg!(img_rect_width);
+    dbg!(img_rect_height);
+    dbg!(x_offset);
+    dbg!(y_offset);
+    dbg!("---");
+    dbg!(my_x);
+    dbg!(my_y);
+    dbg!(my_x / img_rect_width);
+    dbg!(my_y / img_rect_height);
+    Some((my_x, my_y))
+}*/
 
 fn attach_per_display_inputs(
     widget: &Picture,
-    container: &Overlay,
+    container: &Window,
     per_display_inputs: Vec<(EventSender, DisplayInputOptions)>,
 ) {
     for (tx, options) in per_display_inputs {
