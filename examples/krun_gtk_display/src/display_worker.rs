@@ -20,8 +20,8 @@ use crate::input_constants::{
 use gtk::{
     AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey,
     EventControllerLegacy, EventControllerMotion, HeaderBar, Overlay, Picture, Revealer,
-    RevealerTransitionType, Widget, Window, gdk,
-    gdk::{EventSequence, EventType, MemoryFormat, ModifierType, TouchEvent},
+    RevealerTransitionType, Widget, Window,
+    gdk::{self, EventSequence, EventType, MemoryFormat, ModifierType, TouchEvent},
     gio::ActionEntry,
     gio::Cancellable,
     glib::{
@@ -173,31 +173,30 @@ impl TouchEventSequencedSender {
             .unwrap();
     }
 
-    // Map GTK coordinates to the user specified ones
+    // Map relative coordinates to the touchscreen axis
     fn map_position(
         TouchArea {
             x:
-                Axis {
-                    min: min_x,
-                    max: max_x,
-                    ..
-                },
+            Axis {
+                min: min_x,
+                max: max_x,
+                ..
+            },
             y:
-                Axis {
-                    min: min_y,
-                    max: max_y,
-                    ..
-                },
+            Axis {
+                min: min_y,
+                max: max_y,
+                ..
+            },
         }: TouchArea,
-        (area_width, area_height): (i32, i32),
-        (x, y): (f32, f32),
+        (x, y): (f64, f64),
     ) -> (u32, u32) {
         let (x, y) = (x as f64, y as f64);
-        debug!("{x} / {area_width} * ({max_x} - {min_x}) + {min_x}");
-        debug!("{y} / {area_height} * ({max_y} - {min_y}) + {min_y}");
-        let mapped_x = ((x / area_width as f64) * (max_x - min_x) as f64) + min_x as f64;
+        debug!("{x} * ({max_x} - {min_x}) + {min_x}");
+        debug!("{y} * ({max_y} - {min_y}) + {min_y}");
+        let mapped_x = (x * (max_x - min_x) as f64) + min_x as f64;
         let mapped_x = mapped_x.round() as u32;
-        let mapped_y = ((y / area_height as f64) * (max_y - min_y) as f64) + min_y as f64;
+        let mapped_y = (y * (max_y - min_y) as f64) + min_y as f64;
         let mapped_y = mapped_y.round() as u32;
 
         // Clamp the coordinates to be sure they cannot be  slightly out of bounds due to rounding
@@ -210,11 +209,10 @@ impl TouchEventSequencedSender {
         &mut self,
         seq: Option<EventSequence>,
         state: TouchState,
-        position: (f32, f32),
-        touch_area_size: (i32, i32),
+        position: (f64, f64),
     ) -> bool {
         let (finger_idx, finger) = self.fingers.track(seq);
-        let (x, y) = Self::map_position(self.options.area, touch_area_size, position);
+        let (x, y) = Self::map_position(self.options.area, position);
 
         // Ignore other fingers if multitouch is disabled
         if !self.options.emit_mt && finger_idx != 0 {
@@ -389,9 +387,9 @@ impl ScanoutWindow {
         let scanout_paintable = ScanoutPaintable::new(display_width, display_height);
         let picture = Picture::for_paintable(&scanout_paintable);
         if let Some(keyboard_event_tx) = keyboard_event_tx {
+            picture.set_focusable(true);
             attach_keyboard(keyboard_event_tx, &picture);
         }
-        attach_per_display_inputs(&picture, window.as_ref(), per_display_inputs);
 
         window.set_titlebar(Some(&header_bar));
         header_bar.pack_end(&fullscreen_btn);
@@ -400,6 +398,8 @@ impl ScanoutWindow {
         overlay.set_child(Some(&picture));
         window.set_child(Some(&overlay));
         window.set_visible(true);
+
+        attach_per_display_inputs(&picture, &overlay, per_display_inputs);
 
         Self {
             window,
@@ -488,25 +488,69 @@ fn attach_keyboard(keyboard_tx: EventSender, widget: &impl IsA<Widget>) {
     widget.add_controller(key_controller);
 }
 
+/// Map a point (px, py in window coordinates) to the coordinates of a paintable inside a picture
+/// The returned coordinates are normalized where (0..1) corresponds to coords within the paintable
+fn compute_point_inside_paintable(
+    widget: &Picture,
+    container: &Overlay,
+    (x, y): (f64, f64), // window coords
+) -> Option<(f64, f64)> {
+    let paintable = widget.paintable()?;
+
+    let img_rect = widget.compute_bounds(container)?;
+    let img_point = widget.compute_point(container, &Point::new(x as f32, y as f32))?;
+    debug!("RECT: {img_rect:?}");
+    debug!(
+        "WIDTH {} -> {}",
+        paintable.intrinsic_width(),
+        img_rect.width()
+    );
+    debug!(
+        "HEIGHT {} -> {}",
+        paintable.intrinsic_height(),
+        img_rect.height()
+    );
+    let img_rect_width = img_rect.width() as f64;
+    let img_rect_height = img_rect.height() as f64;
+    let paintable_width = paintable.intrinsic_width() as f64;
+    let paintable_height = paintable.intrinsic_height() as f64;
+
+    let x_scale = img_rect_width / paintable_width;
+    let y_scale = img_rect_height / paintable_height;
+    let scale = f64::min(x_scale, y_scale);
+
+    let x_offset = (img_rect_width - paintable_width * scale) / 2.0;
+    let y_offset = (img_rect_height - paintable_height * scale) / 2.0;
+
+    let my_x = x + img_rect.x() as f64 - x_offset;
+    let my_y = y + img_rect.y() as f64 - y_offset;
+
+    debug!("X {}\t{my_x}\t\t(them: {})\t\toffsetting:{x_offset}", x, img_point.x());
+    debug!("Y {}\t{my_y}\t\t(them: {})\t\toffsetting:{y_offset}", y, img_point.y());
+
+    Some((img_point.x() as f64, img_point.y() as f64))
+}
+
 fn attach_per_display_inputs(
     widget: &Picture,
-    window: &Window,
+    container: &Overlay,
     per_display_inputs: Vec<(EventSender, DisplayInputOptions)>,
 ) {
     for (tx, options) in per_display_inputs {
         match options {
             DisplayInputOptions::TouchScreen(options) => {
+                eprintln!("attaching: {options:?}");
                 let triggered_by_mouse = options.triggered_by_mouse;
                 let input_controller = EventControllerLegacy::new();
                 let touch_sender =
                     Rc::new(RefCell::new(TouchEventSequencedSender::new(tx, options)));
 
                 let widget_weak = Downgrade::downgrade(widget);
-                let window_weak = Downgrade::downgrade(window);
+                let container_weak = Downgrade::downgrade(container);
 
                 input_controller.connect_event(move |_, event| {
                     let widget = widget_weak.upgrade().unwrap();
-                    let window = window_weak.upgrade().unwrap();
+                    let container = container_weak.upgrade().unwrap();
 
                     let (x, y);
                     let state;
@@ -520,7 +564,6 @@ fn attach_per_display_inputs(
                             EventType::TouchEnd | EventType::TouchCancel => TouchState::End,
                             _ => return Propagation::Proceed,
                         };
-
                         seq = Some(event.event_sequence());
                     } else if let Some(event) = event.downcast_ref::<gdk::ButtonEvent>()
                         && triggered_by_mouse
@@ -543,23 +586,17 @@ fn attach_per_display_inputs(
                         return Propagation::Proceed;
                     }
 
-                    let Some(point) =
-                        window.compute_point(&widget, &Point::new(x as f32, y as f32))
+                    let Some((x, y)) = compute_point_inside_paintable(&widget, &container, (x, y))
                     else {
                         return Propagation::Proceed;
                     };
 
-                    let (x, y) = (point.x(), point.y());
-
-                    let requested_deferred_sync = touch_sender.borrow_mut().push_event(
-                        seq,
-                        state,
-                        (x, y),
-                        (widget.width(), widget.height()),
-                    );
+                    let requested_deferred_sync =
+                        touch_sender.borrow_mut().push_event(seq, state, (x, y));
 
                     if requested_deferred_sync {
                         let touch_sender = touch_sender.clone();
+                        // TODO: explicit normal priority?
                         timeout_add_local_once(Duration::from_millis(0), move || {
                             touch_sender.borrow_mut().sync();
                         });
@@ -567,7 +604,7 @@ fn attach_per_display_inputs(
 
                     Propagation::Stop
                 });
-                widget.add_controller(input_controller);
+                container.add_controller(input_controller);
             }
         }
     }

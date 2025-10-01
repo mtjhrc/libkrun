@@ -171,7 +171,7 @@ fn resource_format_into_gdk(format: ResourceFormat) -> MemoryFormat {
 }
 
 struct Scanout {
-    buffer_tx: SyncSender<Vec<u8>>,
+    buffer_tx: Sender<Vec<u8>>,
     buffer_rx: Receiver<Vec<u8>>,
     required_buffer_size: usize,
     current_buffer: Vec<u8>,

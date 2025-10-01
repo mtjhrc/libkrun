@@ -225,7 +225,7 @@ fn krun_thread(
 
         for input in &args.input {
             let fd = File::open(input)
-                .context("Failed to open input device: {input}")?
+                .with_context(|| format!("Failed to open input device {input:?}"))?
                 .into_raw_fd();
             krun_call!(krun_add_input_device_fd(ctx, fd))
                 .context("Failed to attach input device")?;
