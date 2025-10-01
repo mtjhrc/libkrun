@@ -615,6 +615,7 @@ name = "gtk_display"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "gtk4",
  "krun_display",
  "krun_input",
