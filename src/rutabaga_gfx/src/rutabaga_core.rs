@@ -32,6 +32,7 @@ const RUTABAGA_DEFAULT_HEIGHT: u32 = 1024;
 pub type ExportTable = Arc<Mutex<Map<(u64, u64), File>>>;
 
 /// Information required for 2D functionality.
+#[derive(Debug)]
 pub struct Rutabaga2DInfo {
     pub width: u32,
     pub height: u32,
@@ -39,6 +40,7 @@ pub struct Rutabaga2DInfo {
 }
 
 /// A Rutabaga resource, supporting 2D and 3D rutabaga features.  Assumes a single-threaded library.
+ #[derive(Debug)]
 pub struct RutabagaResource {
     pub resource_id: u32,
     pub handle: Option<Arc<RutabagaHandle>>,
@@ -915,6 +917,7 @@ impl Rutabaga {
             .resources
             .get_mut(&resource_id)
             .ok_or(RutabagaError::InvalidResourceId)?;
+        log::warn!("Exporting resource: {resource:#?}");
 
         // We can inspect blob flags only once guest minigbm is fully transitioned to blob.
         let share_mask = RUTABAGA_BLOB_FLAG_USE_SHAREABLE | RUTABAGA_BLOB_FLAG_USE_CROSS_DEVICE;

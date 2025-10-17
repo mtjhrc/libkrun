@@ -1,6 +1,6 @@
 use super::scanout_paintable::ScanoutPaintable;
 use crate::{Axis, DisplayEvent, DisplayInputOptions, TouchArea, TouchScreenOptions};
-use krun_display::Rect;
+use krun_display::{DmabufInfo, Rect};
 use krun_input::{InputEvent, InputEventType};
 use log::{debug, trace, warn};
 use std::cell::RefCell;
@@ -416,6 +416,23 @@ impl ScanoutWindow {
         self.scanout_paintable
             .update(buffer, self.width, self.height, self.format, rect);
     }
+
+    pub fn configure_dmabuf(
+        &mut self,
+        display_width: i32,
+        display_height: i32,
+        dmabuf_info: &DmabufInfo,
+    ) {
+        self.scanout_paintable.configure_dmabuf(
+            display_width,
+            display_height,
+            dmabuf_info,
+        );
+    }
+
+    pub fn update_dmabuf(&self, rect: Option<Rect>) {
+        self.scanout_paintable.update_dmabuf(rect);
+    }
 }
 
 impl Drop for ScanoutWindow {
@@ -720,6 +737,28 @@ impl DisplayWorker {
                         ));
                     }
                 }
+                DisplayEvent::ConfigureScanoutDmabuf {
+                    scanout_id,
+                    display_width,
+                    display_height,
+                    dmabuf_info,
+                } => {
+                    if let Some(ref mut scanout) = scanouts[scanout_id as usize] {
+                        debug!(
+                            "Configure scanout {scanout_id} with dmabuf: width={} height={}",
+                            dmabuf_info.width, dmabuf_info.height
+                        );
+                        scanout.configure_dmabuf(
+                            display_width as i32,
+                            display_height as i32,
+                            &dmabuf_info,
+                        );
+                    } else {
+                        warn!(
+                            "Attempted to configure dmabuf for non-existent scanout: {scanout_id}"
+                        );
+                    }
+                }
                 DisplayEvent::DisableScanout { scanout_id } => {
                     debug!("Disable scanout {scanout_id}");
                     scanouts[scanout_id as usize] = None;
@@ -734,6 +773,14 @@ impl DisplayWorker {
                         scanout.update(buffer, rect);
                     } else {
                         warn!("Attempted to update non-existent scanout: {scanout_id}");
+                    }
+                }
+                DisplayEvent::UpdateScanoutDmabuf { scanout_id, rect } => {
+                    if let Some(scanout) = &mut scanouts[scanout_id as usize] {
+                        trace!("Update scanout {scanout_id} dmabuf");
+                        scanout.update_dmabuf(rect);
+                    } else {
+                        warn!("Attempted to update dmabuf for non-existent scanout: {scanout_id}");
                     }
                 }
             }

@@ -7,6 +7,7 @@ use crate::rutabaga_os::SafeDescriptor;
 use crate::rutabaga_utils::RutabagaMapping;
 use crate::rutabaga_utils::RutabagaResult;
 
+#[derive(Debug)]
 pub struct MemoryMapping {
     mapping: PlatformMapping,
 }

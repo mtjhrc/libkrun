@@ -1,7 +1,5 @@
-use crate::{
-    DisplayBackend, DisplayBackendError, DisplayBasicFramebufferVtable, DisplayFeatures,
-    DisplayVtable, Rect, ResourceFormat,
-};
+use crate::header::krun_display_dmabuf_info;
+use crate::{DisplayBackend, DisplayBackendError, DisplayBasicFramebufferVtable, DisplayDmabufVtable, DisplayFeatures, DisplayVtable, DmabufInfo, Rect, ResourceFormat};
 use log::error;
 use std::ffi::c_void;
 use std::marker::PhantomData;
@@ -35,118 +33,298 @@ pub trait DisplayBackendBasicFramebuffer {
     ) -> Result<(), DisplayBackendError>;
 }
 
+/*
+#[derive(Debug, Clone, Copy)]
+pub struct DmabufInfo {
+    pub dmabuf_fd: i32,
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: u32,
+    pub strides: [u32; 4],
+    pub offsets: [u32; 4],
+    pub modifier: u64,
+}*/
+
+pub trait DisplayBackendDmabuf: DisplayBackendBasicFramebuffer {
+    fn configure_scanout_dmabuf(
+        &mut self,
+        scanout_id: u32,
+        display_width: u32,
+        display_height: u32,
+        dmabuf_info: &DmabufInfo,
+    ) -> Result<(), DisplayBackendError>;
+
+    fn present_dmabuf(
+        &mut self,
+        scanout_id: u32,
+        rect: Option<&Rect>,
+    ) -> Result<(), DisplayBackendError>;
+}
+
 pub trait IntoDisplayBackend<T: Sync> {
     fn into_display_backend(userdata: Option<&T>) -> DisplayBackend<'_>;
+}
+
+pub fn into_display_backend_basic_framebuffer<
+    T: Sync,
+    I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>,
+>(
+    userdata: Option<&T>,
+) -> DisplayBackend<'_> {
+    extern "C" fn create_fn<T: Sync, I: DisplayBackendNew<T>>(
+        instance: *mut *mut c_void,
+        userdata: *const c_void,
+        _reserved: *const c_void,
+    ) -> i32 {
+        unsafe {
+            assert_ne!(
+                instance,
+                null_mut(),
+                "Pointer to location where to create instance cannot be null"
+            );
+            let userdata_ref = (userdata as *const T).as_ref();
+            *(instance as *mut *mut I) = Box::into_raw(Box::new(I::new(userdata_ref)));
+        }
+        0
+    }
+
+    extern "C" fn destroy_fn<I>(instance: *mut c_void) -> i32 {
+        drop(unsafe { Box::from_raw(instance as *mut I) });
+        0
+    }
+
+    fn cast_instance<'a, I: DisplayBackendBasicFramebuffer>(instance: *mut c_void) -> &'a mut I {
+        assert_ne!(instance, null_mut());
+        unsafe { &mut *(instance as *mut I) }
+    }
+
+    extern "C" fn configure_scanout_fn<I: DisplayBackendBasicFramebuffer>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        display_width: u32,
+        display_height: u32,
+        width: u32,
+        height: u32,
+        format: u32,
+    ) -> i32 {
+        let Ok(format) = ResourceFormat::try_from(format) else {
+            error!("Unknown display format: {format}");
+            return DisplayBackendError::InvalidParam as i32;
+        };
+
+        from_rust_result(cast_instance::<I>(instance).configure_scanout(
+            scanout_id,
+            display_width,
+            display_height,
+            width,
+            height,
+            format,
+        ))
+    }
+
+    extern "C" fn disable_scanout_fb<I: DisplayBackendBasicFramebuffer>(
+        instance: *mut c_void,
+        scanout_id: u32,
+    ) -> i32 {
+        from_rust_result(cast_instance::<I>(instance).disable_scanout(scanout_id))
+    }
+
+    extern "C" fn alloc_frame<I: DisplayBackendBasicFramebuffer>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        buffer: *mut *mut u8,
+        buffer_size: *mut usize,
+    ) -> i32 {
+        match cast_instance::<I>(instance).alloc_frame(scanout_id) {
+            Ok((frame_id, allocated_buffer)) => {
+                unsafe {
+                    *buffer_size = allocated_buffer.len();
+                    *buffer = allocated_buffer.as_mut_ptr();
+                }
+                frame_id as i32
+            }
+            Err(e) => e as i32,
+        }
+    }
+
+    extern "C" fn present_frame<I: DisplayBackendBasicFramebuffer>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        frame_id: u32,
+        rect: *const Rect,
+    ) -> i32 {
+        // SAFETY: The pointer obtained from the bindings should be safe
+        let rect: Option<&Rect> = unsafe { ptr_to_option_ref(rect) };
+        from_rust_result(cast_instance::<I>(instance).present_frame(scanout_id, frame_id, rect))
+    }
+
+    DisplayBackend {
+        create_userdata: userdata.map_or(null(), |t| ptr::from_ref(t) as *const c_void),
+        create_userdata_lifetime: PhantomData,
+        features: DisplayFeatures::BASIC_FRAMEBUFFER.bits(),
+        create_fn: Some(create_fn::<T, I>),
+        vtable: DisplayVtable {
+            basic_framebuffer: DisplayBasicFramebufferVtable {
+                destroy: Some(destroy_fn::<I>),
+                configure_scanout: Some(configure_scanout_fn::<I>),
+                present_frame: Some(present_frame::<I>),
+                alloc_frame: Some(alloc_frame::<I>),
+                disable_scanout: Some(disable_scanout_fb::<I>),
+            },
+        },
+    }
 }
 
 impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisplayBackend<T>
     for I
 {
     fn into_display_backend(userdata: Option<&T>) -> DisplayBackend<'_> {
-        extern "C" fn create_fn<T: Sync, I: DisplayBackendNew<T>>(
-            instance: *mut *mut c_void,
-            userdata: *const c_void,
-            _reserved: *const c_void,
-        ) -> i32 {
-            unsafe {
-                assert_ne!(
-                    instance,
-                    null_mut(),
-                    "Pointer to location where to create instance cannot be null"
-                );
-                let userdata_ref = (userdata as *const T).as_ref();
-                *(instance as *mut *mut I) = Box::into_raw(Box::new(I::new(userdata_ref)));
-            }
-            0
+        into_display_backend_basic_framebuffer::<T, I>(userdata)
+    }
+}
+
+pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBackendNew<T>>(
+    userdata: Option<&T>,
+) -> DisplayBackend<'_> {
+    extern "C" fn create_fn<T: Sync, I: DisplayBackendNew<T>>(
+        instance: *mut *mut c_void,
+        userdata: *const c_void,
+        _reserved: *const c_void,
+    ) -> i32 {
+        unsafe {
+            assert_ne!(
+                instance,
+                null_mut(),
+                "Pointer to location where to create instance cannot be null"
+            );
+            let userdata_ref = (userdata as *const T).as_ref();
+            *(instance as *mut *mut I) = Box::into_raw(Box::new(I::new(userdata_ref)));
         }
+        0
+    }
 
-        extern "C" fn destroy_fn<I>(instance: *mut c_void) -> i32 {
-            drop(unsafe { Box::from_raw(instance as *mut I) });
-            0
-        }
+    extern "C" fn destroy_fn<I>(instance: *mut c_void) -> i32 {
+        drop(unsafe { Box::from_raw(instance as *mut I) });
+        0
+    }
 
-        fn cast_instance<'a, I: DisplayBackendBasicFramebuffer>(
-            instance: *mut c_void,
-        ) -> &'a mut I {
-            assert_ne!(instance, null_mut());
-            unsafe { &mut *(instance as *mut I) }
-        }
+    fn cast_instance<'a, I: DisplayBackendDmabuf>(instance: *mut c_void) -> &'a mut I {
+        assert_ne!(instance, null_mut());
+        unsafe { &mut *(instance as *mut I) }
+    }
 
-        extern "C" fn configure_scanout_fn<I: DisplayBackendBasicFramebuffer>(
-            instance: *mut c_void,
-            scanout_id: u32,
-            display_width: u32,
-            display_height: u32,
-            width: u32,
-            height: u32,
-            format: u32,
-        ) -> i32 {
-            let Ok(format) = ResourceFormat::try_from(format) else {
-                error!("Unknown display format: {format}");
-                return DisplayBackendError::InvalidParam as i32;
-            };
+    extern "C" fn configure_scanout_fn<I: DisplayBackendDmabuf>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        display_width: u32,
+        display_height: u32,
+        width: u32,
+        height: u32,
+        format: u32,
+    ) -> i32 {
+        let Ok(format) = ResourceFormat::try_from(format) else {
+            error!("Unknown display format: {format}");
+            return DisplayBackendError::InvalidParam as i32;
+        };
 
-            from_rust_result(cast_instance::<I>(instance).configure_scanout(
-                scanout_id,
-                display_width,
-                display_height,
-                width,
-                height,
-                format,
-            ))
-        }
+        from_rust_result(cast_instance::<I>(instance).configure_scanout(
+            scanout_id,
+            display_width,
+            display_height,
+            width,
+            height,
+            format,
+        ))
+    }
 
-        extern "C" fn disable_scanout_fb<I: DisplayBackendBasicFramebuffer>(
-            instance: *mut c_void,
-            scanout_id: u32,
-        ) -> i32 {
-            from_rust_result(cast_instance::<I>(instance).disable_scanout(scanout_id))
-        }
+    extern "C" fn disable_scanout_dmabuf<I: DisplayBackendDmabuf>(
+        instance: *mut c_void,
+        scanout_id: u32,
+    ) -> i32 {
+        from_rust_result(cast_instance::<I>(instance).disable_scanout(scanout_id))
+    }
 
-        extern "C" fn alloc_frame<I: DisplayBackendBasicFramebuffer>(
-            instance: *mut c_void,
-            scanout_id: u32,
-            buffer: *mut *mut u8,
-            buffer_size: *mut usize,
-        ) -> i32 {
-            match cast_instance::<I>(instance).alloc_frame(scanout_id) {
-                Ok((frame_id, allocated_buffer)) => {
-                    unsafe {
-                        *buffer_size = allocated_buffer.len();
-                        *buffer = allocated_buffer.as_mut_ptr();
-                    }
-                    frame_id as i32
+    extern "C" fn alloc_frame<I: DisplayBackendDmabuf>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        buffer: *mut *mut u8,
+        buffer_size: *mut usize,
+    ) -> i32 {
+        match cast_instance::<I>(instance).alloc_frame(scanout_id) {
+            Ok((frame_id, allocated_buffer)) => {
+                unsafe {
+                    *buffer_size = allocated_buffer.len();
+                    *buffer = allocated_buffer.as_mut_ptr();
                 }
-                Err(e) => e as i32,
+                frame_id as i32
             }
+            Err(e) => e as i32,
         }
+    }
 
-        extern "C" fn present_frame<I: DisplayBackendBasicFramebuffer>(
-            instance: *mut c_void,
-            scanout_id: u32,
-            frame_id: u32,
-            rect: *const Rect,
-        ) -> i32 {
-            // SAFETY: The pointer obtained from the bindings should be safe
-            let rect: Option<&Rect> = unsafe { ptr_to_option_ref(rect) };
-            from_rust_result(cast_instance::<I>(instance).present_frame(scanout_id, frame_id, rect))
-        }
+    extern "C" fn present_frame<I: DisplayBackendDmabuf>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        frame_id: u32,
+        rect: *const Rect,
+    ) -> i32 {
+        let rect: Option<&Rect> = unsafe { ptr_to_option_ref(rect) };
+        from_rust_result(cast_instance::<I>(instance).present_frame(scanout_id, frame_id, rect))
+    }
 
-        DisplayBackend {
-            create_userdata: userdata.map_or(null(), |t| ptr::from_ref(t) as *const c_void),
-            create_userdata_lifetime: PhantomData,
-            features: DisplayFeatures::BASIC_FRAMEBUFFER.bits(),
-            create_fn: Some(create_fn::<T, I>),
-            vtable: DisplayVtable {
-                basic_framebuffer: DisplayBasicFramebufferVtable {
-                    destroy: Some(destroy_fn::<I>),
-                    configure_scanout: Some(configure_scanout_fn::<I>),
-                    present_frame: Some(present_frame::<I>),
-                    alloc_frame: Some(alloc_frame::<I>),
-                    disable_scanout: Some(disable_scanout_fb::<I>),
-                },
+    extern "C" fn configure_scanout_dmabuf_fn<I: DisplayBackendDmabuf>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        display_width: u32,
+        display_height: u32,
+        dmabuf_info_ptr: *const krun_display_dmabuf_info,
+    ) -> i32 {
+        assert!(!dmabuf_info_ptr.is_null());
+        let c_dmabuf_info = unsafe { &*dmabuf_info_ptr };
+
+        let dmabuf_info = DmabufInfo {
+            dmabuf_fd: c_dmabuf_info.dmabuf_fd,
+            width: c_dmabuf_info.width,
+            height: c_dmabuf_info.height,
+            fourcc: c_dmabuf_info.fourcc,
+            strides: c_dmabuf_info.strides,
+            offsets: c_dmabuf_info.offsets,
+            modifier: c_dmabuf_info.modifier,
+        };
+
+        from_rust_result(cast_instance::<I>(instance).configure_scanout_dmabuf(
+            scanout_id,
+            display_width,
+            display_height,
+            &dmabuf_info,
+        ))
+    }
+
+    extern "C" fn present_dmabuf_fn<I: DisplayBackendDmabuf>(
+        instance: *mut c_void,
+        scanout_id: u32,
+        rect: *const Rect,
+    ) -> i32 {
+        let rect: Option<&Rect> = unsafe { ptr_to_option_ref(rect) };
+        from_rust_result(cast_instance::<I>(instance).present_dmabuf(scanout_id, rect))
+    }
+
+    DisplayBackend {
+        create_userdata: userdata.map_or(null(), |t| ptr::from_ref(t) as *const c_void),
+        create_userdata_lifetime: PhantomData,
+        features: (DisplayFeatures::DMABUF | DisplayFeatures::BASIC_FRAMEBUFFER).bits(),
+        create_fn: Some(create_fn::<T, I>),
+        vtable: DisplayVtable {
+            dmabuf: DisplayDmabufVtable {
+                destroy: Some(destroy_fn::<I>),
+                disable_scanout: Some(disable_scanout_dmabuf::<I>),
+                configure_scanout: Some(configure_scanout_fn::<I>),
+                alloc_frame: Some(alloc_frame::<I>),
+                present_frame: Some(present_frame::<I>),
+                configure_scanout_dmabuf: Some(configure_scanout_dmabuf_fn::<I>),
+                present_dmabuf: Some(present_dmabuf_fn::<I>),
             },
-        }
+        },
     }
 }
 

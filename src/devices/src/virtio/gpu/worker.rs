@@ -318,8 +318,9 @@ impl Worker {
                     mem,
                 )
             }
-            GpuCommand::SetScanoutBlob(_info) => {
-                panic!("virtio_gpu: GpuCommand::SetScanoutBlob unimplemented");
+            GpuCommand::SetScanoutBlob(info) => {
+                // Just use the regular set_scanout, which will try dmabuf automatically
+                virtio_gpu.set_scanout(info.scanout_id, info.resource_id, info.width, info.height)
             }
             GpuCommand::ResourceMapBlob(info) => {
                 let resource_id = info.resource_id;

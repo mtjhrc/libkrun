@@ -15,7 +15,8 @@ use super::protocol::{
 #[cfg(target_os = "macos")]
 use crossbeam_channel::{unbounded, Sender};
 use krun_display::{
-    DisplayBackend, DisplayBackendBasicFramebuffer, DisplayBackendInstance, Rect, ResourceFormat,
+    DisplayBackend, DisplayBackendBasicFramebuffer, DisplayBackendInstance, DmabufInfo, Rect,
+    ResourceFormat,
 };
 use libc::c_void;
 #[cfg(target_os = "macos")]
@@ -26,8 +27,8 @@ use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD;
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_SHM;
 use rutabaga_gfx::{
     ResourceCreate3D, ResourceCreateBlob, Rutabaga, RutabagaBuilder, RutabagaChannel,
-    RutabagaFence, RutabagaFenceHandler, RutabagaIovec, Transfer3D, RUTABAGA_CHANNEL_TYPE_WAYLAND,
-    RUTABAGA_MAP_CACHE_MASK,
+    RutabagaFence, RutabagaFenceHandler, RutabagaHandle, RutabagaIovec, Transfer3D,
+    RUTABAGA_CHANNEL_TYPE_WAYLAND, RUTABAGA_MAP_CACHE_MASK,
 };
 #[cfg(target_os = "linux")]
 use rutabaga_gfx::{
@@ -143,6 +144,9 @@ impl VirtioGpuResource {
 
 pub struct VirtioGpuScanout {
     resource_id: u32,
+    uses_dmabuf: bool,
+    #[cfg(target_os = "linux")]
+    dmabuf_handle: Option<Arc<RutabagaHandle>>,
 }
 
 pub struct VirtioGpu {
@@ -382,31 +386,27 @@ impl VirtioGpu {
         width: u32,
         height: u32,
     ) -> VirtioGpuResult {
-        let scanout = self
-            .scanouts
-            .get_mut(scanout_id as usize)
-            .ok_or(ErrInvalidScanoutId)?;
+        // Validate scanout_id early
+        if scanout_id as usize >= self.scanouts.len() {
+            return Err(ErrInvalidScanoutId);
+        }
 
-        // If a resource is already associated with this scanout, make sure to disable
-        // this scanout for that resource
-        if let Some(resource_id) = scanout.as_ref().map(|scanout| scanout.resource_id) {
-            let resource = self
-                .resources
-                .get_mut(&resource_id)
-                .ok_or(ErrInvalidResourceId)?;
-
-            resource.scanouts.disable(scanout_id);
+        // If a resource is already associated with this scanout, disable it for that resource
+        if let Some(old_scanout) = &self.scanouts[scanout_id as usize] {
+            if let Some(resource) = self.resources.get_mut(&old_scanout.resource_id) {
+                resource.scanouts.disable(scanout_id);
+            }
         }
 
         // Virtio spec: "The driver can use resource_id = 0 to disable a scanout."
         if resource_id == 0 {
             debug!("Disabling scanout {scanout_id:?}");
-            *scanout = None;
+            self.scanouts[scanout_id as usize] = None;
             self.display_backend.disable_scanout(scanout_id)?;
             return Ok(OkNoData);
         }
 
-        // Enable the scanout
+        // Enable the scanout for this resource
         let resource = self
             .resources
             .get_mut(&resource_id)
@@ -418,22 +418,124 @@ impl VirtioGpu {
             return Err(ErrUnspec);
         };
 
-        let display_info = self
-            .displays
-            .get(scanout_id as usize)
-            .ok_or(ErrInvalidScanoutId)?;
+        // Get display dimensions (copy them to avoid borrowing issues)
+        let (display_width, display_height) = {
+            let display_info = self
+                .displays
+                .get(scanout_id as usize)
+                .ok_or(ErrInvalidScanoutId)?;
+            (display_info.width, display_info.height)
+        };
 
+        // Try dmabuf path first if supported
+        #[cfg(target_os = "linux")]
+        if let Ok(dmabuf_scanout) = self.try_configure_dmabuf_scanout(
+            scanout_id,
+            resource_id,
+            display_width,
+            display_height,
+            width,
+            height,
+        ) {
+            self.scanouts[scanout_id as usize] = Some(dmabuf_scanout);
+            return Ok(OkNoData);
+        }
+
+        // Fall back to basic framebuffer
+        let basic_scanout = self.configure_basic_framebuffer_scanout(
+            scanout_id,
+            resource_id,
+            display_width,
+            display_height,
+            width,
+            height,
+            format,
+        )?;
+        self.scanouts[scanout_id as usize] = Some(basic_scanout);
+        Ok(OkNoData)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn try_configure_dmabuf_scanout(
+        &mut self,
+        scanout_id: u32,
+        resource_id: u32,
+        display_width: u32,
+        display_height: u32,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<VirtioGpuScanout, ()> {
+        use std::os::fd::AsRawFd;
+
+        if !self.display_backend.supports_dmabuf() {
+            return Err(());
+        }
+
+        let export = self.rutabaga.export_blob(resource_id).map_err(|e| {
+            debug!("Failed to export resource {resource_id} as dmabuf: {e}");
+        })?;
+
+        let info_3d = self.rutabaga.query(resource_id).map_err(|e| {
+            debug!("Failed to query resource {resource_id} for dmabuf info: {e}");
+        })?;
+
+        debug!(
+            "Resource {resource_id} dmabuf info: fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}",
+            info_3d.drm_fourcc, info_3d.modifier, info_3d.strides, info_3d.offsets
+        );
+
+        let dmabuf_info = DmabufInfo {
+            dmabuf_fd: export.os_handle.as_raw_fd(),
+            width: info_3d.width,
+            height: info_3d.height,
+            fourcc: info_3d.drm_fourcc,
+            strides: info_3d.strides,
+            offsets: info_3d.offsets,
+            modifier: info_3d.modifier,
+        };
+
+        self.display_backend
+            .configure_scanout_dmabuf(scanout_id, display_width, display_height, &dmabuf_info)
+            .map_err(|e| {
+                debug!("Failed to configure dmabuf scanout for resource {resource_id}: {e}");
+            })?;
+
+        debug!(
+            "Successfully configured scanout {scanout_id} with dmabuf for resource {resource_id}"
+        );
+        Ok(VirtioGpuScanout {
+            resource_id,
+            uses_dmabuf: true,
+            #[cfg(target_os = "linux")]
+            dmabuf_handle: Some(Arc::new(export)),
+        })
+    }
+
+    fn configure_basic_framebuffer_scanout(
+        &mut self,
+        scanout_id: u32,
+        resource_id: u32,
+        display_width: u32,
+        display_height: u32,
+        width: u32,
+        height: u32,
+        format: ResourceFormat,
+    ) -> std::result::Result<VirtioGpuScanout, GpuResponse> {
         self.display_backend.configure_scanout(
             scanout_id,
-            display_info.width,
-            display_info.height,
+            display_width,
+            display_height,
             width,
             height,
             format,
         )?;
 
-        *scanout = Some(VirtioGpuScanout { resource_id });
-        Ok(OkNoData)
+        Ok(VirtioGpuScanout {
+            resource_id,
+            uses_dmabuf: false,
+            #[cfg(target_os = "linux")]
+            dmabuf_handle: None,
+        })
     }
 
     fn read_2d_resource(
@@ -474,13 +576,31 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         for scanout_id in resource.scanouts.iter_enabled() {
-            let (frame_id, buffer) = self.display_backend.alloc_frame(scanout_id)?;
-            if let Err(e) = Self::read_2d_resource(&mut self.rutabaga, resource, buffer) {
-                log::error!("Failed to read resource {resource_id} for scanout {scanout_id}: {e}");
-                return Err(ErrUnspec);
+            // Check if this scanout is configured for dmabuf
+            let uses_dmabuf = self
+                .scanouts
+                .get(scanout_id as usize)
+                .and_then(|s| s.as_ref())
+                .map(|s| s.uses_dmabuf)
+                .unwrap_or(false);
+
+            if uses_dmabuf {
+                // Use dmabuf path - just signal present, no data copy needed
+                trace!("UpdateScanoutDmabuf {scanout_id} {rect:?}");
+                self.display_backend
+                    .present_dmabuf(scanout_id, Some(&rect))?;
+            } else {
+                trace!("UpdateScanout {scanout_id} {rect:?}");
+                let (frame_id, buffer) = self.display_backend.alloc_frame(scanout_id)?;
+                if let Err(e) = Self::read_2d_resource(&mut self.rutabaga, resource, buffer) {
+                    log::error!(
+                        "Failed to read resource {resource_id} for scanout {scanout_id}: {e}"
+                    );
+                    return Err(ErrUnspec);
+                }
+                self.display_backend
+                    .present_frame(scanout_id, frame_id, Some(&rect))?
             }
-            self.display_backend
-                .present_frame(scanout_id, frame_id, Some(&rect))?
         }
 
         #[cfg(windows)]

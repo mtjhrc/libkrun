@@ -38,7 +38,7 @@ use crate::rutabaga_os::SafeDescriptor;
 /// Represents a buffer.  `base` contains the address of a buffer, while `len` contains the length
 /// of the buffer.
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct RutabagaIovec {
     pub base: *mut c_void,
     pub len: usize,
@@ -110,7 +110,7 @@ pub struct DeviceId {
 }
 
 /// Memory index and physical device id of the associated VkDeviceMemory.
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub struct VulkanInfo {
     pub memory_idx: u32,
     pub device_id: DeviceId,
@@ -634,6 +634,7 @@ pub const RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0008;
 pub const RUTABAGA_FENCE_HANDLE_TYPE_ZIRCON: u32 = 0x0009;
 
 /// Handle to OS-specific memory or synchronization objects.
+#[derive(Debug)]
 pub struct RutabagaHandle {
     pub os_handle: SafeDescriptor,
     pub handle_type: u32,

@@ -18,8 +18,10 @@ mod header {
 }
 
 bitflags! {
+    #[derive(PartialEq, Eq)]
     pub struct DisplayFeatures: u64 {
         const BASIC_FRAMEBUFFER = header::KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER as u64;
+        const DMABUF = header::KRUN_DISPLAY_FEATURE_DMABUF as u64;
     }
 }
 
@@ -77,4 +79,6 @@ impl TryFrom<u32> for ResourceFormat {
 
 pub type DisplayVtable = header::krun_display_vtable;
 pub type DisplayBasicFramebufferVtable = header::krun_display_basic_framebuffer_vtable;
+pub type DisplayDmabufVtable = header::krun_display_dmabuf_vtable;
 pub type Rect = header::krun_rect;
+pub type DmabufInfo = header::krun_display_dmabuf_info;
