@@ -35,6 +35,7 @@ impl ObjectSubclass for ScanoutPaintable {
 impl ObjectImpl for ScanoutPaintable {
     fn dispose(&self) {
         debug!("ScanoutPaintable::dispose");
+        // FD is closed by the texture's release_func, not here
     }
 }
 

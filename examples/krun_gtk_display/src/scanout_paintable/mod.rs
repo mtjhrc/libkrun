@@ -73,7 +73,6 @@ impl ScanoutPaintable {
         let imp = self.imp();
         imp.display_width.set(display_width);
         imp.display_height.set(display_height);
-        imp.dmabuf_info.replace(Some(*dmabuf_info));
 
         let dmabuf_fd = dmabuf_info.dmabuf_fd;
 
@@ -112,8 +111,11 @@ impl ScanoutPaintable {
             }
         }
 
-        // NOTE: FD is not closed - it remains valid for the lifetime of the scanout
-        match unsafe { builder.build() } {
+        // Use build_with_release_func to close the FD when the texture is destroyed
+        match unsafe { builder.build_with_release_func(move || {
+            libc::close(dmabuf_fd);
+            log::debug!("Closed dmabuf fd={} (texture destroyed)", dmabuf_fd);
+        }) } {
             Ok(texture) => {
                 log::debug!(
                     "Successfully created dmabuf texture (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
@@ -134,6 +136,8 @@ impl ScanoutPaintable {
                     "Failed to create dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
                     dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
+                // If build failed, we need to close the FD since the texture didn't take ownership
+                unsafe { libc::close(dmabuf_fd); }
             }
         }
     }
