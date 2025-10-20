@@ -119,9 +119,9 @@ struct VirtioGpuResource {
     size: u64, // only for blob resources
     shmem_offset: Option<u64>,
     rutabaga_external_mapping: bool,
-    // If Some, this resource has been exported as dmabuf to the display backend with given id
+    // If true, this resource has been exported as dmabuf to the display backend
     #[cfg(target_os = "linux")]
-    dmabuf_export_id: Option<u32>,
+    dmabuf_exported: bool,
 }
 
 impl VirtioGpuResource {
@@ -144,7 +144,7 @@ impl VirtioGpuResource {
             shmem_offset: None,
             rutabaga_external_mapping: false,
             #[cfg(target_os = "linux")]
-            dmabuf_export_id: None,
+            dmabuf_exported: false,
         }
     }
 }
@@ -378,17 +378,14 @@ impl VirtioGpu {
 
         // Release the dmabuf if it was exported
         #[cfg(target_os = "linux")]
-        if let Some(dmabuf_id) = resource.dmabuf_export_id {
-            if let Err(e) = self.display_backend.release_dmabuf(dmabuf_id) {
+        if resource.dmabuf_exported {
+            if let Err(e) = self.display_backend.release_dmabuf(resource_id) {
                 warn!(
-                    "Failed to release dmabuf id={} for resource {}: {:?}",
-                    dmabuf_id, resource_id, e
+                    "Failed to release dmabuf for resource {}: {:?}",
+                    resource_id, e
                 );
             } else {
-                debug!(
-                    "Released dmabuf id={} for resource {}",
-                    dmabuf_id, resource_id
-                );
+                debug!("Released dmabuf for resource {}", resource_id);
             }
         }
 
@@ -492,14 +489,7 @@ impl VirtioGpu {
 
         // Check if this resource has already been exported as dmabuf
         let resource = self.resources.get_mut(&resource_id).ok_or(())?;
-        let dmabuf_id = if let Some(existing_id) = resource.dmabuf_export_id {
-            // Resource already exported, reuse the dmabuf_id
-            debug!(
-                "Resource {resource_id} already exported as dmabuf with id={}",
-                existing_id
-            );
-            return existing_id;
-        } else {
+        if !resource.dmabuf_exported {
             // First time exporting this resource, import it
             let export = self.rutabaga.export_blob(resource_id).map_err(|e| {
                 debug!("Failed to export resource {resource_id} as dmabuf: {e}");
@@ -536,34 +526,29 @@ impl VirtioGpu {
                 modifier: info_3d.modifier,
             };
 
-            let dmabuf_id = self
-                .display_backend
-                .import_dmabuf(&dmabuf_info)
+            self.display_backend
+                .import_dmabuf(resource_id, &dmabuf_info)
                 .map_err(|e| {
                     debug!("Failed to import dmabuf for resource {resource_id}: {e}");
                 })?;
 
-            // Store the dmabuf_id in the resource for future reuse
+            // Mark that this resource has been exported
             let resource = self.resources.get_mut(&resource_id).ok_or(())?;
-            resource.dmabuf_export_id = Some(dmabuf_id);
-            debug!(
-                "Imported resource {resource_id} as dmabuf with id={}",
-                dmabuf_id
-            );
+            resource.dmabuf_exported = true;
+            debug!("Imported resource {resource_id} as dmabuf");
+        } else {
+            debug!("Resource {resource_id} already exported as dmabuf");
+        }
 
-            dmabuf_id
-        };
-
-        // Configure scanout to use the cached dmabuf
+        // Configure scanout to use the dmabuf (referenced by resource_id)
         self.display_backend
-            .configure_scanout_dmabuf(scanout_id, display_width, display_height, dmabuf_id)
+            .configure_scanout_dmabuf(scanout_id, display_width, display_height, resource_id)
             .map_err(|e| {
                 debug!("Failed to configure dmabuf scanout for resource {resource_id}: {e}");
             })?;
 
         debug!(
-            "Successfully configured scanout {scanout_id} with dmabuf id={} for resource {resource_id}",
-            dmabuf_id
+            "Successfully configured scanout {scanout_id} with dmabuf for resource {resource_id}"
         );
         Ok(VirtioGpuScanout {
             resource_id,

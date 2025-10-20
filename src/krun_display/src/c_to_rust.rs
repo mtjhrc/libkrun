@@ -158,27 +158,26 @@ impl DisplayBackendBasicFramebuffer for DisplayBackendInstance {
 impl DisplayBackendInstance {
     pub fn import_dmabuf(
         &mut self,
+        resource_id: u32,
         dmabuf_info: &header::krun_display_dmabuf_info,
-    ) -> Result<u32, DisplayBackendError> {
+    ) -> Result<(), DisplayBackendError> {
         if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
         }
 
-        let mut dmabuf_id: u32 = 0;
         into_rust_result!(unsafe {
             self.vtable
                 .dmabuf
                 .import_dmabuf
                 .ok_or(DisplayBackendError::MethodNotSupported)?(
                 self.instance,
-                &mut dmabuf_id,
+                resource_id,
                 dmabuf_info,
             )
-        })?;
-        Ok(dmabuf_id)
+        })
     }
 
-    pub fn release_dmabuf(&mut self, dmabuf_id: u32) -> Result<(), DisplayBackendError> {
+    pub fn release_dmabuf(&mut self, resource_id: u32) -> Result<(), DisplayBackendError> {
         if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
         }
@@ -188,7 +187,7 @@ impl DisplayBackendInstance {
                 .dmabuf
                 .release_dmabuf
                 .ok_or(DisplayBackendError::MethodNotSupported)?(
-                self.instance, dmabuf_id
+                self.instance, resource_id
             )
         })
     }
@@ -198,7 +197,7 @@ impl DisplayBackendInstance {
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        dmabuf_id: u32,
+        resource_id: u32,
     ) -> Result<(), DisplayBackendError> {
         if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
@@ -213,7 +212,7 @@ impl DisplayBackendInstance {
                 scanout_id,
                 display_width,
                 display_height,
-                dmabuf_id,
+                resource_id,
             )
         })
     }

@@ -678,6 +678,7 @@ pub struct DisplayWorker {
     keyboard_event_tx: Option<EventSender>,
     per_display_inputs: Vec<Vec<(PollableChannelSender<InputEvent>, DisplayInputOptions)>>,
     scanouts: RefCell<[Option<ScanoutWindow>; MAX_DISPLAYS]>,
+    dmabuf_cache: RefCell<HashMap<u32, gtk::gdk::Texture>>,
 }
 
 impl DisplayWorker {
@@ -695,6 +696,7 @@ impl DisplayWorker {
             keyboard_event_tx,
             per_display_inputs,
             scanouts: Default::default(),
+            dmabuf_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -739,14 +741,14 @@ impl DisplayWorker {
                     }
                 }
                 DisplayEvent::ImportDmabuf {
-                    dmabuf_id,
+                    resource_id,
                     dmabuf_info,
                 } => {
                     use gtk::gdk::DmabufTextureBuilder;
                     
                     debug!(
-                        "Importing dmabuf: id={}, fd={}, width={}, height={}",
-                        dmabuf_id, dmabuf_info.dmabuf_fd, dmabuf_info.width, dmabuf_info.height
+                        "Importing dmabuf: resource_id={}, fd={}, width={}, height={}",
+                        resource_id, dmabuf_info.dmabuf_fd, dmabuf_info.width, dmabuf_info.height
                     );
 
                     // FIXME: n_planes should be passed through DmabufInfo struct properly
@@ -776,41 +778,41 @@ impl DisplayWorker {
                     let dmabuf_fd = dmabuf_info.dmabuf_fd;
                     match unsafe { builder.build_with_release_func(move || {
                         libc::close(dmabuf_fd);
-                        debug!("Closed dmabuf fd={} (dmabuf_id {})", dmabuf_fd, dmabuf_id);
+                        debug!("Closed dmabuf fd={} (resource_id={})", dmabuf_fd, resource_id);
                     }) } {
                         Ok(texture) => {
                             debug!(
-                                "Successfully imported dmabuf texture (id={}, fd={})",
-                                dmabuf_id, dmabuf_info.dmabuf_fd
+                                "Successfully imported dmabuf texture (resource_id={}, fd={})",
+                                resource_id, dmabuf_info.dmabuf_fd
                             );
-                            self.dmabuf_cache.borrow_mut().insert(dmabuf_id, texture.upcast());
+                            self.dmabuf_cache.borrow_mut().insert(resource_id, texture.upcast());
                         }
                         Err(e) => {
                             warn!(
-                                "Failed to import dmabuf texture: {e} (id={}, fd={})",
-                                dmabuf_id, dmabuf_info.dmabuf_fd
+                                "Failed to import dmabuf texture: {e} (resource_id={}, fd={})",
+                                resource_id, dmabuf_info.dmabuf_fd
                             );
                             // If build failed, we need to close the FD since the texture didn't take ownership
                             unsafe { libc::close(dmabuf_info.dmabuf_fd); }
                         }
                     }
                 }
-                DisplayEvent::ReleaseDmabuf { dmabuf_id } => {
-                    debug!("Releasing dmabuf: id={}", dmabuf_id);
-                    self.dmabuf_cache.borrow_mut().remove(&dmabuf_id);
+                DisplayEvent::ReleaseDmabuf { resource_id } => {
+                    debug!("Releasing dmabuf: resource_id={}", resource_id);
+                    self.dmabuf_cache.borrow_mut().remove(&resource_id);
                 }
                 DisplayEvent::ConfigureScanoutDmabuf {
                     scanout_id,
                     display_width,
                     display_height,
-                    dmabuf_id,
+                    resource_id,
                 } => {
                     if let Some(ref mut scanout) = scanouts[scanout_id as usize] {
-                        let texture = self.dmabuf_cache.borrow().get(&dmabuf_id).cloned();
+                        let texture = self.dmabuf_cache.borrow().get(&resource_id).cloned();
                         if let Some(texture) = texture {
                             debug!(
-                                "Configure scanout {scanout_id} with dmabuf id={} ({}x{})",
-                                dmabuf_id, texture.width(), texture.height()
+                                "Configure scanout {scanout_id} with dmabuf resource_id={} ({}x{})",
+                                resource_id, texture.width(), texture.height()
                             );
                             scanout.configure_dmabuf_texture(
                                 display_width as i32,
@@ -819,8 +821,8 @@ impl DisplayWorker {
                             );
                         } else {
                             warn!(
-                                "Attempted to configure scanout with unknown dmabuf_id: {}",
-                                dmabuf_id
+                                "Attempted to configure scanout with unknown resource_id: {}",
+                                resource_id
                             );
                         }
                     } else {

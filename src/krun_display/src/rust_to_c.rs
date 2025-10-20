@@ -37,16 +37,20 @@ pub trait DisplayBackendBasicFramebuffer {
 }
 
 pub trait DisplayBackendDmabuf: DisplayBackendBasicFramebuffer {
-    fn import_dmabuf(&mut self, dmabuf_info: &DmabufInfo) -> Result<u32, DisplayBackendError>;
+    fn import_dmabuf(
+        &mut self,
+        resource_id: u32,
+        dmabuf_info: &DmabufInfo,
+    ) -> Result<(), DisplayBackendError>;
 
-    fn release_dmabuf(&mut self, dmabuf_id: u32) -> Result<(), DisplayBackendError>;
+    fn release_dmabuf(&mut self, resource_id: u32) -> Result<(), DisplayBackendError>;
 
     fn configure_scanout_dmabuf(
         &mut self,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        dmabuf_id: u32,
+        resource_id: u32,
     ) -> Result<(), DisplayBackendError>;
 
     fn present_dmabuf(
@@ -269,11 +273,10 @@ pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBac
 
     extern "C" fn import_dmabuf_fn<I: DisplayBackendDmabuf>(
         instance: *mut c_void,
-        dmabuf_id: *mut u32,
+        resource_id: u32,
         dmabuf_info_ptr: *const krun_display_dmabuf_info,
     ) -> i32 {
         assert!(!dmabuf_info_ptr.is_null());
-        assert!(!dmabuf_id.is_null());
         let c_dmabuf_info = unsafe { &*dmabuf_info_ptr };
 
         let dmabuf_info = DmabufInfo {
@@ -286,20 +289,14 @@ pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBac
             modifier: c_dmabuf_info.modifier,
         };
 
-        match cast_instance::<I>(instance).import_dmabuf(&dmabuf_info) {
-            Ok(id) => {
-                unsafe { *dmabuf_id = id };
-                0
-            }
-            Err(e) => e as i32,
-        }
+        from_rust_result(cast_instance::<I>(instance).import_dmabuf(resource_id, &dmabuf_info))
     }
 
     extern "C" fn release_dmabuf_fn<I: DisplayBackendDmabuf>(
         instance: *mut c_void,
-        dmabuf_id: u32,
+        resource_id: u32,
     ) -> i32 {
-        from_rust_result(cast_instance::<I>(instance).release_dmabuf(dmabuf_id))
+        from_rust_result(cast_instance::<I>(instance).release_dmabuf(resource_id))
     }
 
     extern "C" fn configure_scanout_dmabuf_fn<I: DisplayBackendDmabuf>(
@@ -307,13 +304,13 @@ pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBac
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        dmabuf_id: u32,
+        resource_id: u32,
     ) -> i32 {
         from_rust_result(cast_instance::<I>(instance).configure_scanout_dmabuf(
             scanout_id,
             display_width,
             display_height,
-            dmabuf_id,
+            resource_id,
         ))
     }
 
