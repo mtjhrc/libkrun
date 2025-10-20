@@ -745,8 +745,8 @@ impl DisplayWorker {
                 } => {
                     if let Some(ref mut scanout) = scanouts[scanout_id as usize] {
                         debug!(
-                            "Configure scanout {scanout_id} with dmabuf: width={} height={}",
-                            dmabuf_info.width, dmabuf_info.height
+                            "Configure scanout {scanout_id} with dmabuf: width={} height={}, fd: {}",
+                            dmabuf_info.width, dmabuf_info.height, dmabuf_info.dmabuf_fd
                         );
                         scanout.configure_dmabuf(
                             display_width as i32,

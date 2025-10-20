@@ -140,11 +140,8 @@ impl ScanoutPaintable {
             builder = builder.set_update_texture(Some(texture));
         }
 
-        // NOTE: We use build_with_release_func to close the FD when texture is destroyed
-        // (libkrun transferred ownership to us via mem::forget)
-        match unsafe { builder.build_with_release_func(move || {
-            unsafe { libc::close(dmabuf_fd); }
-        }) } {
+        // NOTE: Just use build() without closing the FD to test if FD reuse works
+        match unsafe { builder.build() } {
             Ok(texture) => {
                 log::debug!(
                     "Successfully created dmabuf texture (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
@@ -167,8 +164,7 @@ impl ScanoutPaintable {
                     "Failed to create dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
                     dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
-                // If build failed, we need to close the FD since we own it
-                unsafe { libc::close(dmabuf_fd); }
+                // Not closing FD in error case either (testing FD reuse)
             }
         }
     }

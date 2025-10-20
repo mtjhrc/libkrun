@@ -95,7 +95,7 @@ gui-vm-run command: install-debug-input build-examples
     #!/usr/bin/env bash
     set -euxo pipefail
     cd examples
-    RUST_LOG=devices::virtio::gpu=trace,gtk_display=debug,rutabaga_gfx=debug \
+    RUST_LOG=${RUST_LOG:-devices::virtio::gpu=trace,gtk_display=debug,rutabaga_gfx=debug} \
     GSK_RENDERER=gl \
     LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
     buildah unshare target/debug/gui_vm --root-dir ~/c/my_rootfs3 --display=1920x1080 -- {{command}}
