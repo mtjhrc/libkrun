@@ -917,7 +917,6 @@ impl Rutabaga {
             .resources
             .get_mut(&resource_id)
             .ok_or(RutabagaError::InvalidResourceId)?;
-        log::warn!("Exporting resource: {resource:#?}");
 
         // We can inspect blob flags only once guest minigbm is fully transitioned to blob.
         let share_mask = RUTABAGA_BLOB_FLAG_USE_SHAREABLE | RUTABAGA_BLOB_FLAG_USE_CROSS_DEVICE;

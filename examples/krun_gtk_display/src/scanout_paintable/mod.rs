@@ -74,20 +74,10 @@ impl ScanoutPaintable {
         imp.display_width.set(display_width);
         imp.display_height.set(display_height);
         imp.dmabuf_info.replace(Some(*dmabuf_info));
-    }
 
-    pub fn update_dmabuf(&self, rect: Option<Rect>) {
-        let imp = self.imp();
-
-        let dmabuf_info_ref = imp.dmabuf_info.borrow();
-        let Some(dmabuf_info) = dmabuf_info_ref.as_ref() else {
-            error!("update_dmabuf called without dmabuf_info configured");
-            return;
-        };
-        
         let dmabuf_fd = dmabuf_info.dmabuf_fd;
 
-        log::trace!(
+        log::debug!(
             "Creating dmabuf texture: width={}, height={}, fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}",
             dmabuf_info.width,
             dmabuf_info.height,
@@ -99,9 +89,6 @@ impl ScanoutPaintable {
 
         // FIXME: n_planes should be passed through DmabufInfo struct properly
         let n_planes = 1;
-
-        // NOTE: libkrun has transferred FD ownership to us via mem::forget,
-        // so we take ownership directly without duplication
 
         let mut builder = DmabufTextureBuilder::new()
             .set_display(gdk::Display::default().as_ref().unwrap())
@@ -120,27 +107,12 @@ impl ScanoutPaintable {
             .take(n_planes as usize)
         {
             builder = builder.set_stride(i as u32, stride).set_offset(i as u32, offset);
-            // TODO: We're using the same fd for all planes, but we should probably
-            // allow passing a different fd per plane through DmabufInfo
             unsafe {
                 builder = builder.set_fd(i as u32, dmabuf_fd);
             }
         }
 
-        if let Some(rect) = rect {
-            builder = builder.set_update_region(Some(&Region::create_rectangle(&RectangleInt::new(
-                rect.x as i32,
-                rect.y as i32,
-                rect.width as i32,
-                rect.height as i32,
-            ))));
-        }
-
-        if let Some(texture) = imp.texture.borrow().as_ref() {
-            builder = builder.set_update_texture(Some(texture));
-        }
-
-        // NOTE: Just use build() without closing the FD to test if FD reuse works
+        // NOTE: FD is not closed - it remains valid for the lifetime of the scanout
         match unsafe { builder.build() } {
             Ok(texture) => {
                 log::debug!(
@@ -148,13 +120,11 @@ impl ScanoutPaintable {
                     dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
                 let old_texture = imp.texture.replace(Some(texture.upcast()));
-                log::debug!("Calling invalidate_contents() to trigger redraw");
                 self.invalidate_contents();
                 if let Some(old_texture) = old_texture {
                     let new_size = (dmabuf_info.width, dmabuf_info.height);
                     let old_size = (old_texture.width(), old_texture.height());
                     if new_size != (old_size.0 as u32, old_size.1 as u32) {
-                        log::debug!("Size changed, calling invalidate_size()");
                         self.invalidate_size();
                     }
                 }
@@ -164,8 +134,15 @@ impl ScanoutPaintable {
                     "Failed to create dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
                     dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
-                // Not closing FD in error case either (testing FD reuse)
             }
         }
+    }
+
+    pub fn update_dmabuf(&self, _rect: Option<Rect>) {
+        // Just invalidate the existing texture to trigger a redraw
+        // The dmabuf FD content has been updated by the GPU, so we just need to
+        // tell GTK to repaint
+        log::trace!("Invalidating dmabuf texture for redraw");
+        self.invalidate_contents();
     }
 }
