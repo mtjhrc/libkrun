@@ -164,14 +164,42 @@ struct krun_display_dmabuf_info {
 };
 
 /**
- * Configures a display scanout with a DMABUF-backed texture.
+ * Imports a DMABUF into the display backend and returns an identifier for it.
+ * The display backend should cache the imported dmabuf texture for reuse.
+ *
+ * Arguments:
+ *  "instance"       - userdata set by `krun_display_create`, represents this/self argument
+ *  "dmabuf_id"      - (Output) pointer to receive the identifier for the imported dmabuf.
+ *  "dmabuf_info"    - Pointer to dmabuf metadata including fd, dimensions, format, strides, offsets and modifier.
+ *
+ * Returns:
+ *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
+ */
+typedef int32_t (*krun_display_import_dmabuf_fn)(void *instance,
+    uint32_t *dmabuf_id,
+    const struct krun_display_dmabuf_info *dmabuf_info);
+
+/**
+ * Releases a previously imported DMABUF.
+ *
+ * Arguments:
+ *  "instance"       - userdata set by `krun_display_create`, represents this/self argument
+ *  "dmabuf_id"      - The identifier of the dmabuf to release, previously obtained from `krun_display_import_dmabuf`.
+ *
+ * Returns:
+ *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
+ */
+typedef int32_t (*krun_display_release_dmabuf_fn)(void *instance, uint32_t dmabuf_id);
+
+/**
+ * Configures a display scanout to use a previously imported DMABUF.
  *
  * Arguments:
  *  "instance"       - userdata set by `krun_display_create`, represents this/self argument
  *  "scanout_id"     - The identifier of the scanout to configure.
  *  "display_width"  - The original width of the display in pixels.
  *  "display_height" - The original height of the display in pixels.
- *  "dmabuf_info"    - Pointer to dmabuf metadata including fd, dimensions, format, strides, offsets and modifier.
+ *  "dmabuf_id"      - The identifier of the imported dmabuf, previously obtained from `krun_display_import_dmabuf`.
  *
  * Returns:
  *  Zero on success or a negative error code (KRUN_DISPLAY_ERR_*) otherwise.
@@ -180,7 +208,7 @@ typedef int32_t (*krun_display_configure_scanout_dmabuf_fn)(void *instance,
     uint32_t scanout_id,
     uint32_t display_width,
     uint32_t display_height,
-    const struct krun_display_dmabuf_info *dmabuf_info);
+    uint32_t dmabuf_id);
 
 /**
  * Presents a DMABUF-backed frame to the display.
@@ -224,6 +252,8 @@ struct krun_display_basic_framebuffer_vtable {
 struct krun_display_dmabuf_vtable {
     struct krun_display_basic_framebuffer_vtable basic_framebuffer;
     // DMABUF-specific methods
+    krun_display_import_dmabuf_fn             import_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER
+    krun_display_release_dmabuf_fn            release_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER
     krun_display_configure_scanout_dmabuf_fn  configure_scanout_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER
     krun_display_present_dmabuf_fn            present_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER
 };

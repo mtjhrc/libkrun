@@ -156,12 +156,49 @@ impl DisplayBackendBasicFramebuffer for DisplayBackendInstance {
 }
 
 impl DisplayBackendInstance {
+    pub fn import_dmabuf(
+        &mut self,
+        dmabuf_info: &header::krun_display_dmabuf_info,
+    ) -> Result<u32, DisplayBackendError> {
+        if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
+            return Err(DisplayBackendError::MethodNotSupported);
+        }
+
+        let mut dmabuf_id: u32 = 0;
+        into_rust_result!(unsafe {
+            self.vtable
+                .dmabuf
+                .import_dmabuf
+                .ok_or(DisplayBackendError::MethodNotSupported)?(
+                self.instance,
+                &mut dmabuf_id,
+                dmabuf_info,
+            )
+        })?;
+        Ok(dmabuf_id)
+    }
+
+    pub fn release_dmabuf(&mut self, dmabuf_id: u32) -> Result<(), DisplayBackendError> {
+        if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
+            return Err(DisplayBackendError::MethodNotSupported);
+        }
+
+        into_rust_result!(unsafe {
+            self.vtable
+                .dmabuf
+                .release_dmabuf
+                .ok_or(DisplayBackendError::MethodNotSupported)?(
+                self.instance, dmabuf_id
+            )
+        })
+    }
+
     pub fn configure_scanout_dmabuf(
         &mut self,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        dmabuf_info: &header::krun_display_dmabuf_info,
+        dmabuf_id: u32,
     ) -> Result<(), DisplayBackendError> {
         if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
@@ -176,7 +213,7 @@ impl DisplayBackendInstance {
                 scanout_id,
                 display_width,
                 display_height,
-                dmabuf_info,
+                dmabuf_id,
             )
         })
     }
@@ -242,7 +279,9 @@ impl DisplayBackend<'_> {
         if !features.contains(DisplayFeatures::BASIC_FRAMEBUFFER)
             && !features.contains(DisplayFeatures::DMABUF_CONSUMER)
         {
-            error!("This version of libkrun requires BASIC_FRAMEBUFFER or DMABUF_CONSUMER display feature");
+            error!(
+                "This version of libkrun requires BASIC_FRAMEBUFFER or DMABUF_CONSUMER display feature"
+            );
             return false;
         }
 
@@ -270,6 +309,8 @@ impl DisplayBackend<'_> {
                             .basic_framebuffer
                             .disable_scanout
                             .is_none()
+                            || self.vtable.dmabuf.import_dmabuf.is_none()
+                            || self.vtable.dmabuf.release_dmabuf.is_none()
                             || self.vtable.dmabuf.configure_scanout_dmabuf.is_none()
                             || self.vtable.dmabuf.present_dmabuf.is_none()
                     } {

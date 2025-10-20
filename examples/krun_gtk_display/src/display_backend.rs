@@ -6,6 +6,7 @@ use krun_display::{
 };
 use log::error;
 use std::mem;
+use std::sync::atomic::{AtomicU32, Ordering};
 use utils::pollable_channel::PollableChannelSender;
 
 // We try to push the maximum amount of data to the GTK thread. Currently, we want the display thread
@@ -29,11 +30,18 @@ pub enum DisplayEvent {
         height: u32,
         format: MemoryFormat,
     },
+    ImportDmabuf {
+        dmabuf_id: u32,
+        dmabuf_info: DmabufInfo,
+    },
+    ReleaseDmabuf {
+        dmabuf_id: u32,
+    },
     ConfigureScanoutDmabuf {
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        dmabuf_info: DmabufInfo,
+        dmabuf_id: u32,
     },
     DisableScanout {
         scanout_id: u32,
@@ -54,6 +62,7 @@ pub enum DisplayEvent {
 pub struct GtkDisplayBackend {
     channel: PollableChannelSender<DisplayEvent>,
     scanouts: [Option<Scanout>; MAX_DISPLAYS],
+    next_dmabuf_id: AtomicU32,
 }
 
 impl DisplayBackendNew<PollableChannelSender<DisplayEvent>> for GtkDisplayBackend {
@@ -65,6 +74,7 @@ impl DisplayBackendNew<PollableChannelSender<DisplayEvent>> for GtkDisplayBacken
         Self {
             channel,
             scanouts: Default::default(),
+            next_dmabuf_id: AtomicU32::new(1), // Start from 1, 0 can be used as "invalid"
         }
     }
 }
@@ -169,12 +179,38 @@ impl DisplayBackendBasicFramebuffer for GtkDisplayBackend {
 }
 
 impl DisplayBackendDmabuf for GtkDisplayBackend {
+    fn import_dmabuf(&mut self, dmabuf_info: &DmabufInfo) -> Result<u32, DisplayBackendError> {
+        // Allocate a new dmabuf_id (wrapping on overflow)
+        let dmabuf_id = self.next_dmabuf_id.fetch_add(1, Ordering::Relaxed);
+        
+        log::debug!("Importing dmabuf: id={}, fd={}", dmabuf_id, dmabuf_info.dmabuf_fd);
+
+        self.channel
+            .send(DisplayEvent::ImportDmabuf {
+                dmabuf_id,
+                dmabuf_info: *dmabuf_info,
+            })
+            .unwrap();
+        
+        Ok(dmabuf_id)
+    }
+
+    fn release_dmabuf(&mut self, dmabuf_id: u32) -> Result<(), DisplayBackendError> {
+        log::debug!("Releasing dmabuf: id={}", dmabuf_id);
+
+        self.channel
+            .send(DisplayEvent::ReleaseDmabuf { dmabuf_id })
+            .unwrap();
+        
+        Ok(())
+    }
+
     fn configure_scanout_dmabuf(
         &mut self,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        dmabuf_info: &DmabufInfo,
+        dmabuf_id: u32,
     ) -> Result<(), DisplayBackendError> {
         let Some(scanout) = &mut self.scanouts[scanout_id as usize] else {
             return Err(DisplayBackendError::InvalidScanoutId);
@@ -187,7 +223,7 @@ impl DisplayBackendDmabuf for GtkDisplayBackend {
                 scanout_id,
                 display_width,
                 display_height,
-                dmabuf_info: *dmabuf_info,
+                dmabuf_id,
             })
             .unwrap();
         Ok(())

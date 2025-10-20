@@ -13,10 +13,7 @@ fn test_display_backend_abi_compatibility() {
     // version (V1 ABI) can still pass their smaller DisplayBackend struct to the new libkrun
     // that supports dmabuf (V2 ABI).
 
-    unsafe extern "C" fn dummy_disable_scanout(
-        _instance: *mut c_void,
-        _scanout_id: u32,
-    ) -> i32 {
+    unsafe extern "C" fn dummy_disable_scanout(_instance: *mut c_void, _scanout_id: u32) -> i32 {
         DisplayBackendError::InternalError as _
     }
 
@@ -111,4 +108,3 @@ fn test_display_backend_abi_compatibility() {
         );
     }
 }
-
