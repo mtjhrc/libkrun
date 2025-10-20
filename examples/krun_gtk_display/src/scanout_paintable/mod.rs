@@ -87,7 +87,7 @@ impl ScanoutPaintable {
         
         let dmabuf_fd = dmabuf_info.dmabuf_fd;
 
-        log::debug!(
+        log::trace!(
             "Creating dmabuf texture: width={}, height={}, fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}",
             dmabuf_info.width,
             dmabuf_info.height,
@@ -100,13 +100,8 @@ impl ScanoutPaintable {
         // FIXME: n_planes should be passed through DmabufInfo struct properly
         let n_planes = 1;
 
-        // NOTE: We dup() the fd for each texture so GTK has its own copy.
-        // This prevents issues when the original fd is closed (e.g., when switching resources).
-        let duped_fd = unsafe { libc::dup(dmabuf_fd) };
-        if duped_fd < 0 {
-            error!("Failed to dup dmabuf fd {}: {:?}", dmabuf_fd, std::io::Error::last_os_error());
-            return;
-        }
+        // NOTE: libkrun has transferred FD ownership to us via mem::forget,
+        // so we take ownership directly without duplication
 
         let mut builder = DmabufTextureBuilder::new()
             .set_display(gdk::Display::default().as_ref().unwrap())
@@ -116,7 +111,7 @@ impl ScanoutPaintable {
             .set_modifier(dmabuf_info.modifier)
             .set_n_planes(n_planes);
 
-        // Use the duped fd for all planes
+        // Use the fd for all planes
         for (i, (&stride, &offset)) in dmabuf_info
             .strides
             .iter()
@@ -128,7 +123,7 @@ impl ScanoutPaintable {
             // TODO: We're using the same fd for all planes, but we should probably
             // allow passing a different fd per plane through DmabufInfo
             unsafe {
-                builder = builder.set_fd(i as u32, duped_fd);
+                builder = builder.set_fd(i as u32, dmabuf_fd);
             }
         }
 
@@ -145,12 +140,15 @@ impl ScanoutPaintable {
             builder = builder.set_update_texture(Some(texture));
         }
 
-        // NOTE: The builder will take ownership of duped_fd, so we don't need to close it
-        match unsafe { builder.build() } {
+        // NOTE: We use build_with_release_func to close the FD when texture is destroyed
+        // (libkrun transferred ownership to us via mem::forget)
+        match unsafe { builder.build_with_release_func(move || {
+            unsafe { libc::close(dmabuf_fd); }
+        }) } {
             Ok(texture) => {
                 log::debug!(
-                    "Successfully created dmabuf texture (original_fd={}, duped_fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
-                    dmabuf_fd, duped_fd, dmabuf_info.fourcc, dmabuf_info.modifier
+                    "Successfully created dmabuf texture (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
+                    dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
                 let old_texture = imp.texture.replace(Some(texture.upcast()));
                 log::debug!("Calling invalidate_contents() to trigger redraw");
@@ -166,11 +164,11 @@ impl ScanoutPaintable {
             }
             Err(e) => {
                 error!(
-                    "Failed to create dmabuf texture: {e} (original_fd={}, duped_fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
-                    dmabuf_fd, duped_fd, dmabuf_info.fourcc, dmabuf_info.modifier
+                    "Failed to create dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
+                    dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
-                // If build failed, we need to close the duped fd
-                unsafe { libc::close(duped_fd); }
+                // If build failed, we need to close the FD since we own it
+                unsafe { libc::close(dmabuf_fd); }
             }
         }
     }

@@ -40,7 +40,7 @@ pub struct Rutabaga2DInfo {
 }
 
 /// A Rutabaga resource, supporting 2D and 3D rutabaga features.  Assumes a single-threaded library.
- #[derive(Debug)]
+#[derive(Debug)]
 pub struct RutabagaResource {
     pub resource_id: u32,
     pub handle: Option<Arc<RutabagaHandle>>,

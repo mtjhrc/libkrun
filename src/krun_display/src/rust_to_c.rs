@@ -1,5 +1,8 @@
 use crate::header::krun_display_dmabuf_info;
-use crate::{DisplayBackend, DisplayBackendError, DisplayBasicFramebufferVtable, DisplayDmabufVtable, DisplayFeatures, DisplayVtable, DmabufInfo, Rect, ResourceFormat};
+use crate::{
+    DisplayBackend, DisplayBackendError, DisplayBasicFramebufferVtable, DisplayDmabufVtable,
+    DisplayFeatures, DisplayVtable, DmabufInfo, Rect, ResourceFormat,
+};
 use log::error;
 use std::ffi::c_void;
 use std::marker::PhantomData;
@@ -32,18 +35,6 @@ pub trait DisplayBackendBasicFramebuffer {
         rect: Option<&Rect>,
     ) -> Result<(), DisplayBackendError>;
 }
-
-/*
-#[derive(Debug, Clone, Copy)]
-pub struct DmabufInfo {
-    pub dmabuf_fd: i32,
-    pub width: u32,
-    pub height: u32,
-    pub fourcc: u32,
-    pub strides: [u32; 4],
-    pub offsets: [u32; 4],
-    pub modifier: u64,
-}*/
 
 pub trait DisplayBackendDmabuf: DisplayBackendBasicFramebuffer {
     fn configure_scanout_dmabuf(
@@ -312,15 +303,17 @@ pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBac
     DisplayBackend {
         create_userdata: userdata.map_or(null(), |t| ptr::from_ref(t) as *const c_void),
         create_userdata_lifetime: PhantomData,
-        features: (DisplayFeatures::DMABUF | DisplayFeatures::BASIC_FRAMEBUFFER).bits(),
+        features: (DisplayFeatures::DMABUF_CONSUMER | DisplayFeatures::BASIC_FRAMEBUFFER).bits(),
         create_fn: Some(create_fn::<T, I>),
         vtable: DisplayVtable {
             dmabuf: DisplayDmabufVtable {
-                destroy: Some(destroy_fn::<I>),
-                disable_scanout: Some(disable_scanout_dmabuf::<I>),
-                configure_scanout: Some(configure_scanout_fn::<I>),
-                alloc_frame: Some(alloc_frame::<I>),
-                present_frame: Some(present_frame::<I>),
+                basic_framebuffer: DisplayBasicFramebufferVtable {
+                    destroy: Some(destroy_fn::<I>),
+                    disable_scanout: Some(disable_scanout_dmabuf::<I>),
+                    configure_scanout: Some(configure_scanout_fn::<I>),
+                    alloc_frame: Some(alloc_frame::<I>),
+                    present_frame: Some(present_frame::<I>),
+                },
                 configure_scanout_dmabuf: Some(configure_scanout_dmabuf_fn::<I>),
                 present_dmabuf: Some(present_dmabuf_fn::<I>),
             },

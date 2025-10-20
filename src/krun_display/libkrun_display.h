@@ -40,11 +40,12 @@ extern "C" {
 #define KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER 1
 
 /**
- * Indicates support for DMABUF-based display operations.
+ * Indicates support for DMABUF-based display operations where the display backend consumes
+ * dmabufs allocated by libkrun/rutabaga.
  * If supported, the implementation must provide `disable_scanout`, `configure_scanout_dmabuf`,
  * and `present_dmabuf`.
  */
-#define KRUN_DISPLAY_FEATURE_DMABUF 2
+#define KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER 2
 
 /**
  * Called to create a display instance.
@@ -221,15 +222,10 @@ struct krun_display_basic_framebuffer_vtable {
 };
 
 struct krun_display_dmabuf_vtable {
-    // Common methods with basic_framebuffer (must be at same offsets for union access)
-    krun_display_destroy_fn                   destroy; // (optional)
-    krun_display_disable_scanout_fn           disable_scanout; // Required by KRUN_DISPLAY_FEATURE_DMABUF
-    krun_display_configure_scanout_fn         configure_scanout; // (optional) from BASIC_FRAMEBUFFER
-    krun_display_alloc_frame_fn               alloc_frame; // (optional) from BASIC_FRAMEBUFFER
-    krun_display_present_frame_fn             present_frame; // (optional) from BASIC_FRAMEBUFFER
+    struct krun_display_basic_framebuffer_vtable basic_framebuffer;
     // DMABUF-specific methods
-    krun_display_configure_scanout_dmabuf_fn  configure_scanout_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF
-    krun_display_present_dmabuf_fn            present_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF
+    krun_display_configure_scanout_dmabuf_fn  configure_scanout_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER
+    krun_display_present_dmabuf_fn            present_dmabuf; // Required by KRUN_DISPLAY_FEATURE_DMABUF_CONSUMER
 };
 
 union krun_display_vtable {

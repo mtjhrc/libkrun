@@ -8,10 +8,8 @@ default:
 build-debug:
     cargo build --features net,gpu
 
-# Build libkrun in debug mode with input support (using custom virglrenderer with venus)
+# Build libkrun in debug mode with input support
 build-debug-input:
-    PKG_CONFIG_PATH=examples/virglrenderer-prefix/lib64/pkgconfig:$$PKG_CONFIG_PATH \
-    RUSTFLAGS="-C link-args=-Wl,-rpath,/home/mhrica/Dev/libkrun/examples/virglrenderer-prefix/lib64" \
     cargo build --features net,gpu,input
 
 # Build libkrun in release mode
@@ -83,7 +81,7 @@ dev rootfs="~/c/my_rootfs3" display="1920x1080+touch": install-debug build-examp
     LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
     buildah unshare target/debug/gui_vm --root-dir {{rootfs}} --display={{display}} -- /bin/bash
 
-# Quick gui_vm with single display (debug build with input support)
+# Quick gui_vm with single display (debug build)
 gui-vm rootfs="~/c/my_rootfs3" command="/bin/bash": install-debug-input build-examples
     #!/usr/bin/env bash
     set -euxo pipefail
@@ -92,14 +90,14 @@ gui-vm rootfs="~/c/my_rootfs3" command="/bin/bash": install-debug-input build-ex
     LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
     buildah unshare target/debug/gui_vm --root-dir {{rootfs}} --display=1920x1080 -- {{command}}
 
-# Run gui_vm with custom command (uses default rootfs and custom virglrenderer with venus)
+# Run gui_vm with custom command (uses default rootfs)
 gui-vm-run command: install-debug-input build-examples
     #!/usr/bin/env bash
     set -euxo pipefail
     cd examples
     RUST_LOG=devices::virtio::gpu=trace,gtk_display=debug,rutabaga_gfx=debug \
     GSK_RENDERER=gl \
-    LD_LIBRARY_PATH=../virglrenderer-prefix/lib64:../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
+    LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
     buildah unshare target/debug/gui_vm --root-dir ~/c/my_rootfs3 --display=1920x1080 -- {{command}}
 
 # Run clippy on libkrun

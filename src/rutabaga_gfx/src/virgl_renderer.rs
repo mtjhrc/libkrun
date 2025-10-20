@@ -23,9 +23,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use log::{debug, info};
 use log::error;
 use log::warn;
+use log::debug;
 
 use crate::generated::virgl_debug_callback_bindings::*;
 use crate::generated::virgl_renderer_bindings::*;
@@ -531,10 +531,6 @@ impl RutabagaComponent for VirglRenderer {
                         os_handle: owned_fd,
                         handle_type: RUTABAGA_MEM_HANDLE_TYPE_DMABUF,
                     }));
-
-
-                    debug!("[RUTABAGA] virgl_renderer_resource_get_info_ext returned modifier=0x{:016x} for resource {}",
-                           info_ext.modifiers, resource_id);
 
                     resource_info_3d = Some(Resource3DInfo {
                         width: info_ext.base.width,

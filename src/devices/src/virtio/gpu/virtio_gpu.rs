@@ -25,9 +25,11 @@ use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_APPLE;
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD;
 #[cfg(all(feature = "virgl_resource_map2", target_os = "linux"))]
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_SHM;
+#[cfg(target_os = "linux")]
+use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_DMABUF;
 use rutabaga_gfx::{
     ResourceCreate3D, ResourceCreateBlob, Rutabaga, RutabagaBuilder, RutabagaChannel,
-    RutabagaFence, RutabagaFenceHandler, RutabagaHandle, RutabagaIovec, Transfer3D,
+    RutabagaFence, RutabagaFenceHandler, RutabagaIntoRawDescriptor, RutabagaIovec, Transfer3D,
     RUTABAGA_CHANNEL_TYPE_WAYLAND, RUTABAGA_MAP_CACHE_MASK,
 };
 #[cfg(target_os = "linux")]
@@ -145,8 +147,6 @@ impl VirtioGpuResource {
 pub struct VirtioGpuScanout {
     resource_id: u32,
     uses_dmabuf: bool,
-    #[cfg(target_os = "linux")]
-    dmabuf_handle: Option<Arc<RutabagaHandle>>,
 }
 
 pub struct VirtioGpu {
@@ -462,10 +462,9 @@ impl VirtioGpu {
         resource_id: u32,
         display_width: u32,
         display_height: u32,
-        width: u32,
-        height: u32,
+        _width: u32,
+        _height: u32,
     ) -> std::result::Result<VirtioGpuScanout, ()> {
-        use std::os::fd::AsRawFd;
 
         if !self.display_backend.supports_dmabuf() {
             return Err(());
@@ -474,6 +473,15 @@ impl VirtioGpu {
         let export = self.rutabaga.export_blob(resource_id).map_err(|e| {
             debug!("Failed to export resource {resource_id} as dmabuf: {e}");
         })?;
+
+        // Verify that the exported handle is actually a dmabuf
+        if export.handle_type != RUTABAGA_MEM_HANDLE_TYPE_DMABUF {
+            debug!(
+                "Resource {resource_id} was exported with handle type 0x{:x}, not DMABUF (0x{:x})",
+                export.handle_type, RUTABAGA_MEM_HANDLE_TYPE_DMABUF
+            );
+            return Err(());
+        }
 
         let info_3d = self.rutabaga.query(resource_id).map_err(|e| {
             debug!("Failed to query resource {resource_id} for dmabuf info: {e}");
@@ -484,8 +492,11 @@ impl VirtioGpu {
             info_3d.drm_fourcc, info_3d.modifier, info_3d.strides, info_3d.offsets
         );
 
+        // Transfer FD ownership to display backend by converting to raw descriptor
+        let dmabuf_fd = export.os_handle.into_raw_descriptor();
+
         let dmabuf_info = DmabufInfo {
-            dmabuf_fd: export.os_handle.as_raw_fd(),
+            dmabuf_fd,
             width: info_3d.width,
             height: info_3d.height,
             fourcc: info_3d.drm_fourcc,
@@ -506,8 +517,6 @@ impl VirtioGpu {
         Ok(VirtioGpuScanout {
             resource_id,
             uses_dmabuf: true,
-            #[cfg(target_os = "linux")]
-            dmabuf_handle: Some(Arc::new(export)),
         })
     }
 
@@ -533,8 +542,6 @@ impl VirtioGpu {
         Ok(VirtioGpuScanout {
             resource_id,
             uses_dmabuf: false,
-            #[cfg(target_os = "linux")]
-            dmabuf_handle: None,
         })
     }
 

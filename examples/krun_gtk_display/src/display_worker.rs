@@ -482,7 +482,7 @@ fn attach_keyboard(keyboard_tx: EventSender, widget: &impl IsA<Widget>) {
         let input_event = InputEvent {
             type_: InputEventType::Key as u16,
             code: linux_keycode,
-            value: 0, // Key release
+            value: 0,
         };
         debug!(
             "Forwarding key release: GTK key={}, code={}, Linux code={}",

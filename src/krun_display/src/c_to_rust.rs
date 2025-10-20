@@ -60,7 +60,7 @@ impl Drop for DisplayBackendInstance {
 
 impl DisplayBackendInstance {
     pub fn supports_dmabuf(&self) -> bool {
-        self.features.contains(DisplayFeatures::DMABUF)
+        self.features.contains(DisplayFeatures::DMABUF_CONSUMER)
     }
 }
 
@@ -163,7 +163,7 @@ impl DisplayBackendInstance {
         display_height: u32,
         dmabuf_info: &header::krun_display_dmabuf_info,
     ) -> Result<(), DisplayBackendError> {
-        if !self.features.contains(DisplayFeatures::DMABUF) {
+        if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
         }
 
@@ -186,7 +186,7 @@ impl DisplayBackendInstance {
         scanout_id: u32,
         rect: Option<&Rect>,
     ) -> Result<(), DisplayBackendError> {
-        if !self.features.contains(DisplayFeatures::DMABUF) {
+        if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
         }
 
@@ -240,9 +240,9 @@ impl DisplayBackend<'_> {
 
         // Require at least one display feature
         if !features.contains(DisplayFeatures::BASIC_FRAMEBUFFER)
-            && !features.contains(DisplayFeatures::DMABUF)
+            && !features.contains(DisplayFeatures::DMABUF_CONSUMER)
         {
-            error!("This version of libkrun requires BASIC_FRAMEBUFFER or DMABUF feature");
+            error!("This version of libkrun requires BASIC_FRAMEBUFFER or DMABUF_CONSUMER display feature");
             return false;
         }
 
@@ -261,15 +261,19 @@ impl DisplayBackend<'_> {
                         return false;
                     }
                 }
-                DisplayFeatures::DMABUF => {
+                DisplayFeatures::DMABUF_CONSUMER => {
                     // SAFETY: We have checked the feature flag is enabled, so we should be able to
                     // access the these union fields.
                     if unsafe {
-                        self.vtable.dmabuf.disable_scanout.is_none()
+                        self.vtable
+                            .dmabuf
+                            .basic_framebuffer
+                            .disable_scanout
+                            .is_none()
                             || self.vtable.dmabuf.configure_scanout_dmabuf.is_none()
                             || self.vtable.dmabuf.present_dmabuf.is_none()
                     } {
-                        error!("Missing required methods for DMABUF");
+                        error!("Missing required methods for DMABUF_CONSUMER");
                         return false;
                     }
                 }
