@@ -55,66 +55,13 @@ install-release:
     GPU=1 NET=1 make
     PREFIX=examples-prefix make install
 
-# Run gui_vm with debug build and tracing
-run rootfs="~/c/my_rootfs3" display="1920x1080+touch": install-debug build-examples
+# Run gui_vm with custom command (set ROOTFS env var to override default rootfs path)
+gui-vm *args: install-debug-input build-examples
     #!/usr/bin/env bash
-    set -euxo pipefail
+    set -exo pipefail
+    ulimit -n
     cd examples
-    RUST_LOG=devices::virtio::gpu=trace,gtk_display=debug \
-    LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
-    buildah unshare target/debug/gui_vm --root-dir {{rootfs}} --display={{display}} -- /bin/bash
-
-# Run gui_vm with release build
-run-release rootfs="~/c/my_rootfs3" display="1920x1080+touch": install-release build-examples-release
-    #!/usr/bin/env bash
-    set -euxo pipefail
-    cd examples
-    LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
-    buildah unshare target/release/gui_vm --root-dir {{rootfs}} --display={{display}} -- /bin/bash
-
-# Complete debug workflow - build, install, and run
-dev rootfs="~/c/my_rootfs3" display="1920x1080+touch": install-debug build-examples
-    #!/usr/bin/env bash
-    set -euxo pipefail
-    cd examples
-    RUST_LOG=devices::virtio::gpu=trace,gtk_display=debug \
-    LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
-    buildah unshare target/debug/gui_vm --root-dir {{rootfs}} --display={{display}} -- /bin/bash
-
-# Quick gui_vm with single display (debug build)
-gui-vm rootfs="~/c/my_rootfs3" command="/bin/bash": install-debug-input build-examples
-    #!/usr/bin/env bash
-    set -euxo pipefail
-    cd examples
-    RUST_LOG=devices::virtio::gpu=trace,gtk_display=debug \
-    LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
-    buildah unshare target/debug/gui_vm --root-dir {{rootfs}} --display=1920x1080 -- {{command}}
-
-# Run gui_vm with custom command (uses default rootfs)
-gui-vm-run command: install-debug-input build-examples
-    #!/usr/bin/env bash
-    set -euxo pipefail
-    cd examples
+    ROOTFS=${ROOTFS:-~/c/my_rootfs3_touch}
     RUST_LOG=${RUST_LOG:-devices::virtio::gpu=trace,gtk_display=debug,rutabaga_gfx=debug} \
-    GSK_RENDERER=gl \
     LD_LIBRARY_PATH=../examples-prefix/lib64:${LD_LIBRARY_PATH:-} \
-    buildah unshare target/debug/gui_vm --root-dir ~/c/my_rootfs3 --display=1920x1080 -- {{command}}
-
-# Run clippy on libkrun
-clippy:
-    cargo clippy --release --features gpu
-
-# Run cargo fmt on libkrun
-fmt:
-    cargo fmt --all
-
-# Clean build artifacts
-clean:
-    cargo clean
-    cd examples && cargo clean
-    rm -rf examples-prefix
-
-# Run tests
-test:
-    make test
-
+    buildah unshare target/debug/gui_vm --root-dir "${ROOTFS}" --display=1920x1080+touch --keyboard-input -- {{args}}

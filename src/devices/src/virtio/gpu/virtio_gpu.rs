@@ -619,16 +619,7 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         for scanout_id in resource.scanouts.iter_enabled() {
-            // Check if this scanout is configured for dmabuf
-            let uses_dmabuf = self
-                .scanouts
-                .get(scanout_id as usize)
-                .and_then(|s| s.as_ref())
-                .map(|s| s.uses_dmabuf)
-                .unwrap_or(false);
-
-            if uses_dmabuf {
-                // Use dmabuf path - just signal present, no data copy needed
+            if self.scanouts[scanout_id as usize].as_ref().unwrap().uses_dmabuf {
                 trace!("UpdateScanoutDmabuf {scanout_id} {rect:?}");
                 self.display_backend
                     .present_dmabuf(scanout_id, Some(&rect))?;
