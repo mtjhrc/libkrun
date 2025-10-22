@@ -17,20 +17,10 @@ use crate::input_constants::{
     ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_TOUCH,
     SYN_REPORT,
 };
-use gtk::{
-    AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey,
-    EventControllerLegacy, EventControllerMotion, HeaderBar, Overlay, Picture, Revealer,
-    RevealerTransitionType, Widget, Window,
-    gdk::{self, EventSequence, EventType, MemoryFormat, ModifierType, TouchEvent},
-    gio::ActionEntry,
-    gio::Cancellable,
-    glib::{
-        self, Bytes, ControlFlow, IOCondition, Propagation, clone::Downgrade,
-        timeout_add_local_once, unix_fd_add_local,
-    },
-    graphene::Point,
-    prelude::*,
-};
+use gtk::{AlertDialog, Align, Application, ApplicationWindow, Button, EventControllerKey, EventControllerLegacy, EventControllerMotion, HeaderBar, Overlay, Picture, Revealer, RevealerTransitionType, Widget, Window, gdk::{self, EventSequence, EventType, MemoryFormat, ModifierType, TouchEvent}, gio::ActionEntry, gio::Cancellable, glib::{
+    self, Bytes, ControlFlow, IOCondition, Propagation, clone::Downgrade,
+    timeout_add_local_once, unix_fd_add_local,
+}, graphene::Point, prelude::*, GraphicsOffload};
 use krun_display::MAX_DISPLAYS;
 
 type EventSender = PollableChannelSender<InputEvent>;
@@ -387,7 +377,7 @@ impl ScanoutWindow {
         header_bar.pack_end(&fullscreen_btn);
 
         let overlay = build_overlay(window.as_ref());
-        overlay.set_child(Some(&picture));
+        overlay.set_child(Some(&GraphicsOffload::new(Some(&picture))));
         window.set_child(Some(&overlay));
         window.set_visible(true);
 
@@ -417,12 +407,8 @@ impl ScanoutWindow {
             .update(buffer, self.width, self.height, self.format, rect);
     }
 
-    pub fn reconfigure_dmabuf(
-        &mut self,
-        dmabuf_info: &DmabufInfo,
-    ) {
-        self.scanout_paintable
-            .configure_dmabuf(dmabuf_info);
+    pub fn reconfigure_dmabuf(&mut self, dmabuf_info: &DmabufInfo) {
+        self.scanout_paintable.configure_dmabuf(dmabuf_info);
     }
 
     pub fn update_dmabuf(&self, rect: Option<Rect>) {
@@ -744,13 +730,30 @@ impl DisplayWorker {
                             "Configure scanout {scanout_id} with dmabuf: width={} height={}, fd={}",
                             dmabuf_info.width, dmabuf_info.height, dmabuf_info.dmabuf_fd
                         );
-                        scanout.reconfigure_dmabuf(
-                            &dmabuf_info,
-                        );
+                        scanout.reconfigure_dmabuf(&dmabuf_info);
                     } else {
-                        warn!(
-                            "Attempted to configure dmabuf for non-existent scanout: {scanout_id}"
+                        let mut scanout = ScanoutWindow::new(
+                            &self.app,
+                            &format!(
+                                "{name} - display {scanout_id} ({width}x{height})",
+                                name = self.app_name,
+                                width = dmabuf_info.width,
+                                height = dmabuf_info.height
+                            ),
+                            display_width as i32,
+                            display_height as i32,
+                            dmabuf_info.width as i32,
+                            dmabuf_info.height as i32,
+                            MemoryFormat::A8b8g8r8, // FIXME invalid!
+                            self.keyboard_event_tx.clone(),
+                            self.per_display_inputs
+                                .get(scanout_id as usize)
+                                .cloned()
+                                .unwrap_or_default(),
                         );
+                        scanout.reconfigure_dmabuf(&dmabuf_info);
+
+                        scanouts[scanout_id as usize] = Some(scanout);
                     }
                 }
                 DisplayEvent::DisableScanout { scanout_id } => {

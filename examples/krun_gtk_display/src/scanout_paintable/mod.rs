@@ -64,14 +64,11 @@ impl ScanoutPaintable {
         }
     }
 
-    pub fn configure_dmabuf(
-        &self,
-        dmabuf_info: &DmabufInfo,
-    ) {
+    pub fn configure_dmabuf(&self, dmabuf_info: &DmabufInfo) {
         let imp = self.imp();
 
         log::debug!(
-            "Creating dmabuf texture: width={}, height={}, fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}, original_fd={}",
+            "Storing dmabuf info: width={}, height={}, fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}, fd={}",
             dmabuf_info.width,
             dmabuf_info.height,
             dmabuf_info.fourcc,
@@ -81,8 +78,44 @@ impl ScanoutPaintable {
             dmabuf_info.dmabuf_fd,
         );
 
+        imp.dmabuf_info.replace(Some(*dmabuf_info));
+    }
+
+    pub fn update_dmabuf(&self, rect: Option<Rect>) {
+        let imp = self.imp();
+
+        let Some(dmabuf_info) = imp.dmabuf_info.borrow().as_ref().copied() else {
+            error!("update_dmabuf called without prior configure_dmabuf");
+            return;
+        };
+
+        log::trace!(
+            "Building dmabuf texture from stored info: fd={}, fourcc=0x{:08x}, modifier=0x{:016x}",
+            dmabuf_info.dmabuf_fd,
+            dmabuf_info.fourcc,
+            dmabuf_info.modifier
+        );
+
         // FIXME: n_planes should be passed through DmabufInfo struct properly
         let n_planes = 1;
+
+        // Duplicate the fd so we can close it independently
+        let duped_fd = dmabuf_info.dmabuf_fd;
+            ;/*unsafe { libc::dup(dmabuf_info.dmabuf_fd) };
+        if duped_fd < 0 {
+            error!(
+                "Failed to dup dmabuf fd={}: errno={}",
+                dmabuf_info.dmabuf_fd,
+                std::io::Error::last_os_error()
+            );
+            return;
+        }*/
+
+        log::trace!(
+            "Duplicated dmabuf fd {} -> {} for texture building",
+            dmabuf_info.dmabuf_fd,
+            duped_fd
+        );
 
         let mut builder = DmabufTextureBuilder::new()
             .set_display(gdk::Display::default().as_ref().unwrap())
@@ -91,6 +124,19 @@ impl ScanoutPaintable {
             .set_fourcc(dmabuf_info.fourcc)
             .set_modifier(dmabuf_info.modifier)
             .set_n_planes(n_planes);
+
+        builder = if let Some(rect) = rect {
+            builder
+                .set_update_texture(imp.texture.borrow().as_ref())
+                .set_update_region(Some(&Region::create_rectangle(&RectangleInt::new(
+                    0 as i32,
+                    0 as i32,
+                    dmabuf_info.width as i32,
+                    dmabuf_info.height as i32,
+                ))))
+        } else {
+            todo!()
+        };
 
         for (i, (&stride, &offset)) in dmabuf_info
             .strides
@@ -103,20 +149,22 @@ impl ScanoutPaintable {
                 .set_stride(i as u32, stride)
                 .set_offset(i as u32, offset);
             unsafe {
-                builder = builder.set_fd(i as u32, dmabuf_info.dmabuf_fd);
+                builder = builder.set_fd(i as u32, duped_fd);
             }
         }
 
-        let fd = dmabuf_info.dmabuf_fd;
         match unsafe {
             builder.build_with_release_func(move || {
-                // libc::close(fd); // FIXME!
-                log::debug!("Closed dmabuf fd={} (texture destroyed)", fd);
+                //libc::close(duped_fd);
+                log::debug!(
+                    "Closed duplicated dmabuf fd={} (texture destroyed)",
+                    duped_fd
+                );
             })
         } {
             Ok(texture) => {
-                log::debug!(
-                    "Successfully created dmabuf texture (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
+                log::trace!(
+                    "Successfully built dmabuf texture (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
                     dmabuf_info.dmabuf_fd,
                     dmabuf_info.fourcc,
                     dmabuf_info.modifier
@@ -133,18 +181,17 @@ impl ScanoutPaintable {
             }
             Err(e) => {
                 error!(
-                    "Failed to create dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
+                    "Failed to build dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
                     dmabuf_info.dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
                 );
-                /*unsafe {
-                    libc::close(dmabuf_info.dmabuf_fd);
-                }*/
+                unsafe {
+                    libc::close(duped_fd);
+                }
+                log::debug!(
+                    "Closed duplicated dmabuf fd={} after build failure",
+                    duped_fd
+                );
             }
         }
-    }
-
-    pub fn update_dmabuf(&self, _rect: Option<Rect>) {
-        log::trace!("Updating dmabuf texture (invalidating contents)");
-        self.invalidate_contents();
     }
 }

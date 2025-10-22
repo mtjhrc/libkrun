@@ -5,7 +5,8 @@ use gtk::{
     prelude::*,
     subclass::prelude::*,
 };
-use log::debug;
+use krun_display::DmabufInfo;
+use log::{debug, trace};
 use std::cell::{Cell, RefCell};
 
 #[derive(Default, glib::Properties)]
@@ -18,6 +19,7 @@ pub struct ScanoutPaintable {
     #[property(get, set)]
     pub default_height: Cell<i32>,
     pub rect: Rect,
+    pub dmabuf_info: RefCell<Option<DmabufInfo>>,
 }
 
 #[glib::object_subclass]
@@ -37,6 +39,7 @@ impl ObjectImpl for ScanoutPaintable {
 
 impl PaintableImpl for ScanoutPaintable {
     fn snapshot(&self, snapshot: &Snapshot, width: f64, height: f64) {
+        debug!("ScanoutPaintable::snapshot");
         if let Some(texture) = self.texture.borrow().as_ref() {
             snapshot.append_texture(texture, &Rect::new(0.0, 0.0, width as f32, height as f32));
         } else {

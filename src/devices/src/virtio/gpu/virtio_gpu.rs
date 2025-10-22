@@ -1,11 +1,3 @@
-use std::collections::BTreeMap;
-use std::env;
-use std::io::IoSliceMut;
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
 use super::super::Queue as VirtQueue;
 use super::protocol::GpuResponse::*;
 use super::protocol::{
@@ -18,7 +10,7 @@ use krun_display::{
     DisplayBackend, DisplayBackendBasicFramebuffer, DisplayBackendInstance, DmabufInfo, Rect,
     ResourceFormat,
 };
-use libc::c_void;
+use libc::{c_void, wait};
 #[cfg(target_os = "macos")]
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_APPLE;
 #[cfg(target_os = "linux")]
@@ -37,6 +29,14 @@ use rutabaga_gfx::{
     RUTABAGA_CHANNEL_TYPE_PW, RUTABAGA_CHANNEL_TYPE_X11, RUTABAGA_MAP_ACCESS_MASK,
     RUTABAGA_MAP_ACCESS_READ, RUTABAGA_MAP_ACCESS_RW, RUTABAGA_MAP_ACCESS_WRITE,
 };
+use std::collections::BTreeMap;
+use std::io::IoSliceMut;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{env, thread};
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, VolatileSlice};
@@ -119,11 +119,8 @@ struct VirtioGpuResource {
     size: u64, // only for blob resources
     shmem_offset: Option<u64>,
     rutabaga_external_mapping: bool,
-    // If true, this resource has been exported as dmabuf to the display backend
     #[cfg(target_os = "linux")]
-    dmabuf_exported: bool,
-    #[cfg(target_os = "linux")]
-    dmabuf_info: Option<DmabufInfo>,
+    dmabuf_export: Option<DmabufInfo>,
 }
 
 impl VirtioGpuResource {
@@ -146,9 +143,7 @@ impl VirtioGpuResource {
             shmem_offset: None,
             rutabaga_external_mapping: false,
             #[cfg(target_os = "linux")]
-            dmabuf_exported: false,
-            #[cfg(target_os = "linux")]
-            dmabuf_info: None,
+            dmabuf_export: None,
         }
     }
 }
@@ -480,7 +475,7 @@ impl VirtioGpu {
 
         // Check if this resource has already been exported as dmabuf
         let resource = self.resources.get_mut(&resource_id).ok_or(())?;
-        if !resource.dmabuf_exported {
+        let dmabuf_export = if resource.dmabuf_export.is_none() {
             // First time exporting this resource, import it
             let export = self.rutabaga.export_blob(resource_id).map_err(|e| {
                 debug!("Failed to export resource {resource_id} as dmabuf: {e}");
@@ -519,20 +514,20 @@ impl VirtioGpu {
 
             // Mark that this resource has been exported and store dmabuf info
             let resource = self.resources.get_mut(&resource_id).ok_or(())?;
-            resource.dmabuf_exported = true;
-            resource.dmabuf_info = Some(dmabuf_info);
+            resource.dmabuf_export = Some(dmabuf_info);
             debug!("Exported resource {resource_id} as dmabuf");
+            dmabuf_info
         } else {
             debug!("Resource {resource_id} already exported as dmabuf");
-        }
+            resource.dmabuf_export.unwrap() //FIXME: bad code
+        };
 
         // Get the dmabuf info for this resource
         let resource = self.resources.get(&resource_id).ok_or(())?;
-        let dmabuf_info = resource.dmabuf_info.ok_or(())?;
 
         // Configure scanout to use the dmabuf
         self.display_backend
-            .configure_scanout_dmabuf(scanout_id, display_width, display_height, &dmabuf_info)
+            .configure_scanout_dmabuf(scanout_id, display_width, display_height, &dmabuf_export)
             .map_err(|e| {
                 debug!("Failed to configure dmabuf scanout for resource {resource_id}: {e}");
             })?;
@@ -608,6 +603,7 @@ impl VirtioGpu {
             .get(&resource_id)
             .ok_or(ErrInvalidResourceId)?;
 
+        //thread::sleep(Duration::from_millis(16));
         for scanout_id in resource.scanouts.iter_enabled() {
             if self.scanouts[scanout_id as usize]
                 .as_ref()

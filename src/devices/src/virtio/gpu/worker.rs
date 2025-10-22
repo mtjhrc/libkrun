@@ -108,6 +108,7 @@ impl Worker {
         cmd: GpuCommand,
         reader: &mut Reader,
     ) -> VirtioGpuResult {
+        trace!("GPU command: {cmd:?}");
         virtio_gpu.force_ctx_0();
 
         match cmd {
@@ -364,9 +365,16 @@ impl Worker {
                 }
 
                 let mut gpu_response = match resp {
-                    Ok(gpu_response) => gpu_response,
+                    Ok(gpu_response) => {
+                        if let Some(cmd) = &gpu_cmd {
+                            trace!("{cmd:?} -> Ok({gpu_response:?})");
+                        }
+                        gpu_response
+                    }
                     Err(gpu_response) => {
-                        debug!("{gpu_cmd:?} -> {gpu_response:?}");
+                        if let Some(cmd) = &gpu_cmd {
+                            debug!("{cmd:?} -> Err({gpu_response:?})");
+                        }
                         gpu_response
                     }
                 };
