@@ -66,13 +66,9 @@ impl ScanoutPaintable {
 
     pub fn configure_dmabuf(
         &self,
-        display_width: i32,
-        display_height: i32,
         dmabuf_info: &DmabufInfo,
     ) {
         let imp = self.imp();
-        imp.display_width.set(display_width);
-        imp.display_height.set(display_height);
 
         log::debug!(
             "Creating dmabuf texture: width={}, height={}, fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}, original_fd={}",
@@ -114,7 +110,7 @@ impl ScanoutPaintable {
         let fd = dmabuf_info.dmabuf_fd;
         match unsafe {
             builder.build_with_release_func(move || {
-                libc::close(fd);
+                // libc::close(fd); // FIXME!
                 log::debug!("Closed dmabuf fd={} (texture destroyed)", fd);
             })
         } {

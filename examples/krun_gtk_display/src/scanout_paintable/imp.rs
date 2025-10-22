@@ -18,8 +18,6 @@ pub struct ScanoutPaintable {
     #[property(get, set)]
     pub default_height: Cell<i32>,
     pub rect: Rect,
-    pub display_width: Cell<i32>,
-    pub display_height: Cell<i32>,
 }
 
 #[glib::object_subclass]

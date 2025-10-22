@@ -417,14 +417,12 @@ impl ScanoutWindow {
             .update(buffer, self.width, self.height, self.format, rect);
     }
 
-    pub fn configure_dmabuf(
+    pub fn reconfigure_dmabuf(
         &mut self,
-        display_width: i32,
-        display_height: i32,
         dmabuf_info: &DmabufInfo,
     ) {
         self.scanout_paintable
-            .configure_dmabuf(display_width, display_height, dmabuf_info);
+            .configure_dmabuf(dmabuf_info);
     }
 
     pub fn update_dmabuf(&self, rect: Option<Rect>) {
@@ -736,18 +734,17 @@ impl DisplayWorker {
                 }
                 DisplayEvent::ConfigureScanoutDmabuf {
                     scanout_id,
-                    display_width,
+                    display_width, //FIXME! we need to create a scanout window!
                     display_height,
                     dmabuf_info,
                 } => {
+                    //FIXME! this should also configure the window!
                     if let Some(ref mut scanout) = scanouts[scanout_id as usize] {
                         debug!(
                             "Configure scanout {scanout_id} with dmabuf: width={} height={}, fd={}",
                             dmabuf_info.width, dmabuf_info.height, dmabuf_info.dmabuf_fd
                         );
-                        scanout.configure_dmabuf(
-                            display_width as i32,
-                            display_height as i32,
+                        scanout.reconfigure_dmabuf(
                             &dmabuf_info,
                         );
                     } else {
