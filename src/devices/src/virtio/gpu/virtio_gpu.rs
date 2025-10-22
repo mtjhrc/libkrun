@@ -10,7 +10,7 @@ use krun_display::{
     DisplayBackend, DisplayBackendBasicFramebuffer, DisplayBackendInstance, DmabufInfo, Rect,
     ResourceFormat,
 };
-use libc::{c_void, wait};
+use libc::c_void;
 #[cfg(target_os = "macos")]
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_APPLE;
 #[cfg(target_os = "linux")]
@@ -30,13 +30,12 @@ use rutabaga_gfx::{
     RUTABAGA_MAP_ACCESS_READ, RUTABAGA_MAP_ACCESS_RW, RUTABAGA_MAP_ACCESS_WRITE,
 };
 use std::collections::BTreeMap;
+use std::env;
 use std::io::IoSliceMut;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::{env, thread};
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, VolatileSlice};
@@ -119,8 +118,6 @@ struct VirtioGpuResource {
     size: u64, // only for blob resources
     shmem_offset: Option<u64>,
     rutabaga_external_mapping: bool,
-    #[cfg(target_os = "linux")]
-    dmabuf_export: Option<DmabufInfo>,
 }
 
 impl VirtioGpuResource {
@@ -142,8 +139,6 @@ impl VirtioGpuResource {
             format,
             shmem_offset: None,
             rutabaga_external_mapping: false,
-            #[cfg(target_os = "linux")]
-            dmabuf_export: None,
         }
     }
 }
@@ -473,57 +468,44 @@ impl VirtioGpu {
             return Err(());
         }
 
-        // Check if this resource has already been exported as dmabuf
-        let resource = self.resources.get_mut(&resource_id).ok_or(())?;
-        let dmabuf_export = if resource.dmabuf_export.is_none() {
-            // First time exporting this resource, import it
-            let export = self.rutabaga.export_blob(resource_id).map_err(|e| {
-                debug!("Failed to export resource {resource_id} as dmabuf: {e}");
-            })?;
+        // Always export the texture explicitly via virglrenderer's get_fd_for_texture
+        debug!("Explicitly exporting texture for resource {resource_id}");
+        let (export, info_3d) =
+            self.rutabaga
+                .explicit_export_texture(resource_id)
+                .map_err(|e| {
+                    debug!("Failed to explicitly export resource {resource_id} as dmabuf: {e}");
+                })?;
 
-            // Verify that the exported handle is actually a dmabuf
-            if export.handle_type != RUTABAGA_MEM_HANDLE_TYPE_DMABUF {
-                debug!(
-                    "Resource {resource_id} was exported with handle type 0x{:x}, not DMABUF (0x{:x})",
-                    export.handle_type, RUTABAGA_MEM_HANDLE_TYPE_DMABUF
-                );
-                return Err(());
-            }
-
-            let info_3d = self.rutabaga.query(resource_id).map_err(|e| {
-                debug!("Failed to query resource {resource_id} for dmabuf info: {e}");
-            })?;
-
+        // Verify that the exported handle is actually a dmabuf
+        if export.handle_type != RUTABAGA_MEM_HANDLE_TYPE_DMABUF {
             debug!(
-                "Resource {resource_id} dmabuf info: fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}",
-                info_3d.drm_fourcc, info_3d.modifier, info_3d.strides, info_3d.offsets
+                "Resource {resource_id} was exported with handle type 0x{:x}, not DMABUF (0x{:x})",
+                export.handle_type, RUTABAGA_MEM_HANDLE_TYPE_DMABUF
             );
+            return Err(());
+        }
 
-            // Transfer FD ownership to display backend by converting to raw descriptor
-            let dmabuf_fd = export.os_handle.into_raw_descriptor();
+        debug!(
+            "Resource {resource_id} dmabuf info: fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}",
+            info_3d.drm_fourcc, info_3d.modifier, info_3d.strides, info_3d.offsets
+        );
 
-            let dmabuf_info = DmabufInfo {
-                dmabuf_fd,
-                width: info_3d.width,
-                height: info_3d.height,
-                fourcc: info_3d.drm_fourcc,
-                strides: info_3d.strides,
-                offsets: info_3d.offsets,
-                modifier: info_3d.modifier,
-            };
+        let dmabuf_fd = export
+            .os_handle
+            .try_clone()
+            .map_err(|_| ())?
+            .into_raw_descriptor();
 
-            // Mark that this resource has been exported and store dmabuf info
-            let resource = self.resources.get_mut(&resource_id).ok_or(())?;
-            resource.dmabuf_export = Some(dmabuf_info);
-            debug!("Exported resource {resource_id} as dmabuf");
-            dmabuf_info
-        } else {
-            debug!("Resource {resource_id} already exported as dmabuf");
-            resource.dmabuf_export.unwrap() //FIXME: bad code
+        let dmabuf_export = DmabufInfo {
+            dmabuf_fd,
+            width: info_3d.width,
+            height: info_3d.height,
+            fourcc: info_3d.drm_fourcc,
+            strides: info_3d.strides,
+            offsets: info_3d.offsets,
+            modifier: info_3d.modifier,
         };
-
-        // Get the dmabuf info for this resource
-        let resource = self.resources.get(&resource_id).ok_or(())?;
 
         // Configure scanout to use the dmabuf
         self.display_backend

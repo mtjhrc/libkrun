@@ -411,6 +411,48 @@ impl VirglRenderer {
         #[cfg(not(feature = "virgl_renderer_next"))]
         Err(RutabagaError::Unsupported)
     }
+
+    fn explicit_export_texture(
+        &self,
+        resource_id: u32,
+    ) -> RutabagaResult<(Arc<RutabagaHandle>, Resource3DInfo)> {
+        let mut info_ext = Default::default();
+
+        let ret_info =
+            unsafe { virgl_renderer_resource_get_info_ext(resource_id as i32, &mut info_ext) };
+
+        ret_to_res(ret_info)?;
+
+        warn!("explicit_export_texture: virgl_renderer_resource_get_info_ext: {info_ext:#?}");
+
+        let mut fd = -1;
+        let ret_fd = unsafe { virgl_renderer_get_fd_for_texture(info_ext.base.tex_id, &mut fd) };
+
+        ret_to_res(ret_fd)?;
+
+        if fd < 0 {
+            return Err(RutabagaError::Unsupported);
+        }
+
+        let fourcc: u32 = info_ext.base.drm_fourcc as u32;
+        let owned_fd = unsafe { SafeDescriptor::from_raw_descriptor(fd) };
+
+        let resource_handle = Arc::new(RutabagaHandle {
+            os_handle: owned_fd,
+            handle_type: RUTABAGA_MEM_HANDLE_TYPE_DMABUF,
+        });
+
+        let resource_info_3d = Resource3DInfo {
+            width: info_ext.base.width,
+            height: info_ext.base.height,
+            drm_fourcc: fourcc,
+            strides: [info_ext.base.stride, 0, 0, 0],
+            offsets: [0, 0, 0, 0],
+            modifier: info_ext.modifiers,
+        };
+
+        Ok((resource_handle, resource_info_3d))
+    }
 }
 
 impl Drop for VirglRenderer {
@@ -854,5 +896,12 @@ impl RutabagaComponent for VirglRenderer {
         };
         ret_to_res(ret)?;
         Ok(Box::new(VirglRendererContext { ctx_id }))
+    }
+
+    fn explicit_export_texture(
+        &self,
+        resource_id: u32,
+    ) -> RutabagaResult<(Arc<RutabagaHandle>, Resource3DInfo)> {
+        self.explicit_export_texture(resource_id)
     }
 }

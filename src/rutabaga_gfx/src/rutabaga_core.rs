@@ -224,6 +224,14 @@ pub trait RutabagaComponent {
     ) -> RutabagaResult<Box<dyn RutabagaContext>> {
         Err(RutabagaError::Unsupported)
     }
+
+    /// Implementations may explicitly export a texture via virglrenderer's get_fd_for_texture.
+    fn explicit_export_texture(
+        &self,
+        _resource_id: u32,
+    ) -> RutabagaResult<(Arc<RutabagaHandle>, Resource3DInfo)> {
+        Err(RutabagaError::Unsupported)
+    }
 }
 
 pub trait RutabagaContext {
@@ -1037,6 +1045,20 @@ impl Rutabaga {
             .ok_or(RutabagaError::InvalidContextId)?;
 
         ctx.submit_cmd(commands, fence_ids)
+    }
+
+    /// Explicitly exports a texture via virglrenderer's get_fd_for_texture.
+    /// Returns both the handle and the 3D info for the texture.
+    pub fn explicit_export_texture(
+        &self,
+        resource_id: u32,
+    ) -> RutabagaResult<(Arc<RutabagaHandle>, Resource3DInfo)> {
+        let component = self
+            .components
+            .get(&self.default_component)
+            .ok_or(RutabagaError::InvalidComponent)?;
+
+        component.explicit_export_texture(resource_id)
     }
 }
 

@@ -110,8 +110,7 @@ gui-vm-weston: install-debug-input build-examples
     
     tmux new-session -d -s weston 'sudo /usr/lib/systemd/systemd-udevd --daemon && sudo seatd -u m' || exit 1
     sleep 0.5
-    # --use-pixman
-    tmux new-window -t weston:1 -n weston 'WAYLAND_DEBUG=0 XDG_RUNTIME_DIR=/tmp/runtime-1000/ weston --backend=drm-backend.so --seat=seat0 --socket=wayland-0' || exit 2
+    tmux new-window -t weston:1 -n weston 'WAYLAND_DEBUG=0 XDG_RUNTIME_DIR=/tmp/runtime-1000/ weston --backend=drm-backend.so  --use-pixman --seat=seat0 --socket=wayland-0' || exit 2
     sleep 2
     # Wait for Wayland socket to be available
     for i in 1 2 3 4 5; do
