@@ -29,18 +29,11 @@ pub enum DisplayEvent {
         height: u32,
         format: MemoryFormat,
     },
-    ImportDmabuf {
-        resource_id: u32,
-        dmabuf_info: DmabufInfo,
-    },
-    ReleaseDmabuf {
-        resource_id: u32,
-    },
     ConfigureScanoutDmabuf {
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        resource_id: u32,
+        dmabuf_info: DmabufInfo,
     },
     DisableScanout {
         scanout_id: u32,
@@ -106,7 +99,7 @@ impl DisplayBackendBasicFramebuffer for GtkDisplayBackend {
                 buffer_rx,
                 buffer_tx,
                 current_buffer: Vec::new(),
-                is_dmabuf: false,
+                has_dmabuf: false,
             });
         }
 
@@ -176,56 +169,25 @@ impl DisplayBackendBasicFramebuffer for GtkDisplayBackend {
 }
 
 impl DisplayBackendDmabuf for GtkDisplayBackend {
-    fn import_dmabuf(
-        &mut self,
-        resource_id: u32,
-        dmabuf_info: &DmabufInfo,
-    ) -> Result<(), DisplayBackendError> {
-        log::debug!(
-            "Importing dmabuf: resource_id={}, fd={}",
-            resource_id,
-            dmabuf_info.dmabuf_fd
-        );
-
-        self.channel
-            .send(DisplayEvent::ImportDmabuf {
-                resource_id,
-                dmabuf_info: *dmabuf_info,
-            })
-            .unwrap();
-
-        Ok(())
-    }
-
-    fn release_dmabuf(&mut self, resource_id: u32) -> Result<(), DisplayBackendError> {
-        log::debug!("Releasing dmabuf: resource_id={}", resource_id);
-
-        self.channel
-            .send(DisplayEvent::ReleaseDmabuf { resource_id })
-            .unwrap();
-
-        Ok(())
-    }
-
     fn configure_scanout_dmabuf(
         &mut self,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        resource_id: u32,
+        dmabuf_info: &DmabufInfo,
     ) -> Result<(), DisplayBackendError> {
         let Some(scanout) = &mut self.scanouts[scanout_id as usize] else {
             return Err(DisplayBackendError::InvalidScanoutId);
         };
 
-        scanout.is_dmabuf = true;
+        scanout.has_dmabuf = true;
 
         self.channel
             .send(DisplayEvent::ConfigureScanoutDmabuf {
                 scanout_id,
                 display_width,
                 display_height,
-                resource_id,
+                dmabuf_info: *dmabuf_info,
             })
             .unwrap();
         Ok(())
@@ -236,7 +198,10 @@ impl DisplayBackendDmabuf for GtkDisplayBackend {
         scanout_id: u32,
         rect: Option<&Rect>,
     ) -> Result<(), DisplayBackendError> {
-        let Some(_scanout) = &mut self.scanouts[scanout_id as usize] else {
+        if self.scanouts[scanout_id as usize]
+            .as_ref()
+            .is_none_or(|scanout| !scanout.has_dmabuf)
+        {
             return Err(DisplayBackendError::InvalidScanoutId);
         };
 
@@ -266,7 +231,7 @@ struct Scanout {
     buffer_rx: Receiver<Vec<u8>>,
     required_buffer_size: usize,
     current_buffer: Vec<u8>,
-    is_dmabuf: bool,
+    has_dmabuf: bool,
 }
 
 impl Scanout {

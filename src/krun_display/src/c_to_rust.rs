@@ -156,48 +156,12 @@ impl DisplayBackendBasicFramebuffer for DisplayBackendInstance {
 }
 
 impl DisplayBackendInstance {
-    pub fn import_dmabuf(
-        &mut self,
-        resource_id: u32,
-        dmabuf_info: &header::krun_display_dmabuf_info,
-    ) -> Result<(), DisplayBackendError> {
-        if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
-            return Err(DisplayBackendError::MethodNotSupported);
-        }
-
-        into_rust_result!(unsafe {
-            self.vtable
-                .dmabuf
-                .import_dmabuf
-                .ok_or(DisplayBackendError::MethodNotSupported)?(
-                self.instance,
-                resource_id,
-                dmabuf_info,
-            )
-        })
-    }
-
-    pub fn release_dmabuf(&mut self, resource_id: u32) -> Result<(), DisplayBackendError> {
-        if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
-            return Err(DisplayBackendError::MethodNotSupported);
-        }
-
-        into_rust_result!(unsafe {
-            self.vtable
-                .dmabuf
-                .release_dmabuf
-                .ok_or(DisplayBackendError::MethodNotSupported)?(
-                self.instance, resource_id
-            )
-        })
-    }
-
     pub fn configure_scanout_dmabuf(
         &mut self,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        resource_id: u32,
+        dmabuf_info: &crate::DmabufInfo,
     ) -> Result<(), DisplayBackendError> {
         if !self.features.contains(DisplayFeatures::DMABUF_CONSUMER) {
             return Err(DisplayBackendError::MethodNotSupported);
@@ -212,7 +176,7 @@ impl DisplayBackendInstance {
                 scanout_id,
                 display_width,
                 display_height,
-                resource_id,
+                dmabuf_info as *const _,
             )
         })
     }
@@ -308,8 +272,6 @@ impl DisplayBackend<'_> {
                             .basic_framebuffer
                             .disable_scanout
                             .is_none()
-                            || self.vtable.dmabuf.import_dmabuf.is_none()
-                            || self.vtable.dmabuf.release_dmabuf.is_none()
                             || self.vtable.dmabuf.configure_scanout_dmabuf.is_none()
                             || self.vtable.dmabuf.present_dmabuf.is_none()
                     } {

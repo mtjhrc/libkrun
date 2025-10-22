@@ -2,13 +2,14 @@ mod imp;
 
 use gtk::{
     cairo::{RectangleInt, Region},
-    gdk::{self, MemoryFormat, MemoryTextureBuilder},
+    gdk::{self, DmabufTextureBuilder, MemoryFormat, MemoryTextureBuilder},
     glib,
     glib::Bytes,
     prelude::*,
     subclass::prelude::*,
 };
-use krun_display::{Rect, ResourceFormat};
+use krun_display::{DmabufInfo, Rect, ResourceFormat};
+use log::error;
 
 glib::wrapper! {
     pub struct ScanoutPaintable(ObjectSubclass<imp::ScanoutPaintable>) @implements gdk::Paintable;
@@ -63,27 +64,91 @@ impl ScanoutPaintable {
         }
     }
 
-    pub fn set_texture(
+    pub fn configure_dmabuf(
         &self,
         display_width: i32,
         display_height: i32,
-        texture: gdk::Texture,
+        dmabuf_info: &DmabufInfo,
     ) {
         let imp = self.imp();
         imp.display_width.set(display_width);
         imp.display_height.set(display_height);
 
-        let old_texture = imp.texture.replace(Some(texture.clone()));
-        self.invalidate_contents();
-        
-        if let Some(old_texture) = old_texture {
-            let new_size = (texture.width(), texture.height());
-            let old_size = (old_texture.width(), old_texture.height());
-            if new_size != old_size {
-                self.invalidate_size();
+        log::debug!(
+            "Creating dmabuf texture: width={}, height={}, fourcc=0x{:08x}, modifier=0x{:016x}, strides={:?}, offsets={:?}, original_fd={}",
+            dmabuf_info.width,
+            dmabuf_info.height,
+            dmabuf_info.fourcc,
+            dmabuf_info.modifier,
+            dmabuf_info.strides,
+            dmabuf_info.offsets,
+            dmabuf_info.dmabuf_fd,
+        );
+
+        // FIXME: n_planes should be passed through DmabufInfo struct properly
+        let n_planes = 1;
+
+        let mut builder = DmabufTextureBuilder::new()
+            .set_display(gdk::Display::default().as_ref().unwrap())
+            .set_width(dmabuf_info.width)
+            .set_height(dmabuf_info.height)
+            .set_fourcc(dmabuf_info.fourcc)
+            .set_modifier(dmabuf_info.modifier)
+            .set_n_planes(n_planes);
+
+        for (i, (&stride, &offset)) in dmabuf_info
+            .strides
+            .iter()
+            .zip(dmabuf_info.offsets.iter())
+            .enumerate()
+            .take(n_planes as usize)
+        {
+            builder = builder
+                .set_stride(i as u32, stride)
+                .set_offset(i as u32, offset);
+            unsafe {
+                builder = builder.set_fd(i as u32, dmabuf_info.dmabuf_fd);
             }
-        } else {
-            self.invalidate_size();
         }
+
+        let fd = dmabuf_info.dmabuf_fd;
+        match unsafe {
+            builder.build_with_release_func(move || {
+                libc::close(fd);
+                log::debug!("Closed dmabuf fd={} (texture destroyed)", fd);
+            })
+        } {
+            Ok(texture) => {
+                log::debug!(
+                    "Successfully created dmabuf texture (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
+                    dmabuf_info.dmabuf_fd,
+                    dmabuf_info.fourcc,
+                    dmabuf_info.modifier
+                );
+                let old_texture = imp.texture.replace(Some(texture.upcast()));
+                self.invalidate_contents();
+                if let Some(old_texture) = old_texture {
+                    let new_size = (dmabuf_info.width, dmabuf_info.height);
+                    let old_size = (old_texture.width(), old_texture.height());
+                    if new_size != (old_size.0 as u32, old_size.1 as u32) {
+                        self.invalidate_size();
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Failed to create dmabuf texture: {e} (fd={}, fourcc=0x{:08x}, modifier=0x{:016x})",
+                    dmabuf_info.dmabuf_fd, dmabuf_info.fourcc, dmabuf_info.modifier
+                );
+                /*unsafe {
+                    libc::close(dmabuf_info.dmabuf_fd);
+                }*/
+            }
+        }
+    }
+
+    pub fn update_dmabuf(&self, _rect: Option<Rect>) {
+        log::trace!("Updating dmabuf texture (invalidating contents)");
+        self.invalidate_contents();
     }
 }

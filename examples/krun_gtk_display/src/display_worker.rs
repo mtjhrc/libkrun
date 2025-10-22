@@ -1,10 +1,10 @@
 use super::scanout_paintable::ScanoutPaintable;
 use crate::{Axis, DisplayEvent, DisplayInputOptions, TouchArea, TouchScreenOptions};
-use krun_display::Rect;
+use krun_display::{DmabufInfo, Rect};
 use krun_input::{InputEvent, InputEventType};
 use log::{debug, trace, warn};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::iter;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
@@ -417,22 +417,18 @@ impl ScanoutWindow {
             .update(buffer, self.width, self.height, self.format, rect);
     }
 
-    pub fn configure_dmabuf_texture(
+    pub fn configure_dmabuf(
         &mut self,
         display_width: i32,
         display_height: i32,
-        texture: gdk::Texture,
+        dmabuf_info: &DmabufInfo,
     ) {
-        self.scanout_paintable.set_texture(
-            display_width,
-            display_height,
-            texture,
-        );
+        self.scanout_paintable
+            .configure_dmabuf(display_width, display_height, dmabuf_info);
     }
 
-    pub fn update_dmabuf(&self, _rect: Option<Rect>) {
-        // Just invalidate the paintable to trigger a redraw
-        self.scanout_paintable.invalidate_contents();
+    pub fn update_dmabuf(&self, rect: Option<Rect>) {
+        self.scanout_paintable.update_dmabuf(rect);
     }
 }
 
@@ -678,7 +674,6 @@ pub struct DisplayWorker {
     keyboard_event_tx: Option<EventSender>,
     per_display_inputs: Vec<Vec<(PollableChannelSender<InputEvent>, DisplayInputOptions)>>,
     scanouts: RefCell<[Option<ScanoutWindow>; MAX_DISPLAYS]>,
-    dmabuf_cache: RefCell<HashMap<u32, gtk::gdk::Texture>>,
 }
 
 impl DisplayWorker {
@@ -696,7 +691,6 @@ impl DisplayWorker {
             keyboard_event_tx,
             per_display_inputs,
             scanouts: Default::default(),
-            dmabuf_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -740,91 +734,22 @@ impl DisplayWorker {
                         ));
                     }
                 }
-                DisplayEvent::ImportDmabuf {
-                    resource_id,
-                    dmabuf_info,
-                } => {
-                    use gtk::gdk::DmabufTextureBuilder;
-                    
-                    debug!(
-                        "Importing dmabuf: resource_id={}, fd={}, width={}, height={}",
-                        resource_id, dmabuf_info.dmabuf_fd, dmabuf_info.width, dmabuf_info.height
-                    );
-
-                    // FIXME: n_planes should be passed through DmabufInfo struct properly
-                    let n_planes = 1;
-
-                    let mut builder = DmabufTextureBuilder::new()
-                        .set_display(gdk::Display::default().as_ref().unwrap())
-                        .set_width(dmabuf_info.width)
-                        .set_height(dmabuf_info.height)
-                        .set_fourcc(dmabuf_info.fourcc)
-                        .set_modifier(dmabuf_info.modifier)
-                        .set_n_planes(n_planes);
-
-                    for (i, (&stride, &offset)) in dmabuf_info
-                        .strides
-                        .iter()
-                        .zip(dmabuf_info.offsets.iter())
-                        .enumerate()
-                        .take(n_planes as usize)
-                    {
-                        builder = builder.set_stride(i as u32, stride).set_offset(i as u32, offset);
-                        unsafe {
-                            builder = builder.set_fd(i as u32, dmabuf_info.dmabuf_fd);
-                        }
-                    }
-
-                    let dmabuf_fd = dmabuf_info.dmabuf_fd;
-                    match unsafe { builder.build_with_release_func(move || {
-                        libc::close(dmabuf_fd);
-                        debug!("Closed dmabuf fd={} (resource_id={})", dmabuf_fd, resource_id);
-                    }) } {
-                        Ok(texture) => {
-                            debug!(
-                                "Successfully imported dmabuf texture (resource_id={}, fd={})",
-                                resource_id, dmabuf_info.dmabuf_fd
-                            );
-                            self.dmabuf_cache.borrow_mut().insert(resource_id, texture.upcast());
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to import dmabuf texture: {e} (resource_id={}, fd={})",
-                                resource_id, dmabuf_info.dmabuf_fd
-                            );
-                            // If build failed, we need to close the FD since the texture didn't take ownership
-                            unsafe { libc::close(dmabuf_info.dmabuf_fd); }
-                        }
-                    }
-                }
-                DisplayEvent::ReleaseDmabuf { resource_id } => {
-                    debug!("Releasing dmabuf: resource_id={}", resource_id);
-                    self.dmabuf_cache.borrow_mut().remove(&resource_id);
-                }
                 DisplayEvent::ConfigureScanoutDmabuf {
                     scanout_id,
                     display_width,
                     display_height,
-                    resource_id,
+                    dmabuf_info,
                 } => {
                     if let Some(ref mut scanout) = scanouts[scanout_id as usize] {
-                        let texture = self.dmabuf_cache.borrow().get(&resource_id).cloned();
-                        if let Some(texture) = texture {
-                            debug!(
-                                "Configure scanout {scanout_id} with dmabuf resource_id={} ({}x{})",
-                                resource_id, texture.width(), texture.height()
-                            );
-                            scanout.configure_dmabuf_texture(
-                                display_width as i32,
-                                display_height as i32,
-                                texture,
-                            );
-                        } else {
-                            warn!(
-                                "Attempted to configure scanout with unknown resource_id: {}",
-                                resource_id
-                            );
-                        }
+                        debug!(
+                            "Configure scanout {scanout_id} with dmabuf: width={} height={}, fd={}",
+                            dmabuf_info.width, dmabuf_info.height, dmabuf_info.dmabuf_fd
+                        );
+                        scanout.configure_dmabuf(
+                            display_width as i32,
+                            display_height as i32,
+                            &dmabuf_info,
+                        );
                     } else {
                         warn!(
                             "Attempted to configure dmabuf for non-existent scanout: {scanout_id}"

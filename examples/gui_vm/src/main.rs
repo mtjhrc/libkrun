@@ -224,7 +224,7 @@ fn krun_thread(
 }
 
 fn main() -> anyhow::Result<()> {
-   env_logger::builder()
+    env_logger::builder()
         .filter_level(LevelFilter::Debug)
         .init();
     let args = Args::parse();

@@ -122,6 +122,8 @@ struct VirtioGpuResource {
     // If true, this resource has been exported as dmabuf to the display backend
     #[cfg(target_os = "linux")]
     dmabuf_exported: bool,
+    #[cfg(target_os = "linux")]
+    dmabuf_info: Option<DmabufInfo>,
 }
 
 impl VirtioGpuResource {
@@ -145,6 +147,8 @@ impl VirtioGpuResource {
             rutabaga_external_mapping: false,
             #[cfg(target_os = "linux")]
             dmabuf_exported: false,
+            #[cfg(target_os = "linux")]
+            dmabuf_info: None,
         }
     }
 }
@@ -376,19 +380,6 @@ impl VirtioGpu {
             return Err(ErrUnspec);
         }
 
-        // Release the dmabuf if it was exported
-        #[cfg(target_os = "linux")]
-        if resource.dmabuf_exported {
-            if let Err(e) = self.display_backend.release_dmabuf(resource_id) {
-                warn!(
-                    "Failed to release dmabuf for resource {}: {:?}",
-                    resource_id, e
-                );
-            } else {
-                debug!("Released dmabuf for resource {}", resource_id);
-            }
-        }
-
         if resource.rutabaga_external_mapping {
             self.rutabaga.unmap(resource_id)?;
         }
@@ -526,23 +517,22 @@ impl VirtioGpu {
                 modifier: info_3d.modifier,
             };
 
-            self.display_backend
-                .import_dmabuf(resource_id, &dmabuf_info)
-                .map_err(|e| {
-                    debug!("Failed to import dmabuf for resource {resource_id}: {e}");
-                })?;
-
-            // Mark that this resource has been exported
+            // Mark that this resource has been exported and store dmabuf info
             let resource = self.resources.get_mut(&resource_id).ok_or(())?;
             resource.dmabuf_exported = true;
-            debug!("Imported resource {resource_id} as dmabuf");
+            resource.dmabuf_info = Some(dmabuf_info);
+            debug!("Exported resource {resource_id} as dmabuf");
         } else {
             debug!("Resource {resource_id} already exported as dmabuf");
         }
 
-        // Configure scanout to use the dmabuf (referenced by resource_id)
+        // Get the dmabuf info for this resource
+        let resource = self.resources.get(&resource_id).ok_or(())?;
+        let dmabuf_info = resource.dmabuf_info.ok_or(())?;
+
+        // Configure scanout to use the dmabuf
         self.display_backend
-            .configure_scanout_dmabuf(scanout_id, display_width, display_height, resource_id)
+            .configure_scanout_dmabuf(scanout_id, display_width, display_height, &dmabuf_info)
             .map_err(|e| {
                 debug!("Failed to configure dmabuf scanout for resource {resource_id}: {e}");
             })?;
@@ -619,7 +609,11 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         for scanout_id in resource.scanouts.iter_enabled() {
-            if self.scanouts[scanout_id as usize].as_ref().unwrap().uses_dmabuf {
+            if self.scanouts[scanout_id as usize]
+                .as_ref()
+                .unwrap()
+                .uses_dmabuf
+            {
                 trace!("UpdateScanoutDmabuf {scanout_id} {rect:?}");
                 self.display_backend
                     .present_dmabuf(scanout_id, Some(&rect))?;

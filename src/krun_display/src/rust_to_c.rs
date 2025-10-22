@@ -1,4 +1,3 @@
-use crate::header::krun_display_dmabuf_info;
 use crate::{
     DisplayBackend, DisplayBackendError, DisplayBasicFramebufferVtable, DisplayDmabufVtable,
     DisplayFeatures, DisplayVtable, DmabufInfo, Rect, ResourceFormat,
@@ -37,20 +36,12 @@ pub trait DisplayBackendBasicFramebuffer {
 }
 
 pub trait DisplayBackendDmabuf: DisplayBackendBasicFramebuffer {
-    fn import_dmabuf(
-        &mut self,
-        resource_id: u32,
-        dmabuf_info: &DmabufInfo,
-    ) -> Result<(), DisplayBackendError>;
-
-    fn release_dmabuf(&mut self, resource_id: u32) -> Result<(), DisplayBackendError>;
-
     fn configure_scanout_dmabuf(
         &mut self,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        resource_id: u32,
+        dmabuf_info: &DmabufInfo,
     ) -> Result<(), DisplayBackendError>;
 
     fn present_dmabuf(
@@ -271,46 +262,20 @@ pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBac
         from_rust_result(cast_instance::<I>(instance).present_frame(scanout_id, frame_id, rect))
     }
 
-    extern "C" fn import_dmabuf_fn<I: DisplayBackendDmabuf>(
-        instance: *mut c_void,
-        resource_id: u32,
-        dmabuf_info_ptr: *const krun_display_dmabuf_info,
-    ) -> i32 {
-        assert!(!dmabuf_info_ptr.is_null());
-        let c_dmabuf_info = unsafe { &*dmabuf_info_ptr };
-
-        let dmabuf_info = DmabufInfo {
-            dmabuf_fd: c_dmabuf_info.dmabuf_fd,
-            width: c_dmabuf_info.width,
-            height: c_dmabuf_info.height,
-            fourcc: c_dmabuf_info.fourcc,
-            strides: c_dmabuf_info.strides,
-            offsets: c_dmabuf_info.offsets,
-            modifier: c_dmabuf_info.modifier,
-        };
-
-        from_rust_result(cast_instance::<I>(instance).import_dmabuf(resource_id, &dmabuf_info))
-    }
-
-    extern "C" fn release_dmabuf_fn<I: DisplayBackendDmabuf>(
-        instance: *mut c_void,
-        resource_id: u32,
-    ) -> i32 {
-        from_rust_result(cast_instance::<I>(instance).release_dmabuf(resource_id))
-    }
-
     extern "C" fn configure_scanout_dmabuf_fn<I: DisplayBackendDmabuf>(
         instance: *mut c_void,
         scanout_id: u32,
         display_width: u32,
         display_height: u32,
-        resource_id: u32,
+        dmabuf_info: *const DmabufInfo,
     ) -> i32 {
+        let dmabuf_info =
+            unsafe { ptr_to_option_ref(dmabuf_info) }.expect("dmabuf_info must not be null");
         from_rust_result(cast_instance::<I>(instance).configure_scanout_dmabuf(
             scanout_id,
             display_width,
             display_height,
-            resource_id,
+            dmabuf_info,
         ))
     }
 
@@ -337,8 +302,6 @@ pub fn into_display_backend_dmabuf<T: Sync, I: DisplayBackendDmabuf + DisplayBac
                     alloc_frame: Some(alloc_frame::<I>),
                     present_frame: Some(present_frame::<I>),
                 },
-                import_dmabuf: Some(import_dmabuf_fn::<I>),
-                release_dmabuf: Some(release_dmabuf_fn::<I>),
                 configure_scanout_dmabuf: Some(configure_scanout_dmabuf_fn::<I>),
                 present_dmabuf: Some(present_dmabuf_fn::<I>),
             },

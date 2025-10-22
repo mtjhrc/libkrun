@@ -3,7 +3,7 @@ use std::io::Write;
 use std::thread::JoinHandle;
 
 use log::{debug, error};
-use utils::eventfd::EventFd;
+use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vm_memory::GuestMemoryMmap;
 
 use super::super::{ActivateError, ActivateResult, DeviceState, Queue as VirtQueue, VirtioDevice};
@@ -140,8 +140,7 @@ impl Input {
         debug!("input: with_queues");
         let mut queue_events = Vec::new();
         for _ in 0..queues.len() {
-            queue_events
-                .push(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(InputError::EventFd)?);
+            queue_events.push(EventFd::new(EFD_NONBLOCK).map_err(InputError::EventFd)?);
         }
 
         Ok(Input {
@@ -154,7 +153,7 @@ impl Input {
             device_state: DeviceState::Inactive,
             cfg: InputConfig::new(),
             worker_thread: None,
-            worker_stopfd: EventFd::new(libc::EFD_NONBLOCK).map_err(InputError::EventFd)?,
+            worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(InputError::EventFd)?,
         })
     }
 
