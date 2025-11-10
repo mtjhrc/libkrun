@@ -10,6 +10,9 @@ use test_tsi_tcp_guest_connect::TestTsiTcpGuestConnect;
 mod test_tsi_tcp_guest_listen;
 use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 
+mod test_tsi_udp;
+use test_tsi_udp::TestTsiUdp;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -36,6 +39,7 @@ pub fn test_cases() -> Vec<TestCase> {
             "tsi-tcp-guest-listen",
             Box::new(TestTsiTcpGuestListen::new()),
         ),
+        TestCase::new("tsi-udp", Box::new(TestTsiUdp::new())),
     ]
 }
 
@@ -57,6 +61,7 @@ mod common;
 #[cfg(feature = "host")]
 mod krun;
 mod tcp_tester;
+mod udp_tester;
 
 #[host]
 #[derive(Clone, Debug)]
