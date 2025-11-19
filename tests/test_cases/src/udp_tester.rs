@@ -1,3 +1,4 @@
+use crate::datagram_tester::DatagramTester;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::thread;
 use std::time::Duration;
@@ -48,18 +49,8 @@ impl UdpTester {
     }
 
     pub fn run_server(&self, socket: UdpSocket) {
-        let mut buf = vec![0; 20];
-
-        // Receive first message from client
-        let (size, client_addr) = socket.recv_from(&mut buf).unwrap();
-        assert_eq!(&buf[..size], b"ping!");
-
-        // Send response back to client
-        socket.send_to(b"pong!", &client_addr).unwrap();
-
-        // Receive final message
-        let (size, _) = socket.recv_from(&mut buf).unwrap();
-        assert_eq!(&buf[..size], b"done!");
+        let tester = DatagramTester::new(socket);
+        tester.run_server();
     }
 
     pub fn run_client(&self) {
@@ -78,14 +69,7 @@ impl UdpTester {
 
         // DON'T connect - UDP connect will succeed on inet and packets go to wrong place
         // Instead, use send_to() directly which will use HYBRID fallback to VSOCK
-        socket.send_to(b"ping!", &server_addr).unwrap();
-
-        // Wait for server response
-        let mut buf = vec![0; 20];
-        let (size, _from) = socket.recv_from(&mut buf).unwrap();
-        assert_eq!(&buf[..size], b"pong!");
-
-        // Send acknowledgment
-        socket.send_to(b"done!", &server_addr).unwrap();
+        let tester = DatagramTester::new(socket);
+        tester.run_client(server_addr);
     }
 }

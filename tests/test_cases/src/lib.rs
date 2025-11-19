@@ -13,6 +13,12 @@ use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 mod test_tsi_udp;
 use test_tsi_udp::TestTsiUdp;
 
+mod test_udp_guest_localhost;
+use test_udp_guest_localhost::TestUdpGuestLocalhost;
+
+mod test_udp_guest_to_host;
+use test_udp_guest_to_host::TestUdpGuestToHost;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -40,6 +46,14 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestTsiTcpGuestListen::new()),
         ),
         TestCase::new("tsi-udp", Box::new(TestTsiUdp::new())),
+        TestCase::new(
+            "udp-guest-localhost",
+            Box::new(TestUdpGuestLocalhost::new()),
+        ),
+        TestCase::new(
+            "udp-guest-to-host",
+            Box::new(TestUdpGuestToHost::new()),
+        ),
     ]
 }
 
@@ -62,6 +76,7 @@ mod common;
 mod krun;
 mod tcp_tester;
 mod udp_tester;
+mod datagram_tester;
 
 #[host]
 #[derive(Clone, Debug)]
