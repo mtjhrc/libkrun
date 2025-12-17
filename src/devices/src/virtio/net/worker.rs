@@ -3,15 +3,13 @@ use crate::virtio::net::backend::ConnectError;
 use crate::virtio::net::tap::Tap;
 use crate::virtio::net::unixgram::Unixgram;
 use crate::virtio::net::unixstream::Unixstream;
-use crate::virtio::net::{MAX_BUFFER_SIZE, QUEUE_SIZE};
+use crate::virtio::net::{FRAME_HEADER_LEN, MAX_BUFFER_SIZE, QUEUE_SIZE};
 use crate::virtio::{DeviceQueue, InterruptTransport};
 
 use super::backend::{NetBackend, ReadError, WriteError};
 use super::device::{FrontendError, RxError, TxError, VirtioNetBackend};
-use super::VNET_HDR_LEN;
+use super::vnet_hdr_len;
 
-#[cfg(target_os = "macos")]
-use std::os::fd::RawFd;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::thread;
 use std::{cmp, result};
@@ -31,9 +29,8 @@ pub struct NetWorker {
     rx_has_deferred_frame: bool,
 
     tx_iovec: Vec<(GuestAddress, usize)>,
-    tx_frame_buf: [u8; MAX_BUFFER_SIZE],
+    tx_frame_buf: [u8; MAX_BUFFER_SIZE + FRAME_HEADER_LEN],
     tx_frame_len: usize,
-    tx_has_deferred_frame: bool,
 }
 
 impl NetWorker {
@@ -43,6 +40,7 @@ impl NetWorker {
         interrupt: InterruptTransport,
         mem: GuestMemoryMmap,
         _vnet_features: u64,
+        include_vnet_header: bool,
         cfg_backend: VirtioNetBackend,
     ) -> Result<Self, ConnectError> {
         let backend = match cfg_backend {
@@ -50,23 +48,26 @@ impl NetWorker {
                 // SAFETY: we need to trust that the library user has configured
                 // the backend with a healthy file descriptor.
                 let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                Box::new(Unixstream::new(owned_fd)) as Box<dyn NetBackend + Send>
+                Box::new(Unixstream::new(owned_fd, include_vnet_header))
+                    as Box<dyn NetBackend + Send>
             }
             VirtioNetBackend::UnixstreamPath(path) => {
-                Box::new(Unixstream::open(path)?) as Box<dyn NetBackend + Send>
+                Box::new(Unixstream::open(path, include_vnet_header)?) as Box<dyn NetBackend + Send>
             }
             VirtioNetBackend::UnixgramFd(fd) => {
                 // SAFETY: we need to trust that the library user has configured
                 // the backend with a healthy file descriptor.
                 let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                Box::new(Unixgram::new(owned_fd)) as Box<dyn NetBackend + Send>
+                Box::new(Unixgram::new(owned_fd, include_vnet_header)) as Box<dyn NetBackend + Send>
             }
             VirtioNetBackend::UnixgramPath(path, vfkit_magic) => {
-                Box::new(Unixgram::open(path, vfkit_magic)?) as Box<dyn NetBackend + Send>
+                Box::new(Unixgram::open(path, vfkit_magic, include_vnet_header)?)
+                    as Box<dyn NetBackend + Send>
             }
             #[cfg(target_os = "linux")]
             VirtioNetBackend::Tap(tap_name) => {
-                Box::new(Tap::new(tap_name, _vnet_features)?) as Box<dyn NetBackend + Send>
+                Box::new(Tap::new(tap_name, _vnet_features, include_vnet_header)?)
+                    as Box<dyn NetBackend + Send>
             }
         };
 
@@ -82,10 +83,9 @@ impl NetWorker {
             rx_frame_buf_len: 0,
             rx_has_deferred_frame: false,
 
-            tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+            tx_frame_buf: [0u8; MAX_BUFFER_SIZE + FRAME_HEADER_LEN],
             tx_frame_len: 0,
             tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
-            tx_has_deferred_frame: false,
         })
     }
 
@@ -97,9 +97,6 @@ impl NetWorker {
     }
 
     fn work(mut self) {
-        #[cfg(target_os = "macos")]
-        const TX_TIMER_FD: RawFd = -2;
-
         let virtq_rx_ev_fd = self.rx_q.event.as_raw_fd();
         let virtq_tx_ev_fd = self.tx_q.event.as_raw_fd();
         let backend_socket = self.backend.raw_socket_fd();
@@ -155,25 +152,11 @@ impl NetWorker {
                                     }
                                 }
                             }
-                            #[cfg(target_os = "macos")]
-                            _ if event_set.is_empty() && source == TX_TIMER_FD => {
-                                self.process_tx_loop();
-                            }
                             _ => {
                                 log::warn!(
                                     "Received unknown event: {event_set:?} from fd: {source:?}"
                                 );
                             }
-                        }
-                    }
-
-                    // Arm the retry timer after processing all events, so it
-                    // reflects the final state of tx_has_deferred_frame.
-                    #[cfg(target_os = "macos")]
-                    if self.tx_has_deferred_frame {
-                        let delay = self.backend.write_retry_delay_us();
-                        if delay > 0 {
-                            epoll.add_oneshot_timer(delay, TX_TIMER_FD as u64);
                         }
                     }
                 }
@@ -223,7 +206,7 @@ impl NetWorker {
     pub(crate) fn process_backend_socket_writeable(&mut self) {
         match self
             .backend
-            .try_finish_write(VNET_HDR_LEN, &self.tx_frame_buf[..self.tx_frame_len])
+            .try_finish_write(vnet_hdr_len(), &self.tx_frame_buf[..self.tx_frame_len])
         {
             Ok(()) => self.process_tx_loop(),
             Err(WriteError::PartialWrite | WriteError::NothingWritten) => {}
@@ -280,17 +263,11 @@ impl NetWorker {
         loop {
             self.tx_q.queue.disable_notification(&self.mem).unwrap();
 
-            self.tx_has_deferred_frame = match self.process_tx() {
-                Err(TxError::Backend(WriteError::NothingWritten)) => true,
-                Err(e) => {
-                    log::error!("Failed to process tx: {e:?}");
-                    false
-                }
-                _ => false,
+            if let Err(e) = self.process_tx() {
+                log::error!("Failed to process rx: {e:?} (triggered by backend socket readable)");
             };
 
-            let has_new_entries = self.tx_q.queue.enable_notification(&self.mem).unwrap();
-            if self.tx_has_deferred_frame || !has_new_entries {
+            if !self.tx_q.queue.enable_notification(&self.mem).unwrap() {
                 break;
             }
         }
@@ -302,7 +279,7 @@ impl NetWorker {
         if self.backend.has_unfinished_write()
             && self
                 .backend
-                .try_finish_write(VNET_HDR_LEN, &self.tx_frame_buf[..self.tx_frame_len])
+                .try_finish_write(vnet_hdr_len(), &self.tx_frame_buf[..self.tx_frame_len])
                 .is_err()
         {
             log::trace!("Cannot process tx because of unfinished partial write!");
@@ -310,7 +287,6 @@ impl NetWorker {
         }
 
         let mut raise_irq = false;
-        let mut result = Ok(());
 
         while let Some(head) = tx_queue.pop(&self.mem) {
             let head_index = head.index;
@@ -327,7 +303,7 @@ impl NetWorker {
             }
 
             // Copy buffer from across multiple descriptors.
-            let mut read_count = 0;
+            let mut read_count = FRAME_HEADER_LEN;
             for (desc_addr, desc_len) in self.tx_iovec.drain(..) {
                 let limit = cmp::min(read_count + desc_len, self.tx_frame_buf.len());
 
@@ -347,10 +323,10 @@ impl NetWorker {
             }
 
             self.tx_frame_len = read_count;
-            match self
-                .backend
-                .write_frame(VNET_HDR_LEN, &mut self.tx_frame_buf[..read_count])
-            {
+            match self.backend.write_frame(
+                vnet_hdr_len() + FRAME_HEADER_LEN,
+                &mut self.tx_frame_buf[..read_count],
+            ) {
                 Ok(()) => {
                     self.tx_frame_len = 0;
                     tx_queue
@@ -360,7 +336,6 @@ impl NetWorker {
                 }
                 Err(WriteError::NothingWritten) => {
                     tx_queue.undo_pop();
-                    result = Err(TxError::Backend(WriteError::NothingWritten));
                     break;
                 }
                 Err(WriteError::PartialWrite) => {
@@ -394,7 +369,7 @@ impl NetWorker {
                 .map_err(TxError::DeviceError)?;
         }
 
-        result
+        Ok(())
     }
 
     // Copies a single frame from `self.rx_frame_buf` into the guest.
