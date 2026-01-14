@@ -319,7 +319,9 @@ mod tests {
     use devices::legacy::KvmGicV3;
     #[cfg(target_arch = "x86_64")]
     use devices::legacy::KvmIoapic;
-    use devices::virtio::{ActivateResult, DeviceQueue, InterruptTransport, QueueConfig, VirtioDevice};
+    use devices::virtio::{
+        ActivateResult, DeviceQueue, InterruptTransport, QueueConfig, VirtioDevice,
+    };
     use std::sync::Arc;
     use utils::errno;
     use vm_memory::{GuestAddress, GuestMemoryMmap};
