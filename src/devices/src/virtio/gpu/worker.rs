@@ -1,4 +1,5 @@
-use std::os::unix::io::AsRawFd;
+use std::io::Read;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -58,9 +59,9 @@ impl Worker {
     ) -> Self {
         // Clone the eventfd so we have our own file description, then set it to blocking mode.
         let control_evt = control_q.event.try_clone().unwrap();
-        let fd = control_evt.as_raw_fd();
-        let flags =
-            OFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFL).unwrap()) & !OFlag::O_NONBLOCK;
+        // SAFETY: control_evt is valid for the duration of the fcntl calls.
+        let fd = unsafe { BorrowedFd::borrow_raw(control_evt.as_raw_fd()) };
+        let flags = OFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFL).unwrap()) & !OFlag::O_NONBLOCK;
         fcntl(fd, FcntlArg::F_SETFL(flags)).unwrap();
 
         Self {
