@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use utils::eventfd::EFD_NONBLOCK;
+use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 
 use super::device_status;
 use super::*;
@@ -297,6 +298,23 @@ impl MmioTransport {
         // . Do not reset config_generation and keep it monotonically increasing
     }
 
+    fn activate(&mut self) {
+        let Some(queues) = self.queues.take() else {
+            return;
+        };
+
+        let mut device_queues: Vec<DeviceQueue> = queues
+            .into_iter()
+            .zip(self.queue_evts.iter().cloned())
+            .map(|(queue, event)| DeviceQueue::new(queue, event))
+            .collect();
+
+        let mut locked_device = self.locked_device();
+        locked_device
+            .activate(self.mem.clone(), self.interrupt.clone(), device_queues)
+            .expect("Failed to activate device");
+    }
+
     /// Update device status according to the state machine defined by VirtIO Spec 1.0.
     /// Please refer to VirtIO Spec 1.0, section 2.1.1 and 3.1.1.
     ///
@@ -322,19 +340,7 @@ impl MmioTransport {
                 self.device_status = status;
                 let device_activated = self.locked_device().is_activated();
                 if !device_activated {
-                    // Take ownership of queues, clone Arc<EventFd>s, package into DeviceQueues.
-                    let queues = self
-                        .queues
-                        .take()
-                        .expect("queues should exist before activation");
-                    let device_queues: Vec<DeviceQueue> = queues
-                        .into_iter()
-                        .zip(self.queue_evts.iter().cloned())
-                        .map(|(queue, event)| DeviceQueue::new(queue, event))
-                        .collect();
-                    self.locked_device()
-                        .activate(self.mem.clone(), self.interrupt.clone(), device_queues)
-                        .expect("Failed to activate device");
+                    self.activate();
                 }
             }
             _ if (status & FAILED) != 0 => {
