@@ -3,15 +3,17 @@ name = "test_cases"
 edition = "2021"
 
 [features]
-host = ["krun-sys"]
-guest = []
+host = ["krun-sys", "krun_display"]
+guest = ["nix/ioctl", "nix/fs"]
 
 [lib]
 name = "test_cases"
 
 [dependencies]
 krun-sys = { path = "../../krun-sys", optional = true }
+krun_display = { path = "../../src/krun_display", optional = true }
 macros = { path = "../macros" }
 nix = { version = "0.29.0", features = ["socket"] }
 anyhow = "1.0.95"
 tempdir = "0.3.7"
+libc = "0.2"

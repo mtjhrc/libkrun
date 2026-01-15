@@ -13,6 +13,11 @@ use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
+#[cfg(feature = "host")]
+mod dummy_display;
+mod test_gpu_display;
+use test_gpu_display::TestGpuDisplay;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -40,6 +45,7 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestTsiTcpGuestListen::new()),
         ),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
+        TestCase::new("gpu-display", Box::new(TestGpuDisplay)),
     ]
 }
 
