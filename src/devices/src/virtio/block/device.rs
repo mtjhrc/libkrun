@@ -32,7 +32,7 @@ use vm_memory::{ByteValued, GuestMemoryMmap};
 use super::worker::BlockWorker;
 use super::{
     super::{ActivateResult, DeviceQueue, DeviceState, QueueConfig, VirtioDevice, TYPE_BLOCK},
-    Error, NUM_QUEUES, QUEUE_SIZE, SECTOR_SHIFT, SECTOR_SIZE,
+    Error, NUM_QUEUES, QUEUE_CONFIG, SECTOR_SHIFT, SECTOR_SIZE,
 };
 
 use crate::virtio::{
@@ -216,7 +216,6 @@ pub struct Block {
     config: VirtioBlkConfig,
 
     // Transport related fields.
-    queue_config: [QueueConfig; NUM_QUEUES],
     pub(crate) device_state: DeviceState,
 
     // Implementation specific fields.
@@ -301,8 +300,6 @@ impl Block {
             avail_features |= 1u64 << VIRTIO_BLK_F_RO;
         };
 
-        let queue_config = [QueueConfig::new(QUEUE_SIZE)];
-
         let config = VirtioBlkConfig {
             capacity: disk_properties.nsectors(),
             size_max: 0,
@@ -327,7 +324,6 @@ impl Block {
             disk_image_id,
             avail_features,
             acked_features: 0u64,
-            queue_config,
             device_state: DeviceState::Inactive,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
@@ -360,7 +356,7 @@ impl VirtioDevice for Block {
     }
 
     fn queue_config(&self) -> &[QueueConfig] {
-        &self.queue_config
+        &QUEUE_CONFIG
     }
 
     fn avail_features(&self) -> u64 {

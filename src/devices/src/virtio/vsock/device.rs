@@ -38,7 +38,6 @@ pub(crate) const AVAIL_FEATURES: u64 = (1 << uapi::VIRTIO_F_VERSION_1 as u64)
 pub struct Vsock {
     cid: u64,
     pub(crate) muxer: VsockMuxer,
-    queue_config: Vec<QueueConfig>,
     pub(crate) queue_rx: Option<Arc<Mutex<VirtQueue>>>,
     pub(crate) queue_tx: Option<Arc<Mutex<VirtQueue>>>,
     // Queue events are stored separately for event handling.
@@ -57,15 +56,9 @@ impl Vsock {
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
         tsi_flags: TsiFlags,
     ) -> super::Result<Vsock> {
-        let queue_config: Vec<QueueConfig> = defs::QUEUE_SIZES
-            .iter()
-            .map(|&size| QueueConfig::new(size))
-            .collect();
-
         Ok(Vsock {
             cid,
             muxer: VsockMuxer::new(cid, host_port_map, unix_ipc_port_map, tsi_flags),
-            queue_config,
             queue_rx: None,
             queue_tx: None,
             queue_events: Vec::new(),
@@ -209,7 +202,7 @@ impl VirtioDevice for Vsock {
     }
 
     fn queue_config(&self) -> &[QueueConfig] {
-        &self.queue_config
+        &defs::QUEUE_CONFIG
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {

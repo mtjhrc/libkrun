@@ -5,7 +5,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 use crate::virtio::net::Result;
-use crate::virtio::net::{NUM_QUEUES, QUEUE_SIZE};
+use crate::virtio::net::{NUM_QUEUES, QUEUE_CONFIG};
 use crate::virtio::queue::Error as QueueError;
 use crate::virtio::{
     ActivateError, ActivateResult, DeviceQueue, DeviceState, InterruptTransport, QueueConfig,
@@ -76,8 +76,6 @@ pub struct Net {
     avail_features: u64,
     acked_features: u64,
 
-    queue_config: [QueueConfig; NUM_QUEUES],
-
     pub(crate) device_state: DeviceState,
 
     config: VirtioNetConfig,
@@ -96,8 +94,6 @@ impl Net {
             | (1 << VIRTIO_RING_F_EVENT_IDX)
             | (1 << VIRTIO_F_VERSION_1);
 
-        let queue_config = [QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
-
         let config = VirtioNetConfig {
             mac,
             status: 0,
@@ -111,7 +107,6 @@ impl Net {
             avail_features,
             acked_features: 0u64,
 
-            queue_config,
             device_state: DeviceState::Inactive,
             config,
         })
@@ -150,7 +145,7 @@ impl VirtioDevice for Net {
     }
 
     fn queue_config(&self) -> &[QueueConfig] {
-        &self.queue_config
+        &QUEUE_CONFIG
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {

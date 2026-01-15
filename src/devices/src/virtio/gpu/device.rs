@@ -28,7 +28,7 @@ pub(crate) const AVAIL_FEATURES: u64 = (1u64 << uapi::VIRTIO_F_VERSION_1)
 
 const QUEUE_SIZE: u16 = 256;
 static QUEUE_CONFIG: [QueueConfig; defs::NUM_QUEUES] =
-    [QueueConfig::new(QUEUE_SIZE), QueueConfig::new(QUEUE_SIZE)];
+    [QueueConfig::new(QUEUE_SIZE); defs::NUM_QUEUES];
 
 pub struct Gpu {
     pub(crate) avail_features: u64,

@@ -15,7 +15,6 @@ pub(crate) const REQ_INDEX: usize = 0;
 pub(crate) const AVAIL_FEATURES: u64 = 1 << uapi::VIRTIO_F_VERSION_1 as u64;
 
 pub struct Rng {
-    queue_config: Vec<QueueConfig>,
     pub(crate) queues: Option<Vec<DeviceQueue>>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -29,13 +28,7 @@ impl Rng {
     }
 
     pub fn new() -> super::Result<Rng> {
-        let queue_config: Vec<QueueConfig> = defs::QUEUE_SIZES
-            .iter()
-            .map(|&size| QueueConfig::new(size))
-            .collect();
-
         Ok(Rng {
-            queue_config,
             queues: None,
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
@@ -112,7 +105,7 @@ impl VirtioDevice for Rng {
     }
 
     fn queue_config(&self) -> &[QueueConfig] {
-        &self.queue_config
+        &defs::QUEUE_CONFIG
     }
 
     fn read_config(&self, _offset: u64, _data: &mut [u8]) {

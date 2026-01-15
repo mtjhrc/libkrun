@@ -34,12 +34,7 @@ mod defs {
     pub const QUEUE_INDEXES: [usize; 4] = [CTL_INDEX, EVT_INDEX, TXQ_INDEX, RXQ_INDEX];
 
     const QUEUE_SIZE: u16 = 256;
-    pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [
-        QueueConfig::new(QUEUE_SIZE),
-        QueueConfig::new(QUEUE_SIZE),
-        QueueConfig::new(QUEUE_SIZE),
-        QueueConfig::new(QUEUE_SIZE),
-    ];
+    pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
 
     pub const SUPPORTED_FORMATS: u64 = (1 << VIRTIO_SND_PCM_FMT_U8)
         | (1 << VIRTIO_SND_PCM_FMT_S16)

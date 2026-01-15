@@ -14,8 +14,7 @@ mod defs {
     pub const NUM_QUEUES: usize = 2;
 
     const QUEUE_SIZE: u16 = 256;
-    pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] =
-        [QueueConfig::new(QUEUE_SIZE), QueueConfig::new(QUEUE_SIZE)];
+    pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
 
     pub mod uapi {
         pub const VIRTIO_F_VERSION_1: u32 = 32;
