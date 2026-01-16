@@ -19,7 +19,7 @@ pub struct CapturedFrame {
 }
 
 /// Frame verification function type
-pub type FrameVerifier = Box<dyn Fn(&CapturedFrame) + Send + Sync>;
+pub type FrameVerifier = Box<dyn Fn(&CapturedFrame)>;
 
 /// Shared state for capturing frames from the display backend
 pub struct SharedFrameCapture {

@@ -23,17 +23,20 @@ mod host {
     use krun_sys::*;
     use std::ffi::c_void;
 
-    /// Test pattern: solid red color (BGRX format: B=0, G=0, R=255, X=0)
+    use std::cell::Cell;
+
     const TEST_PATTERN_RED_BGRX: u32 = 0x00FF0000;
+    const TEST_PATTERN_BLUE_BGRX: u32 = 0x000000FF;
 
     impl Test for TestGpuDisplay {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            // Create frame verifier that checks for red pattern
-            let verifier = Box::new(move |frame: &crate::dummy_display::CapturedFrame| {
-                assert_eq!(frame.width, DISPLAY_WIDTH, "Frame width mismatch");
-                assert_eq!(frame.height, DISPLAY_HEIGHT, "Frame height mismatch");
+            // State: 0 = nothing, 1 = seen red, 2 = seen blue
+            let state: &'static Cell<u8> = Box::leak(Box::new(Cell::new(0)));
 
-                // Verify the frame contains our red test pattern
+            let verifier = Box::new(move |frame: &crate::dummy_display::CapturedFrame| {
+                assert_eq!(frame.width, DISPLAY_WIDTH);
+                assert_eq!(frame.height, DISPLAY_HEIGHT);
+
                 let pixels: &[u32] = unsafe {
                     std::slice::from_raw_parts(
                         frame.data.as_ptr() as *const u32,
@@ -41,19 +44,30 @@ mod host {
                     )
                 };
 
-                let expected_pixels = (DISPLAY_WIDTH * DISPLAY_HEIGHT) as usize;
-                assert_eq!(pixels.len(), expected_pixels, "Wrong number of pixels");
+                let first_pixel = pixels[0];
+                let expected_color = match first_pixel {
+                    TEST_PATTERN_RED_BGRX => TEST_PATTERN_RED_BGRX,
+                    TEST_PATTERN_BLUE_BGRX => {
+                        assert!(state.get() >= 1, "Got blue before red");
+                        TEST_PATTERN_BLUE_BGRX
+                    }
+                    _ => panic!("Unknown color 0x{:08X}", first_pixel),
+                };
 
-                // Check all pixels are red
                 for (i, &pixel) in pixels.iter().enumerate() {
-                    assert_eq!(
-                        pixel, TEST_PATTERN_RED_BGRX,
-                        "Pixel {} has wrong color: expected 0x{:08X}, got 0x{:08X}",
-                        i, TEST_PATTERN_RED_BGRX, pixel
-                    );
+                    assert_eq!(pixel, expected_color, "Pixel {} mismatch", i);
                 }
 
-                eprintln!("Frame verification passed: all {} pixels are red", pixels.len());
+                match (state.get(), expected_color) {
+                    (0, TEST_PATTERN_RED_BGRX) => state.set(1),
+                    (1, TEST_PATTERN_RED_BGRX) => {}
+                    (1, TEST_PATTERN_BLUE_BGRX) => {
+                        state.set(2);
+                        println!("OK");
+                    }
+                    (2, TEST_PATTERN_BLUE_BGRX) => {}
+                    (s, c) => panic!("Invalid transition: state {} + color 0x{:08X}", s, c),
+                }
             });
 
             // Create shared frame capture with verifier - leaked to ensure it lives long enough
@@ -100,6 +114,8 @@ mod guest {
 
     /// Test pattern: solid red color (XRGB8888 format)
     const TEST_PATTERN_RED: u32 = 0x00FF0000;
+    /// Test pattern: solid blue color (XRGB8888 format)
+    const TEST_PATTERN_BLUE: u32 = 0x000000FF;
 
     // DRM ioctl definitions
     const DRM_IOCTL_BASE: u8 = b'd';
@@ -207,11 +223,35 @@ mod guest {
         max_height: u32,
     }
 
+    /// DRM mode dirty framebuffer command
+    #[repr(C)]
+    #[derive(Default)]
+    struct DrmModeFbDirtyCmd {
+        fb_id: u32,
+        flags: u32,
+        color: u32,
+        num_clips: u32,
+        clips_ptr: u64,
+    }
+
+    /// DRM mode page flip
+    #[repr(C)]
+    #[derive(Default)]
+    struct DrmModePageFlip {
+        crtc_id: u32,
+        fb_id: u32,
+        flags: u32,
+        reserved: u32,
+        user_data: u64,
+    }
+
     // Define ioctl wrappers using nix macros
     nix::ioctl_readwrite!(drm_ioctl_version, DRM_IOCTL_BASE, 0x00, DrmVersion);
     nix::ioctl_readwrite!(drm_ioctl_mode_getresources, DRM_IOCTL_BASE, 0xA0, DrmModeCardRes);
     nix::ioctl_readwrite!(drm_ioctl_mode_setcrtc, DRM_IOCTL_BASE, 0xA2, DrmModeCrtc);
+    nix::ioctl_readwrite!(drm_ioctl_mode_page_flip, DRM_IOCTL_BASE, 0xA7, DrmModePageFlip);
     nix::ioctl_readwrite!(drm_ioctl_mode_addfb, DRM_IOCTL_BASE, 0xAE, DrmModeFbCmd);
+    nix::ioctl_readwrite!(drm_ioctl_mode_dirtyfb, DRM_IOCTL_BASE, 0xB1, DrmModeFbDirtyCmd);
     nix::ioctl_readwrite!(drm_ioctl_mode_create_dumb, DRM_IOCTL_BASE, 0xB2, DrmModeCreateDumb);
     nix::ioctl_readwrite!(drm_ioctl_mode_map_dumb, DRM_IOCTL_BASE, 0xB3, DrmModeMapDumb);
 
@@ -413,17 +453,97 @@ mod guest {
 
             unsafe { drm_ioctl_mode_setcrtc(raw_fd, &mut crtc) }
                 .expect("DRM_IOCTL_MODE_SETCRTC failed");
-            eprintln!("Set CRTC successfully");
+            eprintln!("Set CRTC successfully (frame 0: red)");
+
+            // Give the display backend time to process first frame
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // === Render second frame with blue (using a new buffer + page flip) ===
+
+            // Create second dumb buffer for blue frame
+            let mut create_dumb2 = DrmModeCreateDumb {
+                width: DISPLAY_WIDTH,
+                height: DISPLAY_HEIGHT,
+                bpp: 32,
+                ..Default::default()
+            };
+
+            unsafe { drm_ioctl_mode_create_dumb(raw_fd, &mut create_dumb2) }
+                .expect("DRM_IOCTL_MODE_CREATE_DUMB (2) failed");
+
+            let mut map_dumb2 = DrmModeMapDumb {
+                handle: create_dumb2.handle,
+                ..Default::default()
+            };
+
+            unsafe { drm_ioctl_mode_map_dumb(raw_fd, &mut map_dumb2) }
+                .expect("DRM_IOCTL_MODE_MAP_DUMB (2) failed");
+
+            let buffer_ptr2 = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    create_dumb2.size as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    raw_fd,
+                    map_dumb2.offset as i64,
+                )
+            };
+
+            assert!(buffer_ptr2 != libc::MAP_FAILED, "mmap (2) failed: {}", Errno::last());
+
+            // Write blue pattern to second buffer
+            let buffer2 = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buffer_ptr2 as *mut u32,
+                    (create_dumb2.size as usize) / 4,
+                )
+            };
+
+            for pixel in buffer2.iter_mut() {
+                *pixel = TEST_PATTERN_BLUE;
+            }
+            eprintln!("Wrote blue pattern to buffer 2");
+
+            // Create second framebuffer
+            let mut fb_cmd2 = DrmModeFbCmd {
+                width: DISPLAY_WIDTH,
+                height: DISPLAY_HEIGHT,
+                pitch: create_dumb2.pitch,
+                bpp: 32,
+                depth: 24,
+                handle: create_dumb2.handle,
+                ..Default::default()
+            };
+
+            unsafe { drm_ioctl_mode_addfb(raw_fd, &mut fb_cmd2) }
+                .expect("DRM_IOCTL_MODE_ADDFB (2) failed");
+
+            eprintln!("Created framebuffer 2: fb_id={}", fb_cmd2.fb_id);
+
+            // Set CRTC to display the second framebuffer
+            crtc.fb_id = fb_cmd2.fb_id;
+            unsafe { drm_ioctl_mode_setcrtc(raw_fd, &mut crtc) }
+                .expect("DRM_IOCTL_MODE_SETCRTC (frame 1) failed");
+            eprintln!("Set CRTC to frame 1 (blue) successful");
+
+            // Mark the new framebuffer as dirty to trigger a flush
+            let mut dirty_cmd = DrmModeFbDirtyCmd {
+                fb_id: fb_cmd2.fb_id,
+                ..Default::default()
+            };
+            unsafe { drm_ioctl_mode_dirtyfb(raw_fd, &mut dirty_cmd) }
+                .expect("DRM_IOCTL_MODE_DIRTYFB (frame 1) failed");
+            eprintln!("Marked framebuffer 2 dirty");
+
+            // Give the display backend time to process second frame
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
             // Cleanup
             unsafe {
                 libc::munmap(buffer_ptr, create_dumb.size as usize);
+                libc::munmap(buffer_ptr2, create_dumb2.size as usize);
             }
-
-            // Give the display backend time to process
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            println!("OK");
         }
     }
 }
