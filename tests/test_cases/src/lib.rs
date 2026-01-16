@@ -10,6 +10,9 @@ use test_tsi_tcp_guest_connect::TestTsiTcpGuestConnect;
 mod test_tsi_tcp_guest_listen;
 use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 
+mod test_net_passt;
+use test_net_passt::TestNetPasst;
+
 mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
@@ -44,6 +47,7 @@ pub fn test_cases() -> Vec<TestCase> {
             "tsi-tcp-guest-listen",
             Box::new(TestTsiTcpGuestListen::new()),
         ),
+        TestCase::new("net-passt", Box::new(TestNetPasst::new())),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
         TestCase::new("gpu-display", Box::new(TestGpuDisplay::new())),
         TestCase::xfail("gpu-display-xfail", Box::new(TestGpuDisplay::xfail())),
