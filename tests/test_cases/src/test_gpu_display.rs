@@ -60,12 +60,10 @@ mod host {
 
                 match (state.get(), expected_color) {
                     (0, TEST_PATTERN_RED_BGRX) => state.set(1),
-                    (1, TEST_PATTERN_RED_BGRX) => {}
                     (1, TEST_PATTERN_BLUE_BGRX) => {
                         state.set(2);
                         println!("OK");
                     }
-                    (2, TEST_PATTERN_BLUE_BGRX) => {}
                     (s, c) => panic!("Invalid transition: state {} + color 0x{:08X}", s, c),
                 }
             });
@@ -453,96 +451,29 @@ mod guest {
 
             unsafe { drm_ioctl_mode_setcrtc(raw_fd, &mut crtc) }
                 .expect("DRM_IOCTL_MODE_SETCRTC failed");
-            eprintln!("Set CRTC successfully (frame 0: red)");
+            eprintln!("Set CRTC (red)");
 
-            // Give the display backend time to process first frame
             std::thread::sleep(std::time::Duration::from_millis(100));
 
-            // === Render second frame with blue (using a new buffer + page flip) ===
-
-            // Create second dumb buffer for blue frame
-            let mut create_dumb2 = DrmModeCreateDumb {
-                width: DISPLAY_WIDTH,
-                height: DISPLAY_HEIGHT,
-                bpp: 32,
-                ..Default::default()
-            };
-
-            unsafe { drm_ioctl_mode_create_dumb(raw_fd, &mut create_dumb2) }
-                .expect("DRM_IOCTL_MODE_CREATE_DUMB (2) failed");
-
-            let mut map_dumb2 = DrmModeMapDumb {
-                handle: create_dumb2.handle,
-                ..Default::default()
-            };
-
-            unsafe { drm_ioctl_mode_map_dumb(raw_fd, &mut map_dumb2) }
-                .expect("DRM_IOCTL_MODE_MAP_DUMB (2) failed");
-
-            let buffer_ptr2 = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    create_dumb2.size as usize,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED,
-                    raw_fd,
-                    map_dumb2.offset as i64,
-                )
-            };
-
-            assert!(buffer_ptr2 != libc::MAP_FAILED, "mmap (2) failed: {}", Errno::last());
-
-            // Write blue pattern to second buffer
-            let buffer2 = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buffer_ptr2 as *mut u32,
-                    (create_dumb2.size as usize) / 4,
-                )
-            };
-
-            for pixel in buffer2.iter_mut() {
+            // Overwrite same buffer with blue
+            for pixel in buffer.iter_mut() {
                 *pixel = TEST_PATTERN_BLUE;
             }
-            eprintln!("Wrote blue pattern to buffer 2");
+            eprintln!("Overwrote buffer with blue");
 
-            // Create second framebuffer
-            let mut fb_cmd2 = DrmModeFbCmd {
-                width: DISPLAY_WIDTH,
-                height: DISPLAY_HEIGHT,
-                pitch: create_dumb2.pitch,
-                bpp: 32,
-                depth: 24,
-                handle: create_dumb2.handle,
-                ..Default::default()
-            };
-
-            unsafe { drm_ioctl_mode_addfb(raw_fd, &mut fb_cmd2) }
-                .expect("DRM_IOCTL_MODE_ADDFB (2) failed");
-
-            eprintln!("Created framebuffer 2: fb_id={}", fb_cmd2.fb_id);
-
-            // Set CRTC to display the second framebuffer
-            crtc.fb_id = fb_cmd2.fb_id;
-            unsafe { drm_ioctl_mode_setcrtc(raw_fd, &mut crtc) }
-                .expect("DRM_IOCTL_MODE_SETCRTC (frame 1) failed");
-            eprintln!("Set CRTC to frame 1 (blue) successful");
-
-            // Mark the new framebuffer as dirty to trigger a flush
+            // Mark framebuffer dirty to trigger display update
             let mut dirty_cmd = DrmModeFbDirtyCmd {
-                fb_id: fb_cmd2.fb_id,
+                fb_id: fb_cmd.fb_id,
                 ..Default::default()
             };
             unsafe { drm_ioctl_mode_dirtyfb(raw_fd, &mut dirty_cmd) }
-                .expect("DRM_IOCTL_MODE_DIRTYFB (frame 1) failed");
-            eprintln!("Marked framebuffer 2 dirty");
+                .expect("DRM_IOCTL_MODE_DIRTYFB failed");
+            eprintln!("Marked framebuffer dirty");
 
-            // Give the display backend time to process second frame
             std::thread::sleep(std::time::Duration::from_millis(100));
 
-            // Cleanup
             unsafe {
                 libc::munmap(buffer_ptr, create_dumb.size as usize);
-                libc::munmap(buffer_ptr2, create_dumb2.size as usize);
             }
         }
     }
