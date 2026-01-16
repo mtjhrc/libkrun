@@ -11,7 +11,20 @@ use macros::{guest, host};
 const DISPLAY_WIDTH: u32 = 640;
 const DISPLAY_HEIGHT: u32 = 480;
 
-pub struct TestGpuDisplay;
+pub struct TestGpuDisplay {
+    /// If true, inject a bad pixel to test that verification catches it
+    pub inject_bad_pixel: bool,
+}
+
+impl TestGpuDisplay {
+    pub fn new() -> Self {
+        Self { inject_bad_pixel: false }
+    }
+
+    pub fn xfail() -> Self {
+        Self { inject_bad_pixel: true }
+    }
+}
 
 #[host]
 mod host {
@@ -114,7 +127,19 @@ mod host {
                     VIRGLRENDERER_USE_EGL | VIRGLRENDERER_THREAD_SYNC | VIRGLRENDERER_USE_ASYNC_FENCE_CB
                 ))?;
 
-                let display_id = krun_call_u32!(krun_add_display(ctx, DISPLAY_WIDTH, DISPLAY_HEIGHT))?;
+                // Try to add display - if GPU is disabled, skip the test
+                let display_result = krun_add_display(ctx, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+                if display_result == -95 {
+                    // ENOTSUP - GPU not available
+                    println!("SKIP");
+                    return Ok(());
+                }
+                let display_id = if display_result < 0 {
+                    let err = std::io::Error::from_raw_os_error(-display_result);
+                    anyhow::bail!("`krun_add_display`: {}", err);
+                } else {
+                    display_result as u32
+                };
                 assert_eq!(display_id, 0);
 
                 krun_call!(krun_set_display_backend(
@@ -443,6 +468,9 @@ mod guest {
             let color1 = read_color(&mut sync_port);
             for pixel in buffer.iter_mut() {
                 *pixel = color1;
+            }
+            if self.inject_bad_pixel {
+                buffer[12345] = 0xDEADBEEF;
             }
             unsafe { drm_ioctl_mode_setcrtc(raw_fd, &mut crtc) }
                 .expect("DRM_IOCTL_MODE_SETCRTC failed");

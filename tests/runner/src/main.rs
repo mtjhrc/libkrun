@@ -4,15 +4,23 @@ use nix::sys::resource::{getrlimit, setrlimit, Resource};
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
-use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempdir::TempDir;
 use test_cases::{test_cases, Test, TestCase, TestSetup};
 
+#[derive(Clone, Copy, PartialEq)]
+enum TestOutcome {
+    Pass,
+    Fail,
+    Skip,
+    XFail, // Expected failure (test failed as expected)
+    XPass, // Unexpected pass (xfail test passed unexpectedly)
+}
+
 struct TestResult {
     name: String,
-    passed: bool,
+    outcome: TestOutcome,
     log_path: PathBuf,
 }
 
@@ -39,28 +47,29 @@ fn start_vm(test_setup: TestSetup) -> anyhow::Result<()> {
 }
 
 fn run_single_test(
-    test_case: &str,
+    test_case: &TestCase,
     base_dir: &Path,
     keep_all: bool,
     max_name_len: usize,
 ) -> anyhow::Result<TestResult> {
     let executable = env::current_exe().context("Failed to detect current executable")?;
-    let test_dir = base_dir.join(test_case);
+    let test_dir = base_dir.join(test_case.name);
     fs::create_dir(&test_dir).context("Failed to create test directory")?;
 
     let log_path = test_dir.join("log.txt");
     let log_file = File::create(&log_path).context("Failed to create log file")?;
 
     eprint!(
-        "[{test_case}] {:.<width$} ",
+        "[{}] {:.<width$} ",
+        test_case.name,
         "",
-        width = max_name_len - test_case.len() + 3
+        width = max_name_len - test_case.name.len() + 3
     );
 
     let child = Command::new(&executable)
         .arg("start-vm")
         .arg("--test-case")
-        .arg(test_case)
+        .arg(test_case.name)
         .arg("--tmp-dir")
         .arg(&test_dir)
         .stdin(Stdio::piped())
@@ -69,34 +78,57 @@ fn run_single_test(
         .spawn()
         .context("Failed to start subprocess for test")?;
 
-    let _ = get_test(test_case)?;
-    let result = catch_unwind(|| {
-        let test = get_test(test_case).unwrap();
-        test.check(child);
-    });
+    let output = child.wait_with_output().context("Failed to wait for test")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let passed = result.is_ok();
-    if passed {
-        eprintln!("OK");
-        if !keep_all {
-            let _ = fs::remove_dir_all(&test_dir);
+    let outcome = if stdout == "SKIP\n" {
+        TestOutcome::Skip
+    } else if stdout == "OK\n" {
+        if test_case.expects_failure {
+            TestOutcome::XPass // Unexpected pass
+        } else {
+            TestOutcome::Pass
         }
     } else {
-        eprintln!("FAIL");
+        // Test failed
+        if test_case.expects_failure {
+            TestOutcome::XFail // Expected failure
+        } else {
+            TestOutcome::Fail
+        }
+    };
+
+    match outcome {
+        TestOutcome::Pass => {
+            eprintln!("OK");
+            if !keep_all {
+                let _ = fs::remove_dir_all(&test_dir);
+            }
+        }
+        TestOutcome::Skip => {
+            eprintln!("SKIP");
+            if !keep_all {
+                let _ = fs::remove_dir_all(&test_dir);
+            }
+        }
+        TestOutcome::XFail => {
+            eprintln!("XFAIL (expected)");
+            if !keep_all {
+                let _ = fs::remove_dir_all(&test_dir);
+            }
+        }
+        TestOutcome::XPass => eprintln!("XPASS (unexpected pass!)"),
+        TestOutcome::Fail => eprintln!("FAIL"),
     }
 
     Ok(TestResult {
-        name: test_case.to_string(),
-        passed,
+        name: test_case.name.to_string(),
+        outcome,
         log_path,
     })
 }
 
-fn write_github_summary(
-    results: &[TestResult],
-    num_ok: usize,
-    num_tests: usize,
-) -> anyhow::Result<()> {
+fn write_github_summary(results: &[TestResult], num_ok: usize, num_fail: usize) -> anyhow::Result<()> {
     let summary_path = env::var("GITHUB_STEP_SUMMARY")
         .context("GITHUB_STEP_SUMMARY environment variable not set")?;
 
@@ -106,16 +138,22 @@ fn write_github_summary(
         .open(&summary_path)
         .context("Failed to open GITHUB_STEP_SUMMARY")?;
 
-    let all_passed = num_ok == num_tests;
+    let all_passed = num_fail == 0;
     let status = if all_passed { "✅" } else { "❌" };
 
     writeln!(
         file,
-        "## {status} Integration Tests ({num_ok}/{num_tests} passed)\n"
+        "## {status} Integration Tests ({num_ok} passed, {num_fail} failed)\n"
     )?;
 
     for result in results {
-        let icon = if result.passed { "✅" } else { "❌" };
+        let icon = match result.outcome {
+            TestOutcome::Pass => "✅",
+            TestOutcome::Skip => "⏭️",
+            TestOutcome::XFail => "⚠️",
+            TestOutcome::XPass => "🔴",
+            TestOutcome::Fail => "❌",
+        };
         let log_content = fs::read_to_string(&result.log_path).unwrap_or_default();
 
         writeln!(file, "<details>")?;
@@ -140,7 +178,7 @@ fn write_github_summary(
 }
 
 fn run_tests(
-    test_case: &str,
+    test_case_name: &str,
     base_dir: Option<PathBuf>,
     keep_all: bool,
     github_summary: bool,
@@ -157,40 +195,68 @@ fn run_tests(
     };
 
     let mut results: Vec<TestResult> = Vec::new();
+    let all_tests = test_cases();
 
-    if test_case == "all" {
-        let all_tests = test_cases();
-        let max_name_len = all_tests.iter().map(|t| t.name.len()).max().unwrap_or(0);
-
-        for TestCase { name, test: _ } in all_tests {
-            results.push(run_single_test(name, &base_dir, keep_all, max_name_len).context(name)?);
-        }
+    let tests_to_run: Vec<_> = if test_case_name == "all" {
+        all_tests
     } else {
-        let max_name_len = test_case.len();
+        all_tests
+            .into_iter()
+            .filter(|t| t.name == test_case_name)
+            .collect()
+    };
+
+    if tests_to_run.is_empty() {
+        anyhow::bail!("No such test: {test_case_name}");
+    }
+
+    let max_name_len = tests_to_run.iter().map(|t| t.name.len()).max().unwrap_or(0);
+
+    for test_case in &tests_to_run {
         results.push(
             run_single_test(test_case, &base_dir, keep_all, max_name_len)
-                .context(test_case.to_string())?,
+                .context(test_case.name)?,
         );
     }
 
-    let num_tests = results.len();
-    let num_ok = results.iter().filter(|r| r.passed).count();
+    // Count outcomes: Pass, XFail, Skip are OK; Fail, XPass are failures
+    let num_ok = results
+        .iter()
+        .filter(|r| matches!(r.outcome, TestOutcome::Pass | TestOutcome::XFail))
+        .count();
+    let num_skip = results
+        .iter()
+        .filter(|r| r.outcome == TestOutcome::Skip)
+        .count();
+    let num_fail = results
+        .iter()
+        .filter(|r| matches!(r.outcome, TestOutcome::Fail | TestOutcome::XPass))
+        .count();
 
     // Write GitHub Actions summary if requested
     if github_summary {
-        write_github_summary(&results, num_ok, num_tests)?;
+        write_github_summary(&results, num_ok, num_fail)?;
     }
 
-    let num_failures = num_tests - num_ok;
-    if num_failures > 0 {
+    if num_fail > 0 {
         eprintln!("(See test artifacts at: {})", base_dir.display());
-        println!("\nFAIL (PASSED {num_ok}/{num_tests})");
+        let skip_msg = if num_skip > 0 {
+            format!(", {num_skip} skipped")
+        } else {
+            String::new()
+        };
+        println!("\nFAIL ({num_ok} passed, {num_fail} failed{skip_msg})");
         anyhow::bail!("")
     } else {
         if keep_all {
             eprintln!("(See test artifacts at: {})", base_dir.display());
         }
-        eprintln!("\nOK ({num_ok}/{num_tests} passed)");
+        let skip_msg = if num_skip > 0 {
+            format!(", {num_skip} skipped")
+        } else {
+            String::new()
+        };
+        eprintln!("\nOK ({num_ok} passed{skip_msg})");
     }
 
     Ok(())
