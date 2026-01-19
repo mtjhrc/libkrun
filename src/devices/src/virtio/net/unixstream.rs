@@ -202,7 +202,7 @@ impl NetBackend for Unixstream {
         buf[buf_offset..buf_offset + FRAME_HEADER_LEN]
             .copy_from_slice(&(frame_length as u32).to_be_bytes());
 
-        self.write_loop(&buf[buf_offset..buf_offset + frame_length])?;
+        self.write_loop(&buf[buf_offset..buf_offset + FRAME_HEADER_LEN + frame_length])?;
         Ok(())
     }
 

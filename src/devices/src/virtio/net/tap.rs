@@ -47,9 +47,11 @@ impl Tap {
             );
         }
 
-        req.ifr_ifru.ifru_flags = IFF_TAP as i16 | IFF_NO_PI as i16;
-        if include_vnet_header {
-            req.ifr_ifru.ifru_flags |= IFF_VNET_HDR as i16;
+        unsafe {
+            req.ifr_ifru.ifru_flags = IFF_TAP as i16 | IFF_NO_PI as i16;
+            if include_vnet_header {
+                req.ifr_ifru.ifru_flags |= IFF_VNET_HDR as i16;
+            }
         }
 
         let mut offload_flags: u64 = 0;
@@ -131,7 +133,7 @@ impl NetBackend for Tap {
         } else {
             FRAME_HEADER_LEN
         };
-        let ret = write(&self.fd, buf[buf_offset..]).map_err(WriteError::Internal)?;
+        let ret = write(&self.fd, &buf[buf_offset..]).map_err(WriteError::Internal)?;
         debug!("Written frame size={}, written={}", buf.len(), ret);
         Ok(())
     }
