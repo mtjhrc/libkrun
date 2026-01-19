@@ -26,6 +26,7 @@ impl TestNetPasst {
 #[host]
 mod host {
     use super::*;
+    use nix::libc;
     use crate::common::setup_fs_and_enter;
     use crate::{krun_call, krun_call_u32, Test, TestSetup};
     use krun_sys::*;
@@ -194,8 +195,8 @@ mod guest {
     const NETMASK: &str = "255.255.0.0";
     const HOST_IP: &str = "169.254.2.2";
 
-    const IFF_UP: libc::c_short = 0x1;
-    const IFF_RUNNING: libc::c_short = 0x40;
+    const IFF_UP: nix::libc::c_short = 0x1;
+    const IFF_RUNNING: nix::libc::c_short = 0x40;
 
     #[repr(C)]
     #[derive(Default)]
@@ -207,8 +208,8 @@ mod guest {
     #[repr(C)]
     #[derive(Copy, Clone)]
     union IfreqIfru {
-        ifru_addr: libc::sockaddr,
-        ifru_flags: libc::c_short,
+        ifru_addr: nix::libc::sockaddr,
+        ifru_flags: nix::libc::c_short,
         _pad: [u8; 24],
     }
 
@@ -231,9 +232,9 @@ mod guest {
         ifr.ifr_name[len] = 0;
     }
 
-    fn make_sockaddr_in(ip: &str) -> libc::sockaddr {
-        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    fn make_sockaddr_in(ip: &str) -> nix::libc::sockaddr {
+        let mut addr: nix::libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        addr.sin_family = nix::libc::AF_INET as nix::libc::sa_family_t;
 
         // Parse IP address
         let octets: Vec<u8> = ip.split('.').map(|s| s.parse().unwrap()).collect();
