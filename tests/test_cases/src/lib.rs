@@ -95,13 +95,18 @@ pub trait Test {
 pub struct TestCase {
     pub name: &'static str,
     pub test: Box<dyn Test>,
+    pub expects_failure: bool,
 }
 
 impl TestCase {
     // Your test can be parametrized, so you can add the same test multiple times constructed with
     // different parameters with and specify a different name here.
     pub fn new(name: &'static str, test: Box<dyn Test>) -> Self {
-        Self { name, test }
+        Self { name, test, expects_failure: false }
+    }
+
+    pub fn xfail(name: &'static str, test: Box<dyn Test>) -> Self {
+        Self { name, test, expects_failure: true }
     }
 
     #[allow(dead_code)]
