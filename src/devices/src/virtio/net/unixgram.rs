@@ -1,25 +1,45 @@
+use libc::{c_void, iovec, msghdr};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
-    bind, connect, getsockopt, recv, send, setsockopt, socket, sockopt, AddressFamily, MsgFlags,
+    bind, connect, getsockopt, send, setsockopt, socket, sockopt, AddressFamily, MsgFlags,
     SockFlag, SockType, UnixAddr,
 };
+#[cfg(target_os = "linux")]
 use nix::unistd::unlink;
+use smallvec::SmallVec;
+use std::io::IoSlice;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use super::{write_virtio_net_hdr, FRAME_HEADER_LEN};
+use crate::virtio::queue::Queue;
+use crate::virtio::rx_queue_provider::RxQueueProvider;
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
+use crate::virtio::InterruptTransport;
+
+#[cfg(target_os = "macos")]
+use super::socket_x::msghdr_x;
 
 const VFKIT_MAGIC: [u8; 4] = *b"VFKT";
 
 pub struct Unixgram {
     fd: OwnedFd,
     include_vnet_header: bool,
+    tx_consumer: TxQueueConsumer,
+    rx_provider: RxQueueProvider,
 }
 
 impl Unixgram {
     /// Create the backend with a pre-established connection to the userspace network proxy.
-    pub fn new(fd: OwnedFd, include_vnet_header: bool) -> Self {
+    pub fn new(
+        fd: OwnedFd,
+        include_vnet_header: bool,
+        tx_queue: Queue,
+        rx_queue: Queue,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+    ) -> Self {
         // Ensure the socket is in non-blocking mode.
         match fcntl(&fd, FcntlArg::F_GETFL) {
             Ok(flags) => match OFlag::from_bits(flags) {
@@ -48,9 +68,14 @@ impl Unixgram {
             };
         }
 
+        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
+        let rx_provider = RxQueueProvider::new(rx_queue, mem, interrupt);
+
         Self {
             fd,
             include_vnet_header,
+            tx_consumer,
+            rx_provider,
         }
     }
 
@@ -59,6 +84,10 @@ impl Unixgram {
         path: PathBuf,
         send_vfkit_magic: bool,
         include_vnet_header: bool,
+        tx_queue: Queue,
+        rx_queue: Queue,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
     ) -> Result<Self, ConnectError> {
         // We cannot create a non-blocking socket on macOS here. This is done later in new().
         let fd = socket(
@@ -98,66 +127,232 @@ impl Unixgram {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        Ok(Self::new(fd, include_vnet_header))
+        Ok(Self::new(fd, include_vnet_header, tx_queue, rx_queue, mem, interrupt))
     }
 }
 
+const MAX_TX_BATCH: usize = 64;
+const MAX_RX_BATCH: usize = 64;
+
 impl NetBackend for Unixgram {
-    /// Try to read a frame the proxy. If no bytes are available reports ReadError::NothingRead
-    fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
-        let buf_offset = if !self.include_vnet_header {
-            write_virtio_net_hdr(buf)
+    fn send(&mut self) -> Result<(), WriteError> {
+        let skip = if !self.include_vnet_header {
+            super::vnet_hdr_len()
         } else {
             0
         };
 
-        let frame_length = match recv(
-            self.fd.as_raw_fd(),
-            &mut buf[buf_offset..],
-            MsgFlags::empty(),
-        ) {
-            Ok(f) => f,
-            #[allow(unreachable_patterns)]
-            Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
-                return Err(ReadError::NothingRead)
-            }
-            Err(e) => {
-                return Err(ReadError::Internal(e));
-            }
-        };
-        debug!("Read eth frame from proxy: {frame_length} bytes");
-        Ok(buf_offset + frame_length)
-    }
+        // Feed frames from queue
+        self.tx_consumer.feed(MAX_TX_BATCH, |iovecs| {
+            let mut slices_mut: &mut [IoSlice] = iovecs;
+            IoSlice::advance_slices(&mut slices_mut, skip);
+            slices_mut.iter().map(|s| s.len()).sum()
+        });
 
-    /// Try to write a frame to the proxy.
-    fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
-        let buf_offset = if !self.include_vnet_header {
-            hdr_len
-        } else {
-            // Unixgram backends don't include the frame length header.
-            FRAME_HEADER_LEN
-        };
+        if !self.tx_consumer.has_pending() {
+            return Ok(());
+        }
 
-        let ret = send(self.fd.as_raw_fd(), &buf[buf_offset..], MsgFlags::empty())
-            .map_err(WriteError::Internal)?;
-        debug!(
-            "Written frame size={}, written={}",
-            buf.len() - hdr_len,
-            ret
-        );
+        #[cfg(target_os = "linux")]
+        {
+            self.send_linux()?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            self.send_macos()?;
+        }
+
         Ok(())
     }
 
-    fn has_unfinished_write(&self) -> bool {
-        false
-    }
+    fn recv(&mut self) -> Result<(), ReadError> {
+        let vnet_offset = if !self.include_vnet_header {
+            super::vnet_hdr_len()
+        } else {
+            0
+        };
 
-    fn try_finish_write(&mut self, _hdr_len: usize, _buf: &[u8]) -> Result<(), WriteError> {
-        // The unixgram backend doesn't do partial writes.
+        // Feed buffers from queue
+        self.rx_provider.feed(MAX_RX_BATCH);
+
+        if self.rx_provider.pending_count() == 0 {
+            return Ok(());
+        }
+
+        let fd = self.fd.as_raw_fd();
+
+        self.rx_provider.produce(|buffers| {
+            let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
+
+            for buf in buffers.iter_mut() {
+                // Prepend vnet header if needed
+                if vnet_offset > 0 && !buf.is_empty() {
+                    let first = &mut buf[0];
+                    if first.len() >= vnet_offset {
+                        first[..vnet_offset].copy_from_slice(&super::DEFAULT_VNET_HDR);
+                    }
+                }
+
+                // Build iovecs skipping vnet header space
+                let mut raw_iovecs: SmallVec<[iovec; 4]> = SmallVec::new();
+                for (i, iov) in buf.iter().enumerate() {
+                    if i == 0 && vnet_offset > 0 {
+                        if iov.len() > vnet_offset {
+                            raw_iovecs.push(iovec {
+                                iov_base: unsafe { (iov.as_ptr() as *mut u8).add(vnet_offset) as *mut c_void },
+                                iov_len: iov.len() - vnet_offset,
+                            });
+                        }
+                    } else {
+                        raw_iovecs.push(iovec {
+                            iov_base: iov.as_ptr() as *mut c_void,
+                            iov_len: iov.len(),
+                        });
+                    }
+                }
+
+                if raw_iovecs.is_empty() {
+                    byte_counts.push(0);
+                    continue;
+                }
+
+                let mut msg: msghdr = unsafe { std::mem::zeroed() };
+                msg.msg_iov = raw_iovecs.as_mut_ptr();
+                msg.msg_iovlen = raw_iovecs.len() as _;
+
+                let ret = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
+                if ret > 0 {
+                    byte_counts.push(vnet_offset + ret as usize);
+                } else {
+                    byte_counts.push(0);
+                    break; // EAGAIN or error
+                }
+            }
+
+            byte_counts
+        });
+
         Ok(())
     }
 
     fn raw_socket_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Unixgram {
+    fn send_linux(&mut self) -> Result<(), WriteError> {
+        let fd = self.fd.as_raw_fd();
+
+        // TODO: Use sendmmsg for better performance. Currently using sendmsg in a loop
+        // due to complex lifetime issues with nix's MultiHeaders API.
+        let _ = self.tx_consumer.consume(|frames| {
+            let mut total_bytes = 0usize;
+
+            for frame in frames.iter().take(MAX_TX_BATCH) {
+                if frame.is_empty() {
+                    continue;
+                }
+
+                // Build iovec array from IoSlices
+                let iovecs: SmallVec<[iovec; 4]> = frame
+                    .iter()
+                    .map(|s| iovec {
+                        iov_base: s.as_ptr() as *mut c_void,
+                        iov_len: s.len(),
+                    })
+                    .collect();
+
+                let mut msg: msghdr = unsafe { std::mem::zeroed() };
+                msg.msg_iov = iovecs.as_ptr() as *mut iovec;
+                msg.msg_iovlen = iovecs.len() as _;
+
+                let ret = unsafe { libc::sendmsg(fd, &msg, libc::MSG_DONTWAIT) };
+                if ret >= 0 {
+                    total_bytes += ret as usize;
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    } else if err.raw_os_error() == Some(libc::EPIPE) {
+                        return Err(WriteError::ProcessNotRunning);
+                    } else {
+                        return Err(WriteError::Internal(nix::Error::from_raw(
+                            err.raw_os_error().unwrap_or(libc::EIO),
+                        )));
+                    }
+                }
+            }
+
+            Ok(total_bytes)
+        })?;
+
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Unixgram {
+    fn send_macos(&mut self) -> Result<(), WriteError> {
+        let fd = self.fd.as_raw_fd();
+
+        let _ = self.tx_consumer.consume(|frames| {
+            if frames.is_empty() {
+                return Ok(0usize);
+            }
+
+            // Build adjusted slices (vnet header already skipped in feed())
+            let mut adjusted: SmallVec<[SmallVec<[IoSlice<'_>; 4]>; 32]> = frames
+                .iter()
+                .take(MAX_TX_BATCH)
+                .map(|frame| frame.iter().cloned().collect())
+                .collect();
+
+            if adjusted.is_empty() {
+                return Ok(0);
+            }
+
+            // Build msghdr_x array - IoSlice is repr(transparent) over iovec
+            let mut msghdrs: SmallVec<[msghdr_x; 32]> = adjusted
+                .iter_mut()
+                .map(|slices| msghdr_x {
+                    msg_iov: slices.as_mut_ptr() as *mut iovec,
+                    msg_iovlen: slices.len() as c_int,
+                    ..Default::default()
+                })
+                .collect();
+
+            let ret = unsafe {
+                super::socket_x::sendmsg_x(
+                    fd,
+                    msghdrs.as_ptr(),
+                    msghdrs.len() as libc::c_uint,
+                    libc::MSG_DONTWAIT,
+                )
+            };
+
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return match err.kind() {
+                    io::ErrorKind::WouldBlock => Ok(0), // Nothing sent, keep pending
+                    io::ErrorKind::BrokenPipe => Err(WriteError::ProcessNotRunning),
+                    _ => Err(WriteError::Internal(nix::Error::from_raw(
+                        err.raw_os_error().unwrap_or(libc::EIO),
+                    ))),
+                };
+            }
+
+            let messages_sent = ret as usize;
+            let bytes: usize = msghdrs[..messages_sent]
+                .iter()
+                .map(|m| m.msg_datalen)
+                .sum();
+
+            Ok(bytes)
+        })?;
+
+        Ok(())
     }
 }

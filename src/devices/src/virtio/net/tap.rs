@@ -1,20 +1,27 @@
 use libc::{
-    c_char, c_int, ifreq, IFF_NO_PI, IFF_TAP, IFF_VNET_HDR, TUN_F_CSUM, TUN_F_TSO4, TUN_F_TSO6,
-    TUN_F_UFO,
+    c_char, c_int, c_void, ifreq, size_t, IFF_NO_PI, IFF_TAP, IFF_VNET_HDR, TUN_F_CSUM,
+    TUN_F_TSO4, TUN_F_TSO6, TUN_F_UFO,
 };
 use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
 use nix::sys::stat::Mode;
-use nix::unistd::{read, write};
+use nix::sys::uio::writev;
 use nix::{ioctl_write_int, ioctl_write_ptr};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use smallvec::SmallVec;
+use std::io::IoSlice;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::{io, mem, ptr};
 use virtio_bindings::virtio_net::{
     VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6,
     VIRTIO_NET_F_GUEST_UFO,
 };
+use vm_memory::{GuestMemoryMmap, VolatileSlice};
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use super::{write_virtio_net_hdr, FRAME_HEADER_LEN};
+use crate::virtio::file_traits::FileReadWriteVolatile;
+use crate::virtio::queue::Queue;
+use crate::virtio::rx_queue_provider::RxQueueProvider;
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
+use crate::virtio::InterruptTransport;
 
 ioctl_write_ptr!(tunsetiff, b'T', 202, c_int);
 ioctl_write_int!(tunsetoffload, b'T', 208);
@@ -23,6 +30,8 @@ ioctl_write_ptr!(tunsetvnethdrsz, b'T', 216, c_int);
 pub struct Tap {
     fd: OwnedFd,
     include_vnet_header: bool,
+    tx_consumer: TxQueueConsumer,
+    rx_provider: RxQueueProvider,
 }
 
 impl Tap {
@@ -31,6 +40,10 @@ impl Tap {
         tap_name: String,
         vnet_features: u64,
         include_vnet_header: bool,
+        tx_queue: Queue,
+        rx_queue: Queue,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
     ) -> Result<Self, ConnectError> {
         let fd = match open("/dev/net/tun", OFlag::O_RDWR, Mode::empty()) {
             Ok(fd) => fd,
@@ -95,59 +108,203 @@ impl Tap {
             Err(e) => error!("couldn't obtain fd flags id={fd:?}, err={e}"),
         };
 
+        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
+        let rx_provider = RxQueueProvider::new(rx_queue, mem, interrupt);
+
         Ok(Self {
             fd,
             include_vnet_header,
+            tx_consumer,
+            rx_provider,
         })
     }
 }
 
+const MAX_TX_BATCH: usize = 64;
+const MAX_RX_BATCH: usize = 1; // Tap only supports one frame at a time
+
 impl NetBackend for Tap {
-    /// Try to read a frame from the tap devie. If no bytes are available reports
-    /// ReadError::NothingRead.
-    fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
-        let buf_offset = if !self.include_vnet_header {
-            write_virtio_net_hdr(buf)
+    fn send(&mut self) -> Result<(), WriteError> {
+        let skip = if !self.include_vnet_header {
+            super::vnet_hdr_len()
         } else {
             0
         };
 
-        let frame_length = match read(&self.fd, &mut buf[buf_offset..]) {
-            Ok(f) => f,
-            #[allow(unreachable_patterns)]
-            Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
-                return Err(ReadError::NothingRead)
-            }
-            Err(e) => {
-                return Err(ReadError::Internal(e));
-            }
-        };
-        debug!("Read eth frame from tap: {frame_length} bytes");
-        Ok(buf_offset + frame_length)
-    }
+        // Feed frames from queue
+        self.tx_consumer.feed(MAX_TX_BATCH, |iovecs| {
+            let mut slices_mut: &mut [IoSlice] = iovecs;
+            IoSlice::advance_slices(&mut slices_mut, skip);
+            // Return byte count after skip
+            slices_mut.iter().map(|s| s.len()).sum()
+        });
 
-    /// Try to write a frame to the tap device.
-    fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
-        let buf_offset = if !self.include_vnet_header {
-            hdr_len
-        } else {
-            FRAME_HEADER_LEN
-        };
-        let ret = write(&self.fd, &buf[buf_offset..]).map_err(WriteError::Internal)?;
-        debug!("Written frame size={}, written={}", buf.len(), ret);
+        if !self.tx_consumer.has_pending() {
+            return Ok(());
+        }
+
+        let fd = self.fd.as_fd();
+
+        // Send each frame with writev (tap doesn't support batching)
+        let _ = self.tx_consumer.consume(|frames| {
+            let mut total_bytes = 0usize;
+
+            for frame in frames {
+                let mut slices: SmallVec<[IoSlice<'_>; 4]> = frame.iter().cloned().collect();
+                let slices_ref: &mut [IoSlice] = &mut slices;
+
+                if slices_ref.is_empty() {
+                    continue;
+                }
+
+                match writev(fd, slices_ref) {
+                    Ok(n) => total_bytes += n,
+                    Err(nix::errno::Errno::EAGAIN) => break,
+                    Err(nix::errno::Errno::EPIPE) => {
+                        return Err(WriteError::ProcessNotRunning);
+                    }
+                    Err(e) => return Err(WriteError::Internal(e)),
+                }
+            }
+            Ok(total_bytes)
+        })?;
+
         Ok(())
     }
 
-    fn has_unfinished_write(&self) -> bool {
-        false
-    }
+    fn recv(&mut self) -> Result<(), ReadError> {
+        // Feed buffers from queue
+        self.rx_provider.feed(MAX_RX_BATCH);
 
-    fn try_finish_write(&mut self, _hdr_len: usize, _buf: &[u8]) -> Result<(), WriteError> {
-        // The tap backend doesn't do partial writes.
+        if self.rx_provider.pending_count() == 0 {
+            return Ok(());
+        }
+
+        let fd = self.fd.as_raw_fd();
+
+        self.rx_provider.produce(|buffers| {
+            let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
+
+            for buf in buffers.iter_mut() {
+                // Convert IoSliceMut to iovec for readv
+                let iovecs: SmallVec<[libc::iovec; 4]> = buf
+                    .iter()
+                    .map(|s| libc::iovec {
+                        iov_base: s.as_ptr() as *mut c_void,
+                        iov_len: s.len(),
+                    })
+                    .collect();
+
+                if iovecs.is_empty() {
+                    byte_counts.push(0);
+                    continue;
+                }
+
+                let ret = unsafe {
+                    libc::readv(fd, iovecs.as_ptr(), iovecs.len() as c_int)
+                };
+
+                if ret > 0 {
+                    byte_counts.push(ret as usize);
+                } else {
+                    byte_counts.push(0);
+                    break; // EAGAIN or error, stop receiving
+                }
+            }
+
+            byte_counts
+        });
+
         Ok(())
     }
 
     fn raw_socket_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+impl FileReadWriteVolatile for Tap {
+    fn read_volatile(&mut self, slice: VolatileSlice) -> io::Result<usize> {
+        // SAFETY: Only bytes inside the slice are accessed and the kernel handles
+        // arbitrary memory for I/O.
+        let ret = unsafe {
+            libc::read(
+                self.fd.as_raw_fd(),
+                slice.ptr_guard_mut().as_ptr() as *mut c_void,
+                slice.len(),
+            )
+        };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn read_vectored_volatile(&mut self, bufs: &[VolatileSlice]) -> io::Result<usize> {
+        let iovecs: Vec<libc::iovec> = bufs
+            .iter()
+            .map(|s| libc::iovec {
+                iov_base: s.ptr_guard_mut().as_ptr() as *mut c_void,
+                iov_len: s.len() as size_t,
+            })
+            .collect();
+
+        if iovecs.is_empty() {
+            return Ok(0);
+        }
+
+        // SAFETY: Only bytes inside the buffers are accessed and the kernel handles
+        // arbitrary memory for I/O.
+        let ret = unsafe {
+            libc::readv(self.fd.as_raw_fd(), iovecs.as_ptr(), iovecs.len() as c_int)
+        };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn write_volatile(&mut self, slice: VolatileSlice) -> io::Result<usize> {
+        // SAFETY: Only bytes inside the slice are accessed and the kernel handles
+        // arbitrary memory for I/O.
+        let ret = unsafe {
+            libc::write(
+                self.fd.as_raw_fd(),
+                slice.ptr_guard().as_ptr() as *const c_void,
+                slice.len(),
+            )
+        };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn write_vectored_volatile(&mut self, bufs: &[VolatileSlice]) -> io::Result<usize> {
+        let iovecs: Vec<libc::iovec> = bufs
+            .iter()
+            .map(|s| libc::iovec {
+                iov_base: s.ptr_guard_mut().as_ptr() as *mut c_void,
+                iov_len: s.len() as size_t,
+            })
+            .collect();
+
+        if iovecs.is_empty() {
+            return Ok(0);
+        }
+
+        // SAFETY: Only bytes inside the buffers are accessed and the kernel handles
+        // arbitrary memory for I/O.
+        let ret = unsafe {
+            libc::writev(self.fd.as_raw_fd(), iovecs.as_ptr(), iovecs.len() as c_int)
+        };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }

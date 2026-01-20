@@ -32,6 +32,10 @@ mod mmio;
 #[cfg(feature = "net")]
 pub mod net;
 mod queue;
+#[cfg(feature = "net")]
+pub mod rx_queue_provider;
+#[cfg(feature = "net")]
+pub mod tx_queue_consumer;
 #[cfg(not(feature = "tee"))]
 pub mod rng;
 #[cfg(feature = "snd")]
