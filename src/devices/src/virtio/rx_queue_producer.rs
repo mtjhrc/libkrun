@@ -105,7 +105,7 @@ impl RxQueueProducer {
         // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
         let byte_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
         let static_slice: &'static mut [u8] = unsafe { std::mem::transmute(byte_slice) };
-
+        
         Some(IoSliceMut::new(static_slice))
     }
 

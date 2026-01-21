@@ -34,7 +34,8 @@ pub struct Tap {
     rx_provider: RxQueueProducer,
 }
 
-impl Tap {
+// FIXME: remove include_vnet_header parameter, it is always included!
+ impl Tap {
     /// Create an endpoint using the file descriptor of a tap device
     pub fn new(
         tap_name: String,
@@ -126,7 +127,7 @@ const MAX_RX_BATCH: usize = 1; // Tap only supports one frame at a time
 impl NetBackend for Tap {
     fn send(&mut self) -> Result<(), WriteError> {
         let skip = if !self.include_vnet_header {
-            super::vnet_hdr_len()
+            todo!("This feature is not supported and the option should be removed!")
         } else {
             0
         };
