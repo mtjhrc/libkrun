@@ -35,7 +35,9 @@ mod queue;
 #[cfg(feature = "net")]
 pub mod rx_queue_provider;
 #[cfg(feature = "net")]
-pub mod tx_queue_consumer;
+pub mod tx_queue_producer;
+#[cfg(all(feature = "net", test))]
+mod queue_tests;
 #[cfg(not(feature = "tee"))]
 pub mod rng;
 #[cfg(feature = "snd")]

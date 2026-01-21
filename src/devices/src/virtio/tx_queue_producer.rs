@@ -98,7 +98,7 @@ impl TxQueueConsumer {
     // TODO: The IoSlice lifetime should ideally be tied to &self rather than 'static,
     // but this causes borrow checker conflicts. The 'static is safe because
     // TxQueueConsumer owns the GuestMemoryMmap and outlives all IoSlice usage.
-    pub fn feed<F>(&mut self, max_frames: usize, mut transform: F) -> usize
+    pub fn feed<F>(&mut self, max_frames: usize, mut transform_chain: F) -> usize
     where
         F: FnMut(&mut SmallVec<[IoSlice<'static>; 4]>) -> usize,
     {
@@ -140,7 +140,7 @@ impl TxQueueConsumer {
             }
 
             // Apply user callback to transform iovecs
-            let byte_count = transform(&mut iovecs);
+            let byte_count = transform_chain(&mut iovecs);
 
             let cumulative = self.cumulative_bytes.last().copied().unwrap_or(0) + byte_count;
 
@@ -225,21 +225,6 @@ impl TxQueueConsumer {
         }
     }
 
-    /// Advance by N frames (for datagram sockets - sendmmsg returns message count).
-    ///
-    /// Calls add_used() for each frame and signals interrupt if needed.
-    pub fn advance_frames(&mut self, count: usize) {
-        let end = std::cmp::min(self.sent_frames + count, self.frame_meta.len());
-        for i in self.sent_frames..end {
-            let meta = &self.frame_meta[i];
-            if let Err(e) = self.queue.add_used(&self.mem, meta.head_index, 0) {
-                log::error!("TxQueueConsumer: failed to add_used: {e}");
-            }
-        }
-        self.sent_frames = end;
-        self.signal_used_if_needed();
-    }
-
     /// Advance by N bytes (for stream sockets - writev returns byte count).
     ///
     /// Calls add_used() for completed frames and signals interrupt.
@@ -279,6 +264,10 @@ impl TxQueueConsumer {
     /// Clear completed frames from buffers.
     ///
     /// Call this after processing to free memory from completed frames.
+    ///
+    /// Note: `partial_bytes` is preserved across compact because it tracks bytes
+    /// sent into the first pending frame (which was at index `sent_frames` before
+    /// compact and becomes index 0 after compact).
     pub fn compact(&mut self) {
         if self.sent_frames > 0 {
             self.frame_iovecs.drain(..self.sent_frames);
@@ -299,7 +288,8 @@ impl TxQueueConsumer {
             }
 
             self.sent_frames = 0;
-            self.partial_bytes = 0;
+            // Note: partial_bytes is NOT reset - it tracks bytes sent into the
+            // first remaining frame (now at index 0).
         }
     }
 

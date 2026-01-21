@@ -16,7 +16,7 @@ use super::InterruptTransport;
 /// Pops descriptor chains from the virtio RX queue and provides writable
 /// iovecs for receiving data. Unused buffers are kept pending for the next
 /// produce() call; used buffers get add_used() with their byte counts.
-pub struct RxQueueProvider {
+pub struct RxQueueProducer {
     /// The virtio RX queue (owned)
     queue: Queue,
     /// Guest memory reference
@@ -30,7 +30,8 @@ pub struct RxQueueProvider {
     pending_iovecs: SmallVec<[SmallVec<[IoSliceMut<'static>; 4]>; 32]>,
 }
 
-impl RxQueueProvider {
+
+impl RxQueueProducer {
     /// Create a new RxQueueProvider with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
@@ -130,12 +131,12 @@ impl RxQueueProvider {
 
         let byte_counts = f(&mut self.pending_iovecs);
 
-        // Process results - complete frames with bytes, keep others
+        // Process results - complete frames with bytes until first zero.
+        // Once we hit a zero-byte frame, all remaining frames are kept pending
+        // (receive is sequential, so if frame N is empty, frame N+1 can't have data).
         let mut completed = 0;
-        let mut keep_heads: SmallVec<[u16; 32]> = SmallVec::new();
-        let mut keep_iovecs: SmallVec<[SmallVec<[IoSliceMut<'static>; 4]>; 32]> = SmallVec::new();
 
-        for (i, head_index) in self.pending_heads.drain(..).enumerate() {
+        for (i, &head_index) in self.pending_heads.iter().enumerate() {
             let bytes = byte_counts.get(i).copied().unwrap_or(0);
 
             if bytes > 0 {
@@ -145,23 +146,15 @@ impl RxQueueProvider {
                 }
                 completed += 1;
             } else {
-                // Frame not used - keep for next produce()
-                keep_heads.push(head_index);
+                // First unfilled frame - stop processing, keep this and all remaining
+                break;
             }
         }
 
-        // Rebuild pending_iovecs keeping only unused ones
-        for (i, iovecs) in self.pending_iovecs.drain(..).enumerate() {
-            let bytes = byte_counts.get(i).copied().unwrap_or(0);
-            if bytes == 0 {
-                keep_iovecs.push(iovecs);
-            }
-        }
-
-        self.pending_heads = keep_heads;
-        self.pending_iovecs = keep_iovecs;
-
+        // Remove completed frames from the front
         if completed > 0 {
+            self.pending_heads.drain(..completed);
+            self.pending_iovecs.drain(..completed);
             self.signal_used_if_needed();
         }
 

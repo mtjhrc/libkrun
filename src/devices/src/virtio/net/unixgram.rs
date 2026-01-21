@@ -14,8 +14,8 @@ use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_provider::RxQueueProvider;
-use crate::virtio::tx_queue_consumer::TxQueueConsumer;
+use crate::virtio::rx_queue_provider::RxQueueProducer;
+use crate::virtio::tx_queue_producer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 #[cfg(target_os = "macos")]
@@ -27,7 +27,7 @@ pub struct Unixgram {
     fd: OwnedFd,
     include_vnet_header: bool,
     tx_consumer: TxQueueConsumer,
-    rx_provider: RxQueueProvider,
+    rx_producer: RxQueueProducer,
 }
 
 impl Unixgram {
@@ -69,13 +69,13 @@ impl Unixgram {
         }
 
         let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
-        let rx_provider = RxQueueProvider::new(rx_queue, mem, interrupt);
+        let rx_provider = RxQueueProducer::new(rx_queue, mem, interrupt);
 
         Self {
             fd,
             include_vnet_header,
             tx_consumer,
-            rx_provider,
+            rx_producer: rx_provider,
         }
     }
 
@@ -174,15 +174,15 @@ impl NetBackend for Unixgram {
         };
 
         // Feed buffers from queue
-        self.rx_provider.feed(MAX_RX_BATCH);
+        self.rx_producer.feed(MAX_RX_BATCH);
 
-        if self.rx_provider.pending_count() == 0 {
+        if self.rx_producer.pending_count() == 0 {
             return Ok(());
         }
 
         let fd = self.fd.as_raw_fd();
 
-        self.rx_provider.produce(|buffers| {
+        self.rx_producer.produce(|buffers| {
             let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
 
             for buf in buffers.iter_mut() {

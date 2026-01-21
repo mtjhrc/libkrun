@@ -19,8 +19,8 @@ use vm_memory::{GuestMemoryMmap, VolatileSlice};
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
 use crate::virtio::file_traits::FileReadWriteVolatile;
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_provider::RxQueueProvider;
-use crate::virtio::tx_queue_consumer::TxQueueConsumer;
+use crate::virtio::rx_queue_provider::RxQueueProducer;
+use crate::virtio::tx_queue_producer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 ioctl_write_ptr!(tunsetiff, b'T', 202, c_int);
@@ -31,7 +31,7 @@ pub struct Tap {
     fd: OwnedFd,
     include_vnet_header: bool,
     tx_consumer: TxQueueConsumer,
-    rx_provider: RxQueueProvider,
+    rx_provider: RxQueueProducer,
 }
 
 impl Tap {
@@ -109,7 +109,7 @@ impl Tap {
         };
 
         let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
-        let rx_provider = RxQueueProvider::new(rx_queue, mem, interrupt);
+        let rx_provider = RxQueueProducer::new(rx_queue, mem, interrupt);
 
         Ok(Self {
             fd,
