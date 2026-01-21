@@ -13,8 +13,8 @@ use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_provider::RxQueueProducer;
-use crate::virtio::tx_queue_producer::TxQueueConsumer;
+use crate::virtio::rx_queue_producer::RxQueueProducer;
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};

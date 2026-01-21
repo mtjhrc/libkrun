@@ -46,8 +46,6 @@ pub struct TxQueueConsumer {
     frame_iovecs: SmallVec<[SmallVec<[IoSlice<'static>; 4]>; 32]>,
     /// Metadata for each frame (parallel to frame_iovecs)
     frame_meta: SmallVec<[FrameMeta; 32]>,
-    /// Cumulative byte offsets for stream socket partial write tracking
-    cumulative_bytes: SmallVec<[usize; 32]>,
     // TODO: Implement a proper HeaderAllocator that the feed() callback can use to safely
     // allocate header bytes and get IoSlice<'static> references. The allocator would:
     // 1. Use a pre-reserved Vec<u8> buffer to prevent reallocation
@@ -57,7 +55,7 @@ pub struct TxQueueConsumer {
 
     /// Number of frames fully sent
     sent_frames: usize,
-    /// For stream sockets: bytes sent within partially-sent frame
+    /// Bytes consumed from the first pending frame (for partial write tracking)
     partial_bytes: usize,
 }
 
@@ -70,7 +68,6 @@ impl TxQueueConsumer {
             interrupt,
             frame_iovecs: SmallVec::new(),
             frame_meta: SmallVec::new(),
-            cumulative_bytes: SmallVec::new(),
             sent_frames: 0,
             partial_bytes: 0,
         }
@@ -142,14 +139,11 @@ impl TxQueueConsumer {
             // Apply user callback to transform iovecs
             let byte_count = transform_chain(&mut iovecs);
 
-            let cumulative = self.cumulative_bytes.last().copied().unwrap_or(0) + byte_count;
-
             self.frame_iovecs.push(iovecs);
             self.frame_meta.push(FrameMeta {
                 head_index,
                 byte_count,
             });
-            self.cumulative_bytes.push(cumulative);
             added += 1;
         }
 
@@ -225,38 +219,26 @@ impl TxQueueConsumer {
         }
     }
 
-    /// Advance by N bytes (for stream sockets - writev returns byte count).
+    /// Advance by N bytes, completing frames as bytes are consumed.
     ///
     /// Calls add_used() for completed frames and signals interrupt.
     pub fn advance_bytes(&mut self, bytes: usize) {
-        // Calculate total bytes sent so far (including this call)
-        let base = if self.sent_frames > 0 {
-            self.cumulative_bytes[self.sent_frames - 1]
-        } else {
-            0
-        };
-        let total_sent = base + self.partial_bytes + bytes;
+        self.partial_bytes += bytes;
 
-        // Find and complete frames
+        // Complete frames while we have enough bytes
         while self.sent_frames < self.frame_meta.len() {
-            if self.cumulative_bytes[self.sent_frames] <= total_sent {
+            let frame_size = self.frame_meta[self.sent_frames].byte_count;
+            if self.partial_bytes >= frame_size {
                 let meta = &self.frame_meta[self.sent_frames];
                 if let Err(e) = self.queue.add_used(&self.mem, meta.head_index, 0) {
                     log::error!("TxQueueConsumer: failed to add_used: {e}");
                 }
+                self.partial_bytes -= frame_size;
                 self.sent_frames += 1;
             } else {
                 break;
             }
         }
-
-        // Update partial bytes for current incomplete frame
-        let new_base = if self.sent_frames > 0 {
-            self.cumulative_bytes[self.sent_frames - 1]
-        } else {
-            0
-        };
-        self.partial_bytes = total_sent - new_base;
 
         self.signal_used_if_needed();
     }
@@ -264,32 +246,13 @@ impl TxQueueConsumer {
     /// Clear completed frames from buffers.
     ///
     /// Call this after processing to free memory from completed frames.
-    ///
-    /// Note: `partial_bytes` is preserved across compact because it tracks bytes
-    /// sent into the first pending frame (which was at index `sent_frames` before
-    /// compact and becomes index 0 after compact).
+    /// Note: `partial_bytes` is preserved - it tracks bytes consumed from the
+    /// first pending frame (now at index 0 after compact).
     pub fn compact(&mut self) {
         if self.sent_frames > 0 {
             self.frame_iovecs.drain(..self.sent_frames);
             self.frame_meta.drain(..self.sent_frames);
-
-            // Recalculate cumulative bytes
-            let offset = if self.sent_frames <= self.cumulative_bytes.len() {
-                self.cumulative_bytes
-                    .get(self.sent_frames - 1)
-                    .copied()
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            self.cumulative_bytes.drain(..self.sent_frames);
-            for c in &mut self.cumulative_bytes {
-                *c -= offset;
-            }
-
             self.sent_frames = 0;
-            // Note: partial_bytes is NOT reset - it tracks bytes sent into the
-            // first remaining frame (now at index 0).
         }
     }
 

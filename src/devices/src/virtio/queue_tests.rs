@@ -12,8 +12,8 @@ mod tests {
 
     use crate::legacy::DummyIrqChip;
     use crate::virtio::queue::tests::{VirtQueue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
-    use crate::virtio::rx_queue_provider::RxQueueProducer;
-    use crate::virtio::tx_queue_producer::TxQueueConsumer;
+    use crate::virtio::rx_queue_producer::RxQueueProducer;
+    use crate::virtio::tx_queue_consumer::TxQueueConsumer;
     use crate::virtio::InterruptTransport;
 
     // Memory layout constants
@@ -448,35 +448,21 @@ mod tests {
         }
 
         #[test]
-        fn test_advance_frames() {
-            let mem = create_memory();
-            let (mut consumer, vq) = setup_tx_consumer(&mem);
-
-            vq.builder(&mem).readable_frames(&[b"data", b"data", b"data"]);
-
-            consumer.feed(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
-            assert_eq!(consumer.pending_count(), 3);
-
-            consumer.advance_frames(2);
-            consumer.compact();
-
-            assert_eq!(consumer.pending_count(), 1);
-        }
-
-        #[test]
         fn test_compact() {
             let mem = create_memory();
             let (mut consumer, vq) = setup_tx_consumer(&mem);
 
+            // 5 frames of 4 bytes each
             vq.builder(&mem).readable_frames(&[b"test", b"test", b"test", b"test", b"test"]);
 
             consumer.feed(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
-            consumer.advance_frames(3);
+            assert_eq!(consumer.frame_iovecs().len(), 5);
+
+            // Advance 12 bytes = 3 complete frames
+            consumer.advance_bytes(12);
             assert_eq!(consumer.pending_count(), 2);
 
             consumer.compact();

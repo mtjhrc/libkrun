@@ -33,9 +33,9 @@ mod mmio;
 pub mod net;
 mod queue;
 #[cfg(feature = "net")]
-pub mod rx_queue_provider;
+pub mod rx_queue_producer;
 #[cfg(feature = "net")]
-pub mod tx_queue_producer;
+pub mod tx_queue_consumer;
 #[cfg(all(feature = "net", test))]
 mod queue_tests;
 #[cfg(not(feature = "tee"))]

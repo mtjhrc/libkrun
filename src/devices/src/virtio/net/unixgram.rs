@@ -14,8 +14,8 @@ use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_provider::RxQueueProducer;
-use crate::virtio::tx_queue_producer::TxQueueConsumer;
+use crate::virtio::rx_queue_producer::RxQueueProducer;
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 #[cfg(target_os = "macos")]
