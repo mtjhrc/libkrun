@@ -56,10 +56,12 @@ impl RxQueueProducer {
 
         while self.pending_count() < max_frames {
             let Some(head) = self.queue.pop(&self.mem) else {
+                log::trace!("RxQueueProducer::feed() queue empty");
                 break;
             };
 
             let head_index = head.index;
+            log::trace!("RxQueueProducer::feed() got descriptor head_index={}", head_index);
             let mut iovecs: SmallVec<[IoSliceMut<'static>; 4]> = SmallVec::new();
             let mut valid = true;
 

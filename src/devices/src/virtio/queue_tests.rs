@@ -316,7 +316,7 @@ mod tests {
 
             vq.builder(&mem).readable(b"Hello, World!").end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -341,7 +341,7 @@ mod tests {
                 .readable(b"Second")
                 .end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -361,7 +361,7 @@ mod tests {
 
             vq.builder(&mem).readable_frames(&[b"Frame1", b"Frame2", b"Frame3"]);
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -377,14 +377,14 @@ mod tests {
 
             vq.builder(&mem).readable_frames(&[b"F0", b"F1", b"F2", b"F3", b"F4"]);
 
-            let added = consumer.feed(2, |iovecs| {
+            let added = consumer.feed_with_transform(2, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
             assert_eq!(added, 2);
             assert_eq!(consumer.pending_count(), 2);
 
             // Already at limit
-            let added2 = consumer.feed(2, |iovecs| {
+            let added2 = consumer.feed_with_transform(2, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
             assert_eq!(added2, 0);
@@ -397,7 +397,7 @@ mod tests {
 
             vq.builder(&mem).readable(b"TestData12345").end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 // Skip 4 bytes (like skipping vnet header)
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 4);
@@ -414,7 +414,7 @@ mod tests {
 
             vq.builder(&mem).readable_frames(&[b"FirstFrame", b"SecondFrame"]);
 
-            consumer.feed(10, |iovecs| {
+            consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
             assert_eq!(consumer.pending_count(), 2);
@@ -439,7 +439,7 @@ mod tests {
 
             vq.builder(&mem).readable_frames(&[b"Frame00000", b"Frame11111", b"Frame22222"]);
 
-            consumer.feed(10, |iovecs| {
+            consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -455,7 +455,7 @@ mod tests {
             // 5 frames of 4 bytes each
             vq.builder(&mem).readable_frames(&[b"test", b"test", b"test", b"test", b"test"]);
 
-            consumer.feed(10, |iovecs| {
+            consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -475,7 +475,7 @@ mod tests {
             let mem = create_memory();
             let (mut consumer, _vq) = setup_tx_consumer(&mem);
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -491,7 +491,7 @@ mod tests {
 
             vq.builder(&mem).readable(b"TestData").end_chain();
 
-            consumer.feed(10, |iovecs| {
+            consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -511,7 +511,7 @@ mod tests {
                 .writable(100)
                 .end_chain();
 
-            consumer.feed(10, |iovecs| {
+            consumer.feed_with_transform(10, |iovecs| {
                 iovecs.iter().map(|iov| iov.len()).sum()
             });
 
@@ -538,7 +538,7 @@ mod tests {
 
             vq.builder(&mem).readable(&data).end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 12);
                 slices.iter().map(|s| s.len()).sum()
@@ -571,7 +571,7 @@ mod tests {
 
             vq.builder(&mem).readable(&data).end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 12);
                 let payload_len: usize = slices.iter().map(|s| s.len()).sum();
@@ -601,7 +601,7 @@ mod tests {
                 .readable(&data1).end_chain()
                 .readable(&data2).end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 10);
                 slices.iter().map(|s| s.len()).sum()
@@ -631,7 +631,7 @@ mod tests {
 
             vq.builder(&mem).readable(&data).end_chain();
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 12); // skip virtio header
                 let payload_len: usize = slices.iter().map(|s| s.len()).sum();
@@ -676,7 +676,7 @@ mod tests {
             let interrupt = create_interrupt();
             let mut consumer = TxQueueConsumer::new(queue, mem.clone(), interrupt);
 
-            let added = consumer.feed(10, |iovecs| {
+            let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 10); // skip 10-byte header
                 slices.iter().map(|s| s.len()).sum()
@@ -721,7 +721,7 @@ mod tests {
             let interrupt = create_interrupt();
             let mut consumer = TxQueueConsumer::new(queue, mem.clone(), interrupt);
 
-            consumer.feed(10, |iovecs| iovecs.iter().map(|iov| iov.len()).sum());
+            consumer.feed_with_transform(10, |iovecs| iovecs.iter().map(|iov| iov.len()).sum());
             assert_eq!(consumer.pending_count(), 2);
 
             // Send 45 bytes (frame 1 complete, 15 into frame 2)
@@ -734,7 +734,7 @@ mod tests {
             // Guest adds more descriptors (simulating queue refill)
             harness.add_readable(&data); // frame 3
 
-            consumer.feed(10, |iovecs| iovecs.iter().map(|iov| iov.len()).sum());
+            consumer.feed_with_transform(10, |iovecs| iovecs.iter().map(|iov| iov.len()).sum());
             assert_eq!(consumer.pending_count(), 2); // frame 2 (partial) + frame 3
 
             // Send remaining 15 of frame 2 + all 30 of frame 3 = 45

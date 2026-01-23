@@ -73,6 +73,16 @@ impl TxQueueConsumer {
         }
     }
 
+    /// Feed descriptor chains from queue (simple version).
+    ///
+    /// This is the common case - just sums the byte count of each chain.
+    /// For advanced use cases (e.g., inserting headers), use `feed_with_transform`.
+    pub fn feed(&mut self, max_frames: usize) -> usize {
+        self.feed_with_transform(max_frames, |iovecs| {
+            iovecs.iter().map(|s| s.len()).sum()
+        })
+    }
+
     /// Feed descriptor chains from queue, applying callback to each.
     ///
     /// The callback receives mutable iovecs from the descriptor chain and can:
@@ -95,7 +105,7 @@ impl TxQueueConsumer {
     // TODO: The IoSlice lifetime should ideally be tied to &self rather than 'static,
     // but this causes borrow checker conflicts. The 'static is safe because
     // TxQueueConsumer owns the GuestMemoryMmap and outlives all IoSlice usage.
-    pub fn feed<F>(&mut self, max_frames: usize, mut transform_chain: F) -> usize
+    pub fn feed_with_transform<F>(&mut self, max_frames: usize, mut transform_chain: F) -> usize
     where
         F: FnMut(&mut SmallVec<[IoSlice<'static>; 4]>) -> usize,
     {
@@ -103,9 +113,11 @@ impl TxQueueConsumer {
 
         while self.pending_count() < max_frames {
             let Some(head) = self.queue.pop(&self.mem) else {
+                log::trace!("TxQueueConsumer::feed() queue empty");
                 break;
             };
             let head_index = head.index;
+            log::trace!("TxQueueConsumer::feed() got descriptor head_index={}", head_index);
 
             // Build iovecs from descriptor chain
             let mut iovecs: SmallVec<[IoSlice<'static>; 4]> = SmallVec::new();

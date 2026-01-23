@@ -204,6 +204,7 @@ const MAX_TX_BATCH: usize = 64;
 
 impl NetBackend for Unixstream {
     fn send(&mut self) -> Result<(), WriteError> {
+        log::trace!("Unixstream::send() called");
         let skip = if !self.backend_handles_vnet_hdr {
             super::vnet_hdr_len()
         } else {
@@ -211,11 +212,12 @@ impl NetBackend for Unixstream {
         };
 
         // Feed frames from queue
-        self.tx_consumer.feed(MAX_TX_BATCH, |iovecs| {
+        let fed = self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |iovecs| {
             let mut slices_mut: &mut [IoSlice] = iovecs;
             IoSlice::advance_slices(&mut slices_mut, skip);
             slices_mut.iter().map(|s| s.len()).sum()
         });
+        log::trace!("Unixstream::send() fed {} frames, pending={}", fed, self.tx_consumer.pending_count());
 
         if !self.tx_consumer.has_pending() {
             return Ok(());
@@ -279,6 +281,7 @@ impl NetBackend for Unixstream {
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
+        log::trace!("Unixstream::recv() called");
         let vnet_offset = if !self.backend_handles_vnet_hdr {
             super::vnet_hdr_len()
         } else {
@@ -289,13 +292,16 @@ impl NetBackend for Unixstream {
 
         // Read/complete frame length header
         let Some(frame_len) = self.try_read_frame_length(fd) else {
+            log::trace!("Unixstream::recv() no frame header yet");
             return Ok(());
         };
+        log::trace!("Unixstream::recv() frame_len={}", frame_len);
 
         // Ensure we have a buffer for this frame
         if self.rx_producer.pending_count() == 0 {
             self.rx_producer.feed(1);
             if self.rx_producer.pending_count() == 0 {
+                log::trace!("Unixstream::recv() no buffers available");
                 return Ok(()); // No buffers available
             }
         }

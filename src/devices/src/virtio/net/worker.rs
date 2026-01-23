@@ -80,7 +80,6 @@ impl NetWorker {
             VirtioNetBackend::Tap(tap_name) => Box::new(Tap::new(
                 tap_name,
                 _vnet_features,
-                include_vnet_header,
                 tx_queue,
                 rx_queue,
                 mem,
@@ -99,9 +98,11 @@ impl NetWorker {
     }
 
     fn work(mut self) {
+        log::info!("virtio-net worker starting");
         let virtq_rx_ev_fd = self.queue_evts[RX_INDEX].as_raw_fd();
         let virtq_tx_ev_fd = self.queue_evts[TX_INDEX].as_raw_fd();
         let backend_socket = self.backend.raw_socket_fd();
+        log::debug!("virtio-net fds: rx_ev={}, tx_ev={}, backend={}", virtq_rx_ev_fd, virtq_tx_ev_fd, backend_socket);
 
         let epoll = Epoll::new().unwrap();
 
@@ -119,7 +120,8 @@ impl NetWorker {
             ControlOperation::Add,
             backend_socket,
             &EpollEvent::new(
-                EventSet::IN | EventSet::OUT | EventSet::EDGE_TRIGGERED | EventSet::READ_HANG_UP,
+                // TODO: Switch back to EDGE_TRIGGERED once the implementation is verified
+                EventSet::IN | EventSet::OUT | EventSet::READ_HANG_UP,
                 backend_socket as u64,
             ),
         );
@@ -131,11 +133,14 @@ impl NetWorker {
                     for event in &epoll_events[0..ev_cnt] {
                         let source = event.fd();
                         let event_set = event.event_set();
+                        log::trace!("virtio-net epoll event: fd={} event_set={:?}", source, event_set);
                         match event_set {
                             EventSet::IN if source == virtq_rx_ev_fd => {
+                                log::trace!("virtio-net: rx queue event");
                                 self.process_rx_queue_event();
                             }
                             EventSet::IN if source == virtq_tx_ev_fd => {
+                                log::trace!("virtio-net: tx queue event");
                                 self.process_tx_queue_event();
                             }
                             _ if source == backend_socket => {

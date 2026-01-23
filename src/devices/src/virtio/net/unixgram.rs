@@ -143,7 +143,7 @@ impl NetBackend for Unixgram {
         };
 
         // Feed frames from queue
-        self.tx_consumer.feed(MAX_TX_BATCH, |iovecs| {
+        self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |iovecs| {
             let mut slices_mut: &mut [IoSlice] = iovecs;
             IoSlice::advance_slices(&mut slices_mut, skip);
             slices_mut.iter().map(|s| s.len()).sum()
