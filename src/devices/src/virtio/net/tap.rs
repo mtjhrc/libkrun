@@ -6,8 +6,6 @@ use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{readv, writev};
 use nix::{ioctl_write_int, ioctl_write_ptr};
-use smallvec::SmallVec;
-use std::io::IoSlice;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::{io, mem, ptr};
 use virtio_bindings::virtio_net::{
@@ -59,9 +57,7 @@ impl Tap {
             );
         }
 
-        unsafe {
-            req.ifr_ifru.ifru_flags = IFF_TAP as i16 | IFF_NO_PI as i16 | IFF_VNET_HDR as i16;
-        }
+        req.ifr_ifru.ifru_flags = IFF_TAP as i16 | IFF_NO_PI as i16 | IFF_VNET_HDR as i16;
 
         let mut offload_flags: u64 = 0;
         if (vnet_features & (1 << VIRTIO_NET_F_GUEST_CSUM)) != 0 {
@@ -151,28 +147,21 @@ impl NetBackend for Tap {
 
         self.rx_provider.feed(MAX_BATCH);
 
-        self.rx_provider.produce(|buffers| {
-            let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-
-            for buf in buffers.iter_mut() {
-                if buf.is_empty() {
-                    byte_counts.push(0);
-                    continue;
+        self.rx_provider.produce(|chains, completer| {
+            for (i, chain) in chains.iter_mut().enumerate() {
+                if chain.is_empty() {
+                    warn!("Chain {i} was empty");
+                    break;
                 }
 
-                match readv(fd, buf) {
+                match readv(fd, chain) {
                     Ok(n) => {
                         log::warn!("Tap RX: {} bytes", n);
-                        byte_counts.push(n);
+                        completer.complete(i, n);
                     }
-                    Err(_) => {
-                        byte_counts.push(0);
-                        break; // EAGAIN or error, stop receiving
-                    }
+                    Err(_) => break, // EAGAIN or error, stop receiving
                 }
             }
-
-            byte_counts
         });
 
         Ok(())

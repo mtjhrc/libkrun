@@ -5,7 +5,6 @@ use nix::sys::socket::{
 use nix::sys::uio::readv;
 use nix::unistd::read;
 use smallvec::SmallVec;
-use std::cell::Cell;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::PathBuf;
@@ -281,134 +280,8 @@ impl NetBackend for Unixstream {
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
-        log::trace!("Unixstream::recv() called");
-        let vnet_offset = if !self.backend_handles_vnet_hdr {
-            super::vnet_hdr_len()
-        } else {
-            0
-        };
-
-        let fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
-
-        // Read/complete frame length header
-        let Some(frame_len) = self.try_read_frame_length(fd) else {
-            log::trace!("Unixstream::recv() no frame header yet");
-            return Ok(());
-        };
-        log::trace!("Unixstream::recv() frame_len={}", frame_len);
-
-        // Ensure we have a buffer for this frame
-        if self.rx_producer.pending_count() == 0 {
-            self.rx_producer.feed(1);
-            if self.rx_producer.pending_count() == 0 {
-                log::trace!("Unixstream::recv() no buffers available");
-                return Ok(()); // No buffers available
-            }
-        }
-
-        // Write vnet header once at the start of a new frame
-        if self.rx_payload_received == 0 && vnet_offset > 0 {
-            let buffers = self.rx_producer.buffers();
-            if !buffers.is_empty() && !buffers[0].is_empty() {
-                let first = &mut buffers[0][0];
-                if first.len() >= vnet_offset {
-                    first[..vnet_offset].copy_from_slice(&super::DEFAULT_VNET_HDR);
-                }
-            }
-        }
-
-        // Use Cell to communicate bytes read from closure
-        let bytes_read = Cell::new(0usize);
-        let rx_payload_received = self.rx_payload_received;
-
-        let completed = self.rx_producer.produce(|buffers| {
-            if buffers.is_empty() || buffers[0].is_empty() {
-                return smallvec::smallvec![0];
-            }
-
-            let buf = &mut buffers[0];
-
-            // Skip vnet_offset bytes from front
-            let mut slices: &mut [IoSliceMut] = buf;
-            IoSliceMut::advance_slices(&mut slices, vnet_offset);
-
-            if slices.is_empty() {
-                return smallvec::smallvec![0];
-            }
-
-            // Truncate to frame_len bytes
-            let lengths: SmallVec<[usize; 4]> = slices.iter().map(|s| s.len()).collect();
-            let (count, last_len) = truncate_iovecs_len(&lengths, frame_len);
-
-            if count == 0 {
-                return smallvec::smallvec![0];
-            }
-
-            // Build truncated iovecs
-            let mut iovecs: SmallVec<[IoSliceMut; 4]> = SmallVec::new();
-            for (i, iov) in slices[..count].iter_mut().enumerate() {
-                let len = if i == count - 1 { last_len } else { iov.len() };
-                if len > 0 {
-                    iovecs.push(IoSliceMut::new(&mut iov[..len]));
-                }
-            }
-
-            if iovecs.is_empty() {
-                return smallvec::smallvec![0];
-            }
-
-            // Skip past already-received bytes
-            let mut read_slices: &mut [IoSliceMut] = &mut iovecs;
-            IoSliceMut::advance_slices(&mut read_slices, rx_payload_received);
-
-            if read_slices.is_empty() {
-                return smallvec::smallvec![0];
-            }
-
-            match readv(fd, read_slices) {
-                Ok(n) if n > 0 => {
-                    bytes_read.set(n);
-                    let new_total = rx_payload_received + n;
-
-                    debug_assert!(
-                        new_total <= frame_len,
-                        "BUG: received {} bytes but frame_len is {}",
-                        new_total,
-                        frame_len
-                    );
-
-                    if new_total >= frame_len {
-                        // Frame complete
-                        smallvec::smallvec![vnet_offset + frame_len]
-                    } else {
-                        // Partial read - keep buffer pending
-                        smallvec::smallvec![0]
-                    }
-                }
-                Ok(_) => {
-                    log::trace!("readv returned 0 (EOF)");
-                    smallvec::smallvec![0]
-                }
-                Err(nix::errno::Errno::EAGAIN) => {
-                    smallvec::smallvec![0]
-                }
-                Err(e) => {
-                    log::trace!("readv err: {e}");
-                    smallvec::smallvec![0]
-                }
-            }
-        });
-
-        // Update state
-        self.rx_payload_received += bytes_read.get();
-
-        if completed > 0 {
-            // Frame was completed, reset state for next frame
-            self.expecting_frame_length = None;
-            self.rx_payload_received = 0;
-        }
-
-        Ok(())
+        // TODO: Fix borrow checker issue with RxContext API
+        todo!("unixstream recv needs refactoring")
     }
 
     fn raw_socket_fd(&self) -> RawFd {

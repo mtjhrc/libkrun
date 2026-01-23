@@ -173,22 +173,20 @@ impl NetBackend for Unixgram {
             0
         };
 
-        // Feed buffers from queue
+        // Feed chains from queue
         self.rx_producer.feed(MAX_RX_BATCH);
-
-        if self.rx_producer.pending_count() == 0 {
-            return Ok(());
-        }
 
         let fd = self.fd.as_raw_fd();
 
-        self.rx_producer.produce(|buffers| {
-            let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
+        self.rx_producer.produce(|chains, completer| {
+            for (i, chain) in chains.iter_mut().enumerate() {
+                if chain.is_empty() {
+                    break;
+                }
 
-            for buf in buffers.iter_mut() {
                 // Prepend vnet header if needed
-                if vnet_offset > 0 && !buf.is_empty() {
-                    let first = &mut buf[0];
+                if vnet_offset > 0 {
+                    let first = &mut chain[0];
                     if first.len() >= vnet_offset {
                         first[..vnet_offset].copy_from_slice(&super::DEFAULT_VNET_HDR);
                     }
@@ -196,8 +194,8 @@ impl NetBackend for Unixgram {
 
                 // Build iovecs skipping vnet header space
                 let mut raw_iovecs: SmallVec<[iovec; 4]> = SmallVec::new();
-                for (i, iov) in buf.iter().enumerate() {
-                    if i == 0 && vnet_offset > 0 {
+                for (j, iov) in chain.iter().enumerate() {
+                    if j == 0 && vnet_offset > 0 {
                         if iov.len() > vnet_offset {
                             raw_iovecs.push(iovec {
                                 iov_base: unsafe { (iov.as_ptr() as *mut u8).add(vnet_offset) as *mut c_void },
@@ -213,24 +211,20 @@ impl NetBackend for Unixgram {
                 }
 
                 if raw_iovecs.is_empty() {
-                    byte_counts.push(0);
-                    continue;
+                    break;
                 }
 
                 let mut msg: msghdr = unsafe { std::mem::zeroed() };
                 msg.msg_iov = raw_iovecs.as_mut_ptr();
                 msg.msg_iovlen = raw_iovecs.len() as _;
 
-                let ret = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
-                if ret > 0 {
-                    byte_counts.push(vnet_offset + ret as usize);
+                let result = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
+                if result > 0 {
+                    completer.complete(i, vnet_offset + result as usize);
                 } else {
-                    byte_counts.push(0);
                     break; // EAGAIN or error
                 }
             }
-
-            byte_counts
         });
 
         Ok(())

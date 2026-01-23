@@ -11,11 +11,19 @@ use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
-/// RxQueueProvider - owns the RX queue and provides buffers for receiving.
+/// A pending descriptor chain with its state.
+struct PendingChain {
+    head_index: u16,
+    max_bytes: usize,
+    bytes_used: usize,
+    finished: bool,
+}
+
+/// RxQueueProducer - owns the RX queue and provides buffers for receiving.
 ///
 /// Pops descriptor chains from the virtio RX queue and provides writable
-/// iovecs for receiving data. Unused buffers are kept pending for the next
-/// produce() call; used buffers get add_used() with their byte counts.
+/// iovecs for receiving data. Unfinished chains are kept pending for the next
+/// produce() call; finished chains get add_used() with their byte counts.
 pub struct RxQueueProducer {
     /// The virtio RX queue (owned)
     queue: Queue,
@@ -24,10 +32,73 @@ pub struct RxQueueProducer {
     /// Interrupt for signaling guest
     interrupt: InterruptTransport,
 
-    /// Pending descriptor chain head indices
-    pending_heads: SmallVec<[u16; 32]>,
+    /// Pending chains with their state
+    pending_chains: SmallVec<[PendingChain; 32]>,
     /// Writable iovecs for each pending descriptor chain
     pending_iovecs: SmallVec<[SmallVec<[IoSliceMut<'static>; 4]>; 32]>,
+}
+
+/// Completer for reporting received bytes per chain.
+pub struct RxCompleter<'a> {
+    pending_chains: &'a mut [PendingChain],
+    queue: &'a mut Queue,
+    mem: &'a GuestMemoryMmap,
+}
+
+impl RxCompleter<'_> {
+    /// Number of pending chains.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.pending_chains.len()
+    }
+
+    /// Get bytes already received for chain at index.
+    #[inline]
+    pub fn bytes_used(&self, index: usize) -> usize {
+        self.pending_chains[index].bytes_used
+    }
+
+    /// Get maximum bytes the chain can hold.
+    #[inline]
+    pub fn max_bytes(&self, index: usize) -> usize {
+        self.pending_chains[index].max_bytes
+    }
+
+    /// Advance bytes used for chain at index (partial receive).
+    ///
+    /// Chain remains pending for next produce() call.
+    /// Panics if total bytes_used would exceed max_bytes.
+    pub fn advance(&mut self, index: usize, bytes: usize) {
+        let chain = &mut self.pending_chains[index];
+        chain.bytes_used += bytes;
+        debug_assert!(
+            chain.bytes_used <= chain.max_bytes,
+            "advance: bytes_used {} exceeds max_bytes {}",
+            chain.bytes_used,
+            chain.max_bytes
+        );
+    }
+
+    /// Mark chain at index as finished.
+    ///
+    /// Chain will be removed and add_used called after callback returns.
+    /// Can be called out-of-order.
+    pub fn finish(&mut self, index: usize) {
+        let chain = &mut self.pending_chains[index];
+        if chain.finished {
+            return;
+        }
+        chain.finished = true;
+        if let Err(e) = self.queue.add_used(self.mem, chain.head_index, chain.bytes_used as u32) {
+            log::error!("RxCompleter: failed to add_used: {e}");
+        }
+    }
+
+    /// Convenience: advance bytes and finish in one call.
+    pub fn complete(&mut self, index: usize, bytes: usize) {
+        self.advance(index, bytes);
+        self.finish(index);
+    }
 }
 
 
@@ -38,14 +109,14 @@ impl RxQueueProducer {
             queue,
             mem,
             interrupt,
-            pending_heads: SmallVec::new(),
+            pending_chains: SmallVec::new(),
             pending_iovecs: SmallVec::new(),
         }
     }
 
-    /// Number of buffers currently pending (ready for receive).
+    /// Number of chains currently pending (ready for receive).
     pub fn pending_count(&self) -> usize {
-        self.pending_heads.len()
+        self.pending_chains.len()
     }
 
     /// Feed descriptor chains from queue up to max_frames.
@@ -90,7 +161,13 @@ impl RxQueueProducer {
                 continue;
             }
 
-            self.pending_heads.push(head_index);
+            let max_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
+            self.pending_chains.push(PendingChain {
+                head_index,
+                max_bytes,
+                bytes_used: 0,
+                finished: false,
+            });
             self.pending_iovecs.push(iovecs);
             added += 1;
         }
@@ -111,56 +188,45 @@ impl RxQueueProducer {
         Some(IoSliceMut::new(static_slice))
     }
 
-    /// Get pending buffers for receiving.
-    pub fn buffers(&mut self) -> &mut [SmallVec<[IoSliceMut<'static>; 4]>] {
-        &mut self.pending_iovecs
-    }
-
-    /// Produce frames by calling the callback with pending buffers.
+    /// Produce frames by calling the callback with chains and a completer.
     ///
-    /// The callback receives writable iovecs and returns byte counts for each
-    /// frame that was filled. Frames with bytes > 0 are marked as used and
-    /// removed; frames with 0 bytes are kept pending for next call.
-    ///
-    /// Returns the number of frames completed.
+    /// The callback receives all pending chains and an RxCompleter to mark
+    /// chains as used. Returns the number of chains finished.
     pub fn produce<F>(&mut self, f: F) -> usize
     where
-        F: FnOnce(&mut [SmallVec<[IoSliceMut<'static>; 4]>]) -> SmallVec<[usize; 32]>,
+        F: FnOnce(&mut [SmallVec<[IoSliceMut<'static>; 4]>], &mut RxCompleter<'_>),
     {
-        if self.pending_heads.is_empty() {
+        if self.pending_chains.is_empty() {
             return 0;
         }
 
-        let byte_counts = f(&mut self.pending_iovecs);
+        {
+            let mut completer = RxCompleter {
+                pending_chains: &mut self.pending_chains,
+                queue: &mut self.queue,
+                mem: &self.mem,
+            };
+            f(&mut self.pending_iovecs, &mut completer);
+        }
 
-        // Process results - complete frames with bytes until first zero.
-        // Once we hit a zero-byte frame, all remaining frames are kept pending
-        // (receive is sequential, so if frame N is empty, frame N+1 can't have data).
-        let mut completed = 0;
-
-        for (i, &head_index) in self.pending_heads.iter().enumerate() {
-            let bytes = byte_counts.get(i).copied().unwrap_or(0);
-
-            if bytes > 0 {
-                // Frame was filled - mark as used
-                if let Err(e) = self.queue.add_used(&self.mem, head_index, bytes as u32) {
-                    log::error!("RxQueueProvider: failed to add_used: {e}");
-                }
-                completed += 1;
+        // Remove finished chains (can be out-of-order, so remove all marked finished)
+        let mut finished_count = 0;
+        let mut i = 0;
+        while i < self.pending_chains.len() {
+            if self.pending_chains[i].finished {
+                self.pending_chains.remove(i);
+                self.pending_iovecs.remove(i);
+                finished_count += 1;
             } else {
-                // First unfilled frame - stop processing, keep this and all remaining
-                break;
+                i += 1;
             }
         }
 
-        // Remove completed frames from the front
-        if completed > 0 {
-            self.pending_heads.drain(..completed);
-            self.pending_iovecs.drain(..completed);
+        if finished_count > 0 {
             self.signal_used_if_needed();
         }
 
-        completed
+        finished_count
     }
 
     /// Signal used queue interrupt if needed.
