@@ -29,7 +29,7 @@ const MAX_BATCH: usize = 256;
 pub struct Tap {
     fd: OwnedFd,
     tx_consumer: TxQueueConsumer,
-    rx_provider: RxQueueProducer,
+    rx_producer: RxQueueProducer,
 }
 
 impl Tap {
@@ -106,7 +106,7 @@ impl Tap {
         Ok(Self {
             fd,
             tx_consumer,
-            rx_provider,
+            rx_producer: rx_provider,
         })
     }
 }
@@ -145,9 +145,9 @@ impl NetBackend for Tap {
     fn recv(&mut self) -> Result<(), ReadError> {
         let fd = self.fd.as_fd();
 
-        self.rx_provider.feed(MAX_BATCH);
+        self.rx_producer.feed(MAX_BATCH);
 
-        self.rx_provider.produce(|chains, completer| {
+        self.rx_producer.produce(|chains, completer| {
             for (i, chain) in chains.iter_mut().enumerate() {
                 if chain.is_empty() {
                     warn!("Chain {i} was empty");
