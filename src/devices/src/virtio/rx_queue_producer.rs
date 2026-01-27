@@ -45,6 +45,26 @@ pub struct RxCompleter<'a> {
     mem: &'a GuestMemoryMmap,
 }
 
+/// Advance iovecs in place by `bytes`, removing fully consumed buffers.
+fn advance_iovecs<'a>(iovecs: &mut SmallVec<[IoSliceMut<'a>; 4]>, bytes: usize) {
+    let mut remaining = bytes;
+    while remaining > 0 && !iovecs.is_empty() {
+        let first_len = iovecs[0].len();
+        if first_len <= remaining {
+            iovecs.remove(0);
+            remaining -= first_len;
+        } else {
+            let first = &mut iovecs[0];
+            let ptr = first.as_mut_ptr();
+            let new_len = first_len - remaining;
+            // Safety: advancing pointer within same allocation
+            let new_slice = unsafe { std::slice::from_raw_parts_mut(ptr.add(remaining), new_len) };
+            iovecs[0] = IoSliceMut::new(new_slice);
+            remaining = 0;
+        }
+    }
+}
+
 impl RxCompleter<'_> {
     /// Number of pending chains.
     #[inline]
@@ -66,9 +86,14 @@ impl RxCompleter<'_> {
 
     /// Advance bytes used for chain at index (partial receive).
     ///
+    /// Also advances the iovecs in place, removing consumed buffers.
     /// Chain remains pending for next produce() call.
-    /// Panics if total bytes_used would exceed max_bytes.
-    pub fn advance(&mut self, index: usize, bytes: usize) {
+    pub fn advance<'b>(
+        &mut self,
+        iovecs: &mut SmallVec<[IoSliceMut<'b>; 4]>,
+        index: usize,
+        bytes: usize,
+    ) {
         let chain = &mut self.pending_chains[index];
         chain.bytes_used += bytes;
         debug_assert!(
@@ -77,6 +102,7 @@ impl RxCompleter<'_> {
             chain.bytes_used,
             chain.max_bytes
         );
+        advance_iovecs(iovecs, bytes);
     }
 
     /// Mark chain at index as finished.
@@ -95,8 +121,13 @@ impl RxCompleter<'_> {
     }
 
     /// Convenience: advance bytes and finish in one call.
-    pub fn complete(&mut self, index: usize, bytes: usize) {
-        self.advance(index, bytes);
+    pub fn complete<'b>(
+        &mut self,
+        iovecs: &mut SmallVec<[IoSliceMut<'b>; 4]>,
+        index: usize,
+        bytes: usize,
+    ) {
+        self.advance(iovecs, index, bytes);
         self.finish(index);
     }
 }
@@ -190,8 +221,8 @@ impl RxQueueProducer {
 
     /// Produce frames by calling the callback with chains and a completer.
     ///
-    /// The callback receives all pending chains and an RxCompleter to mark
-    /// chains as used. Returns the number of chains finished.
+    /// The callback receives iovecs (already advanced by previous calls to advance())
+    /// and an RxCompleter to mark chains as used. Returns the number of chains finished.
     pub fn produce<F>(&mut self, f: F) -> usize
     where
         F: FnOnce(&mut [SmallVec<[IoSliceMut<'static>; 4]>], &mut RxCompleter<'_>),

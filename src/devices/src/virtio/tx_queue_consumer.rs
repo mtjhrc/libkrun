@@ -8,6 +8,7 @@ use std::io::IoSlice;
 use smallvec::SmallVec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
+use super::iovec_utils::iovecs_len;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
@@ -16,8 +17,10 @@ use super::InterruptTransport;
 struct FrameMeta {
     /// Descriptor chain head index for queue.add_used()
     head_index: u16,
-    /// Bytes in this frame (for stream socket partial write tracking)
-    byte_count: usize,
+    /// Total bytes in iovecs (for I/O completion tracking)
+    total_len: usize,
+    /// Bytes from guest descriptors (for add_used reporting)
+    guest_len: usize,
 }
 
 /// TxQueueConsumer - owns the TX queue and manages frame batching.
@@ -78,8 +81,8 @@ impl TxQueueConsumer {
     /// This is the common case - just sums the byte count of each chain.
     /// For advanced use cases (e.g., inserting headers), use `feed_with_transform`.
     pub fn feed(&mut self, max_frames: usize) -> usize {
-        self.feed_with_transform(max_frames, |iovecs| {
-            iovecs.iter().map(|s| s.len()).sum()
+        self.feed_with_transform(max_frames, |_iovecs| {
+            // No transformation - lengths computed automatically
         })
     }
 
@@ -89,7 +92,6 @@ impl TxQueueConsumer {
     /// - Skip bytes (e.g., vnet header) by using `IoSlice::advance_slices`
     /// - Insert header iovecs (e.g., frame length for stream sockets)
     /// - Modify data in place
-    /// - Return the total byte count
     ///
     /// Returns the number of frames added to the batch.
     ///
@@ -97,17 +99,16 @@ impl TxQueueConsumer {
     /// * `max_frames` - Maximum frames to feed (including already pending)
     /// * `transform` - Callback to transform each descriptor chain's iovecs
     ///
-    /// # Callback signature
-    /// `FnMut(&mut SmallVec<[IoSlice<'static>; 4]>) -> usize`
-    /// - Arg: mutable iovecs from descriptor chain
-    /// - Returns: total byte count
+    /// The callback can transform the iovecs (skip bytes, add headers, etc).
+    /// Both the original chain length (for add_used) and the final length
+    /// (for completion tracking) are computed automatically.
     ///
     // TODO: The IoSlice lifetime should ideally be tied to &self rather than 'static,
     // but this causes borrow checker conflicts. The 'static is safe because
     // TxQueueConsumer owns the GuestMemoryMmap and outlives all IoSlice usage.
     pub fn feed_with_transform<F>(&mut self, max_frames: usize, mut transform_chain: F) -> usize
     where
-        F: FnMut(&mut SmallVec<[IoSlice<'static>; 4]>) -> usize,
+        F: FnMut(&mut SmallVec<[IoSlice<'static>; 4]>),
     {
         let mut added = 0;
 
@@ -148,13 +149,20 @@ impl TxQueueConsumer {
                 continue;
             }
 
+            // Compute original chain length before transformation
+            let guest_len = iovecs_len(&iovecs);
+
             // Apply user callback to transform iovecs
-            let byte_count = transform_chain(&mut iovecs);
+            transform_chain(&mut iovecs);
+
+            // Compute final length after transformation
+            let total_len = iovecs_len(&iovecs);
 
             self.frame_iovecs.push(iovecs);
             self.frame_meta.push(FrameMeta {
                 head_index,
-                byte_count,
+                total_len,
+                guest_len,
             });
             added += 1;
         }
@@ -239,13 +247,12 @@ impl TxQueueConsumer {
 
         // Complete frames while we have enough bytes
         while self.sent_frames < self.frame_meta.len() {
-            let frame_size = self.frame_meta[self.sent_frames].byte_count;
-            if self.partial_bytes >= frame_size {
-                let meta = &self.frame_meta[self.sent_frames];
-                if let Err(e) = self.queue.add_used(&self.mem, meta.head_index, 0) {
+            let meta = &self.frame_meta[self.sent_frames];
+            if self.partial_bytes >= meta.total_len {
+                if let Err(e) = self.queue.add_used(&self.mem, meta.head_index, meta.guest_len as u32) {
                     log::error!("TxQueueConsumer: failed to add_used: {e}");
                 }
-                self.partial_bytes -= frame_size;
+                self.partial_bytes -= meta.total_len;
                 self.sent_frames += 1;
             } else {
                 break;

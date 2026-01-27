@@ -146,7 +146,6 @@ impl NetBackend for Unixgram {
         self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |iovecs| {
             let mut slices_mut: &mut [IoSlice] = iovecs;
             IoSlice::advance_slices(&mut slices_mut, skip);
-            slices_mut.iter().map(|s| s.len()).sum()
         });
 
         if !self.tx_consumer.has_pending() {
@@ -220,7 +219,7 @@ impl NetBackend for Unixgram {
 
                 let result = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_DONTWAIT) };
                 if result > 0 {
-                    completer.complete(i, vnet_offset + result as usize);
+                    completer.complete(chain, i, vnet_offset + result as usize);
                 } else {
                     break; // EAGAIN or error
                 }

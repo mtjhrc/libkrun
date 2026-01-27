@@ -157,7 +157,7 @@ impl NetBackend for Tap {
                 match readv(fd, chain) {
                     Ok(n) => {
                         log::warn!("Tap RX: {} bytes", n);
-                        completer.complete(i, n);
+                        completer.complete(chain, i, n);
                     }
                     Err(_) => break, // EAGAIN or error, stop receiving
                 }

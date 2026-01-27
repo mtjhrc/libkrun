@@ -7,7 +7,6 @@
 mod tests {
     use std::io::IoSlice;
 
-    use smallvec::SmallVec;
     use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
     use crate::legacy::DummyIrqChip;
@@ -317,8 +316,7 @@ mod tests {
             vq.builder(&mem).readable(b"Hello, World!").end_chain();
 
             let added = consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             assert_eq!(added, 1);
             assert_eq!(consumer.pending_count(), 1);
@@ -342,8 +340,7 @@ mod tests {
                 .end_chain();
 
             let added = consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             assert_eq!(added, 1);
             assert_eq!(consumer.pending_count(), 1);
@@ -362,8 +359,7 @@ mod tests {
             vq.builder(&mem).readable_frames(&[b"Frame1", b"Frame2", b"Frame3"]);
 
             let added = consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             assert_eq!(added, 3);
             assert_eq!(consumer.pending_count(), 3);
@@ -378,15 +374,13 @@ mod tests {
             vq.builder(&mem).readable_frames(&[b"F0", b"F1", b"F2", b"F3", b"F4"]);
 
             let added = consumer.feed_with_transform(2, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
             assert_eq!(added, 2);
             assert_eq!(consumer.pending_count(), 2);
 
             // Already at limit
             let added2 = consumer.feed_with_transform(2, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
             assert_eq!(added2, 0);
         }
 
@@ -401,8 +395,7 @@ mod tests {
                 // Skip 4 bytes (like skipping vnet header)
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 4);
-                slices.iter().map(|s| s.len()).sum()
-            });
+                            });
 
             assert_eq!(added, 1);
         }
@@ -415,8 +408,7 @@ mod tests {
             vq.builder(&mem).readable_frames(&[b"FirstFrame", b"SecondFrame"]);
 
             consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
             assert_eq!(consumer.pending_count(), 2);
 
             let result = consumer.consume(|frames| {
@@ -440,8 +432,7 @@ mod tests {
             vq.builder(&mem).readable_frames(&[b"Frame00000", b"Frame11111", b"Frame22222"]);
 
             consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             let result = consumer.consume(|_frames| Ok::<_, ()>(15));
             assert_eq!(result, Ok(15));
@@ -456,8 +447,7 @@ mod tests {
             vq.builder(&mem).readable_frames(&[b"test", b"test", b"test", b"test", b"test"]);
 
             consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             assert_eq!(consumer.frame_iovecs().len(), 5);
 
@@ -476,8 +466,7 @@ mod tests {
             let (mut consumer, _vq) = setup_tx_consumer(&mem);
 
             let added = consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             assert_eq!(added, 0);
             assert_eq!(consumer.pending_count(), 0);
@@ -492,8 +481,7 @@ mod tests {
             vq.builder(&mem).readable(b"TestData").end_chain();
 
             consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             let result: Result<usize, &str> = consumer.consume(|_| Err("EAGAIN"));
             assert!(result.is_err());
@@ -512,8 +500,7 @@ mod tests {
                 .end_chain();
 
             consumer.feed_with_transform(10, |iovecs| {
-                iovecs.iter().map(|iov| iov.len()).sum()
-            });
+                            });
 
             let frames = consumer.frame_iovecs();
             assert_eq!(frames.len(), 1);
@@ -541,8 +528,7 @@ mod tests {
             let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 12);
-                slices.iter().map(|s| s.len()).sum()
-            });
+                            });
             assert_eq!(added, 1);
 
             let result = consumer.consume(|frames| {
@@ -574,13 +560,13 @@ mod tests {
             let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 12);
-                let payload_len: usize = slices.iter().map(|s| s.len()).sum();
-                4 + payload_len // frame_length (4) + payload (100)
+                // After skip, total_len = 100 (payload only)
             });
             assert_eq!(added, 1);
 
-            let result = consumer.consume(|_frames| Ok::<_, ()>(104));
-            assert_eq!(result, Ok(104));
+            // Consume the payload (100 bytes after skipping 12-byte header)
+            let result = consumer.consume(|_frames| Ok::<_, ()>(100));
+            assert_eq!(result, Ok(100));
             assert_eq!(consumer.pending_count(), 0);
         }
 
@@ -604,8 +590,7 @@ mod tests {
             let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 10);
-                slices.iter().map(|s| s.len()).sum()
-            });
+                            });
             assert_eq!(added, 2);
 
             let result = consumer.consume(|_frames| Ok::<_, ()>(75));
@@ -634,25 +619,24 @@ mod tests {
             let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 12); // skip virtio header
-                let payload_len: usize = slices.iter().map(|s| s.len()).sum();
-                4 + payload_len // 4-byte frame header + 100 payload = 104
+                // After skip, total_len = 100 (payload only)
             });
             assert_eq!(added, 1);
 
-            // Cycle 1: only 2 bytes sent (partial frame header)
+            // Cycle 1: 2 bytes sent (partial)
             let result = consumer.consume(|_| Ok::<_, ()>(2));
             assert_eq!(result, Ok(2));
             assert_eq!(consumer.pending_count(), 1); // frame NOT complete
 
-            // Cycle 2: 50 more bytes (remaining 2 of header + 48 payload)
+            // Cycle 2: 50 more bytes (total 52)
             let result = consumer.consume(|_| Ok::<_, ()>(50));
             assert_eq!(result, Ok(50));
-            assert_eq!(consumer.pending_count(), 1); // still not complete (52 + 50 = 52 < 104)
+            assert_eq!(consumer.pending_count(), 1); // still not complete (52 < 100)
 
-            // Cycle 3: remaining 52 bytes
-            let result = consumer.consume(|_| Ok::<_, ()>(52));
-            assert_eq!(result, Ok(52));
-            assert_eq!(consumer.pending_count(), 0); // frame complete (2+50+52=104)
+            // Cycle 3: remaining 48 bytes
+            let result = consumer.consume(|_| Ok::<_, ()>(48));
+            assert_eq!(result, Ok(48));
+            assert_eq!(consumer.pending_count(), 0); // frame complete (2+50+48=100)
         }
 
         #[test]
@@ -679,8 +663,7 @@ mod tests {
             let added = consumer.feed_with_transform(10, |iovecs| {
                 let mut slices: &mut [IoSlice] = iovecs;
                 IoSlice::advance_slices(&mut slices, 10); // skip 10-byte header
-                slices.iter().map(|s| s.len()).sum()
-            });
+                            });
             assert_eq!(added, 3);
             assert_eq!(consumer.pending_count(), 3);
 
@@ -721,7 +704,8 @@ mod tests {
             let interrupt = create_interrupt();
             let mut consumer = TxQueueConsumer::new(queue, mem.clone(), interrupt);
 
-            consumer.feed_with_transform(10, |iovecs| iovecs.iter().map(|iov| iov.len()).sum());
+            consumer.feed_with_transform(10, |iovecs| {
+                            });
             assert_eq!(consumer.pending_count(), 2);
 
             // Send 45 bytes (frame 1 complete, 15 into frame 2)
@@ -734,7 +718,8 @@ mod tests {
             // Guest adds more descriptors (simulating queue refill)
             harness.add_readable(&data); // frame 3
 
-            consumer.feed_with_transform(10, |iovecs| iovecs.iter().map(|iov| iov.len()).sum());
+            consumer.feed_with_transform(10, |iovecs| {
+                            });
             assert_eq!(consumer.pending_count(), 2); // frame 2 (partial) + frame 3
 
             // Send remaining 15 of frame 2 + all 30 of frame 3 = 45
@@ -798,11 +783,14 @@ mod tests {
             assert_eq!(added, 1);
             assert_eq!(provider.pending_count(), 1);
 
-            let buffers = provider.buffers();
-            assert_eq!(buffers.len(), 1);
-            assert_eq!(buffers[0].len(), 2);
-            assert_eq!(buffers[0][0].len(), 512);
-            assert_eq!(buffers[0][1].len(), 1024);
+            // Verify buffer structure via produce
+            provider.produce(|chains, _completer| {
+                assert_eq!(chains.len(), 1);
+                assert_eq!(chains[0].len(), 2);
+                assert_eq!(chains[0][0].len(), 512);
+                assert_eq!(chains[0][1].len(), 1024);
+                // Don't mark anything as finished
+            });
         }
 
         #[test]
@@ -816,7 +804,6 @@ mod tests {
 
             assert_eq!(added, 3);
             assert_eq!(provider.pending_count(), 3);
-            assert_eq!(provider.buffers().len(), 3);
         }
 
         #[test]
@@ -842,16 +829,12 @@ mod tests {
             provider.feed(10);
             assert_eq!(provider.pending_count(), 2);
 
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
+            let completed = provider.produce(|chains, completer| {
+                chains[0][0][..17].copy_from_slice(b"Received packet 1");
+                completer.complete(&mut chains[0], 0, 17);
 
-                buffers[0][0][..17].copy_from_slice(b"Received packet 1");
-                byte_counts.push(17);
-
-                buffers[1][0][..17].copy_from_slice(b"Received packet 2");
-                byte_counts.push(17);
-
-                byte_counts
+                chains[1][0][..17].copy_from_slice(b"Received packet 2");
+                completer.complete(&mut chains[1], 1, 17);
             });
 
             assert_eq!(completed, 2);
@@ -870,14 +853,14 @@ mod tests {
 
             provider.feed(10);
 
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-                buffers[0][0][..10].copy_from_slice(b"0123456789");
-                byte_counts.push(10);
-                buffers[1][0][..10].copy_from_slice(b"ABCDEFGHIJ");
-                byte_counts.push(10);
-                byte_counts.push(0); // Third not filled
-                byte_counts
+            let completed = provider.produce(|chains, completer| {
+                chains[0][0][..10].copy_from_slice(b"0123456789");
+                completer.complete(&mut chains[0], 0, 10);
+
+                chains[1][0][..10].copy_from_slice(b"ABCDEFGHIJ");
+                completer.complete(&mut chains[1], 1, 10);
+
+                // Third not filled - don't call complete
             });
 
             assert_eq!(completed, 2);
@@ -894,19 +877,17 @@ mod tests {
             provider.feed(10);
 
             // First produce: no data received (EAGAIN-like)
-            let completed = provider.produce(|_buffers| {
-                SmallVec::from_buf([0usize; 32])
+            let completed = provider.produce(|_chains, _completer| {
+                // Don't complete anything
             });
             assert_eq!(completed, 0);
             assert_eq!(provider.pending_count(), 2);
 
             // Second produce: fill one buffer
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-                buffers[0][0][..5].copy_from_slice(b"Hello");
-                byte_counts.push(5);
-                byte_counts.push(0);
-                byte_counts
+            let completed = provider.produce(|chains, completer| {
+                chains[0][0][..5].copy_from_slice(b"Hello");
+                completer.complete(&mut chains[0], 0, 5);
+                // Don't complete second buffer
             });
             assert_eq!(completed, 1);
             assert_eq!(provider.pending_count(), 1);
@@ -919,7 +900,7 @@ mod tests {
 
             assert_eq!(provider.feed(10), 0);
             assert_eq!(provider.pending_count(), 0);
-            assert_eq!(provider.produce(|_| SmallVec::new()), 0);
+            assert_eq!(provider.produce(|_chains, _completer| {}), 0);
         }
 
         #[test]
@@ -935,10 +916,12 @@ mod tests {
 
             provider.feed(10);
 
-            let buffers = provider.buffers();
-            assert_eq!(buffers.len(), 1);
-            assert_eq!(buffers[0].len(), 1);
-            assert_eq!(buffers[0][0].len(), 1400);
+            // Verify buffer structure via produce
+            provider.produce(|chains, _completer| {
+                assert_eq!(chains.len(), 1);
+                assert_eq!(chains[0].len(), 1);
+                assert_eq!(chains[0][0].len(), 1400);
+            });
         }
 
         #[test]
@@ -956,13 +939,11 @@ mod tests {
             provider.feed(10);
             assert_eq!(provider.pending_count(), 1);
 
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-                buffers[0][0].copy_from_slice(&[0xAA; 100]);
-                buffers[0][1].copy_from_slice(&[0xBB; 200]);
-                buffers[0][2].copy_from_slice(&[0xCC; 300]);
-                byte_counts.push(600);
-                byte_counts
+            let completed = provider.produce(|chains, completer| {
+                chains[0][0].copy_from_slice(&[0xAA; 100]);
+                chains[0][1].copy_from_slice(&[0xBB; 200]);
+                chains[0][2].copy_from_slice(&[0xCC; 300]);
+                completer.complete(&mut chains[0], 0, 600);
             });
 
             assert_eq!(completed, 1);
@@ -988,12 +969,10 @@ mod tests {
             assert_eq!(provider.pending_count(), 2);
 
             // First produce: fill 1
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-                buffers[0][0][..4].copy_from_slice(b"pkt1");
-                byte_counts.push(4);
-                byte_counts.push(0);
-                byte_counts
+            let completed = provider.produce(|chains, completer| {
+                chains[0][0][..4].copy_from_slice(b"pkt1");
+                completer.complete(&mut chains[0], 0, 4);
+                // Don't complete second
             });
             assert_eq!(completed, 1);
             assert_eq!(provider.pending_count(), 1);
@@ -1003,22 +982,20 @@ mod tests {
             assert_eq!(provider.pending_count(), 2);
 
             // Second produce: fill both
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-                for buf in buffers.iter_mut() {
-                    buf[0][..4].copy_from_slice(b"data");
-                    byte_counts.push(4);
+            let completed = provider.produce(|chains, completer| {
+                for (i, chain) in chains.iter_mut().enumerate() {
+                    chain[0][..4].copy_from_slice(b"data");
+                    completer.complete(chain, i, 4);
                 }
-                byte_counts
             });
             assert_eq!(completed, 2);
             assert_eq!(provider.pending_count(), 0);
         }
 
         #[test]
-        fn test_stops_at_first_zero_byte_frame() {
-            // Verify that produce() stops processing at the first zero-byte frame.
-            // If buffer 1 returns 0 bytes, buffer 2 can't have valid data (sequential receive).
+        fn test_selective_completion() {
+            // Verify that only explicitly completed chains are removed.
+            // With the new API, completion is explicit via completer.finish().
             let mem = create_memory();
             let (mut provider, vq) = setup_rx_provider(&mem);
 
@@ -1027,15 +1004,11 @@ mod tests {
             provider.feed(10);
             assert_eq!(provider.pending_count(), 3);
 
-            // Callback returns: [100, 0, 50]
-            // Only buffer 0 should be completed; buffers 1,2 kept pending
-            let completed = provider.produce(|buffers| {
-                let mut byte_counts: SmallVec<[usize; 32]> = SmallVec::new();
-                buffers[0][0][..4].copy_from_slice(b"pkt0");
-                byte_counts.push(100); // buffer 0: filled
-                byte_counts.push(0);   // buffer 1: not filled - stop here!
-                byte_counts.push(50);  // buffer 2: this should be IGNORED
-                byte_counts
+            // Complete only buffer 0, leave 1 and 2 pending
+            let completed = provider.produce(|chains, completer| {
+                chains[0][0][..4].copy_from_slice(b"pkt0");
+                completer.complete(&mut chains[0], 0, 100);
+                // Don't complete buffers 1 and 2
             });
 
             assert_eq!(completed, 1);

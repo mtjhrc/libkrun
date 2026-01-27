@@ -1,15 +1,14 @@
-use libc::{c_int, c_void, iovec};
 use nix::sys::socket::{
     connect, getsockopt, setsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
 };
 use nix::sys::uio::readv;
 use nix::unistd::read;
-use smallvec::SmallVec;
-use std::io::{self, IoSlice, IoSliceMut};
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::io::IoSlice;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use vm_memory::GuestMemoryMmap;
 
+use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs, write_to_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
@@ -19,73 +18,35 @@ use crate::virtio::InterruptTransport;
 use super::backend::{NetBackend, ReadError, WriteError};
 use super::FRAME_HEADER_LEN;
 
-/// Calculate how to truncate a sequence of buffers to a maximum total length.
-///
-/// Returns (num_buffers_to_use, last_buffer_len).
-///
-/// # Example
-/// ```ignore
-/// assert_eq!(truncate_iovecs_len(&[100, 100, 100], 150), (2, 50));
-/// assert_eq!(truncate_iovecs_len(&[100, 100, 100], 300), (3, 100));
-/// assert_eq!(truncate_iovecs_len(&[100, 100, 100], 50), (1, 50));
-/// ```
-fn truncate_iovecs_len(lengths: &[usize], max_bytes: usize) -> (usize, usize) {
-    let mut total = 0;
-    for (i, &len) in lengths.iter().enumerate() {
-        if total + len >= max_bytes {
-            return (i + 1, max_bytes - total);
+/// Try to read/complete the frame length header.
+/// Returns Some(frame_len) when complete, None if incomplete or EAGAIN.
+fn try_read_frame_header(
+    fd: BorrowedFd,
+    header_buf: &mut [u8; FRAME_HEADER_LEN],
+    header_pos: &mut usize,
+    expecting: &mut Option<u32>,
+) -> Option<usize> {
+    if let Some(len) = *expecting {
+        return Some(len as usize);
+    }
+
+    let remaining = &mut header_buf[*header_pos..];
+    match read(fd, remaining) {
+        Ok(n) if n > 0 => {
+            *header_pos += n;
+            if *header_pos == FRAME_HEADER_LEN {
+                let len = u32::from_be_bytes(*header_buf);
+                *expecting = Some(len);
+                *header_pos = 0;
+                Some(len as usize)
+            } else {
+                None
+            }
         }
-        total += len;
-    }
-    // All buffers fit within max_bytes
-    (lengths.len(), lengths.last().copied().unwrap_or(0))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_truncate_iovecs_len_middle() {
-        // 3 buffers of 100 each, limit to 150 -> use 2, last has 50
-        assert_eq!(truncate_iovecs_len(&[100, 100, 100], 150), (2, 50));
-    }
-
-    #[test]
-    fn test_truncate_iovecs_len_exact_boundary() {
-        // Limit exactly at buffer boundary
-        assert_eq!(truncate_iovecs_len(&[100, 100, 100], 200), (2, 100));
-    }
-
-    #[test]
-    fn test_truncate_iovecs_len_all_fit() {
-        // All buffers fit
-        assert_eq!(truncate_iovecs_len(&[100, 100, 100], 500), (3, 100));
-    }
-
-    #[test]
-    fn test_truncate_iovecs_len_first_partial() {
-        // Only partial first buffer
-        assert_eq!(truncate_iovecs_len(&[100, 100, 100], 50), (1, 50));
-    }
-
-    #[test]
-    fn test_truncate_iovecs_len_zero() {
-        assert_eq!(truncate_iovecs_len(&[100, 100], 0), (1, 0));
-    }
-
-    #[test]
-    fn test_truncate_iovecs_len_empty() {
-        assert_eq!(truncate_iovecs_len(&[], 100), (0, 0));
-    }
-
-    #[test]
-    fn test_truncate_iovecs_len_varied_sizes() {
-        // Buffers: 50, 30, 80, 40 = 200 total, limit to 120
-        // 50 + 30 = 80, then 40 more from third -> (3, 40)
-        assert_eq!(truncate_iovecs_len(&[50, 30, 80, 40], 120), (3, 40));
+        _ => None,
     }
 }
+
 
 pub struct Unixstream {
     fd: OwnedFd,
@@ -98,15 +59,13 @@ pub struct Unixstream {
     rx_header_pos: usize,
     /// For RX: expected frame length (None when header not yet complete)
     expecting_frame_length: Option<u32>,
-    /// For RX: bytes of payload already received into current guest buffer
-    rx_payload_received: usize,
 }
 
 impl Unixstream {
     /// Create the backend with a pre-established connection to the userspace network proxy.
     pub fn new(
         fd: OwnedFd,
-        include_vnet_header: bool,
+        backend_handles_vnet_hdr: bool,
         tx_queue: Queue,
         rx_queue: Queue,
         mem: GuestMemoryMmap,
@@ -127,13 +86,12 @@ impl Unixstream {
 
         Self {
             fd,
-            backend_handles_vnet_hdr: include_vnet_header,
+            backend_handles_vnet_hdr,
             tx_consumer,
             rx_producer: rx_provider,
             rx_header_buf: [0u8; FRAME_HEADER_LEN],
             rx_header_pos: 0,
             expecting_frame_length: None,
-            rx_payload_received: 0,
         }
     }
 
@@ -168,38 +126,10 @@ impl Unixstream {
 
         Ok(Self::new(fd, include_vnet_header, tx_queue, rx_queue, mem, interrupt))
     }
-
-    /// Try to read/complete the frame length header.
-    /// Returns Some(frame_len) when complete, None if incomplete or error.
-    fn try_read_frame_length(&mut self, fd: BorrowedFd) -> Option<usize> {
-        if let Some(len) = self.expecting_frame_length {
-            return Some(len as usize);
-        }
-
-        let remaining = &mut self.rx_header_buf[self.rx_header_pos..];
-        match read(fd, remaining) {
-            Ok(n) if n > 0 => {
-                self.rx_header_pos += n;
-                if self.rx_header_pos == FRAME_HEADER_LEN {
-                    let len = u32::from_be_bytes(self.rx_header_buf);
-                    self.expecting_frame_length = Some(len);
-                    self.rx_header_pos = 0;
-                    Some(len as usize)
-                } else {
-                    None // Partial header
-                }
-            }
-            Ok(_) => None, // EOF
-            Err(nix::errno::Errno::EAGAIN) => None,
-            Err(e) => {
-                log::error!("Unixstream recv header error: {e}");
-                None
-            }
-        }
-    }
 }
 
 const MAX_TX_BATCH: usize = 64;
+const MAX_RX_BATCH: usize = 64;
 
 impl NetBackend for Unixstream {
     fn send(&mut self) -> Result<(), WriteError> {
@@ -210,11 +140,20 @@ impl NetBackend for Unixstream {
             0
         };
 
-        // Feed frames from queue
+        // Feed frames from queue, prepending frame length header
         let fed = self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |iovecs| {
-            let mut slices_mut: &mut [IoSlice] = iovecs;
-            IoSlice::advance_slices(&mut slices_mut, skip);
-            slices_mut.iter().map(|s| s.len()).sum()
+            // Skip vnet header
+            let mut slices: &mut [IoSlice] = iovecs;
+            IoSlice::advance_slices(&mut slices, skip);
+
+            // Calculate payload length (after vnet skip)
+            let payload_len = iovecs_len(slices);
+
+            // FIXME: This leaks memory! Need proper header storage in TxQueueConsumer.
+            // For now, Box::leak the header bytes to get 'static lifetime.
+            let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
+            iovecs.insert(0, IoSlice::new(header));
+
         });
         log::trace!("Unixstream::send() fed {} frames, pending={}", fed, self.tx_consumer.pending_count());
 
@@ -222,54 +161,23 @@ impl NetBackend for Unixstream {
             return Ok(());
         }
 
-        let fd = self.fd.as_raw_fd();
+        let fd = self.fd.as_fd();
 
-        // For stream sockets, prepend frame length header and use writev
+        // Frames already have header prepended, just writev each one
         let _ = self.tx_consumer.consume(|frames| {
             let mut total_bytes = 0usize;
 
             for frame in frames {
-                let frame_len: usize = frame.iter().map(|s| s.len()).sum();
-                if frame_len == 0 {
+                if frame.is_empty() {
+                    warn!("Empty frame for send!");
                     continue;
                 }
 
-                // Build iovecs with frame header prepended
-                let frame_header = (frame_len as u32).to_be_bytes();
-                let mut raw_iovecs: SmallVec<[iovec; 8]> = SmallVec::new();
-
-                raw_iovecs.push(iovec {
-                    iov_base: frame_header.as_ptr() as *mut c_void,
-                    iov_len: FRAME_HEADER_LEN,
-                });
-
-                for iov in frame.iter() {
-                    raw_iovecs.push(iovec {
-                        iov_base: iov.as_ptr() as *mut c_void,
-                        iov_len: iov.len(),
-                    });
-                }
-
-                let ret = unsafe {
-                    libc::writev(fd, raw_iovecs.as_ptr(), raw_iovecs.len() as c_int)
-                };
-
-                if ret >= 0 {
-                    let sent = ret as usize;
-                    if sent >= FRAME_HEADER_LEN {
-                        total_bytes += sent - FRAME_HEADER_LEN;
-                    }
-                } else {
-                    let err = io::Error::last_os_error();
-                    if err.kind() == io::ErrorKind::WouldBlock {
-                        break;
-                    } else if err.raw_os_error() == Some(libc::EPIPE) {
-                        return Err(WriteError::ProcessNotRunning);
-                    } else {
-                        return Err(WriteError::Internal(nix::Error::from_raw(
-                            err.raw_os_error().unwrap_or(libc::EIO),
-                        )));
-                    }
+                match nix::sys::uio::writev(fd, frame) {
+                    Ok(n) => total_bytes += n,
+                    Err(nix::errno::Errno::EAGAIN) => break,
+                    Err(nix::errno::Errno::EPIPE) => return Err(WriteError::ProcessNotRunning),
+                    Err(e) => return Err(WriteError::Internal(e)),
                 }
             }
 
@@ -280,8 +188,52 @@ impl NetBackend for Unixstream {
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
-        // TODO: Fix borrow checker issue with RxContext API
-        todo!("unixstream recv needs refactoring")
+        let fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
+        let vnet_offset = if !self.backend_handles_vnet_hdr {
+            super::vnet_hdr_len()
+        } else {
+            0
+        };
+
+        self.rx_producer.feed(MAX_RX_BATCH);
+
+        let header_buf = &mut self.rx_header_buf;
+        let header_pos = &mut self.rx_header_pos;
+        let expecting = &mut self.expecting_frame_length;
+
+        self.rx_producer.produce(|chains, completer| {
+            for (i, chain) in chains.iter_mut().enumerate() {
+                // Read frame header
+                let frame_len = match try_read_frame_header(fd, header_buf, header_pos, expecting) {
+                    Some(len) => len,
+                    None => break,
+                };
+                let total_len = vnet_offset + frame_len;
+
+                // Write vnet header at start of new frame
+                if completer.bytes_used(i) == 0 && vnet_offset > 0 {
+                    write_to_iovecs(chain, &super::DEFAULT_VNET_HDR);
+                    completer.advance(chain, i, vnet_offset);
+                }
+
+                // Read payload (truncated to remaining frame bytes)
+                let remaining = total_len - completer.bytes_used(i);
+                let iovecs = truncate_iovecs(chain, remaining);
+
+                match readv(fd, iovecs) {
+                    Ok(n) if n > 0 => {
+                        completer.advance(chain, i, n);
+                        if completer.bytes_used(i) >= total_len {
+                            completer.finish(i);
+                            *expecting = None;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+
+        Ok(())
     }
 
     fn raw_socket_fd(&self) -> RawFd {
