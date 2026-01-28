@@ -102,21 +102,24 @@ impl NetWorker {
         let virtq_rx_ev_fd = self.queue_evts[RX_INDEX].as_raw_fd();
         let virtq_tx_ev_fd = self.queue_evts[TX_INDEX].as_raw_fd();
         let backend_socket = self.backend.raw_socket_fd();
-        log::debug!("virtio-net fds: rx_ev={}, tx_ev={}, backend={}", virtq_rx_ev_fd, virtq_tx_ev_fd, backend_socket);
 
         let epoll = Epoll::new().unwrap();
 
-        let _ = epoll.ctl(
+        if let Err(e) = epoll.ctl(
             ControlOperation::Add,
             virtq_rx_ev_fd,
             &EpollEvent::new(EventSet::IN, virtq_rx_ev_fd as u64),
-        );
-        let _ = epoll.ctl(
+        ) {
+            log::error!("Failed to add rx_ev fd {} to epoll: {:?}", virtq_rx_ev_fd, e);
+        }
+        if let Err(e) = epoll.ctl(
             ControlOperation::Add,
             virtq_tx_ev_fd,
             &EpollEvent::new(EventSet::IN, virtq_tx_ev_fd as u64),
-        );
-        let _ = epoll.ctl(
+        ) {
+            log::error!("Failed to add tx_ev fd {} to epoll: {:?}", virtq_tx_ev_fd, e);
+        }
+        if let Err(e) = epoll.ctl(
             ControlOperation::Add,
             backend_socket,
             &EpollEvent::new(
@@ -124,7 +127,9 @@ impl NetWorker {
                 EventSet::IN | EventSet::OUT | EventSet::READ_HANG_UP,
                 backend_socket as u64,
             ),
-        );
+        ) {
+            log::error!("Failed to add backend fd {} to epoll: {:?}", backend_socket, e);
+        }
 
         loop {
             let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
@@ -134,36 +139,33 @@ impl NetWorker {
                         let source = event.fd();
                         let event_set = event.event_set();
                         log::trace!("virtio-net epoll event: fd={} event_set={:?}", source, event_set);
-                        match event_set {
-                            EventSet::IN if source == virtq_rx_ev_fd => {
-                                log::trace!("virtio-net: rx queue event");
-                                self.process_rx_queue_event();
-                            }
-                            EventSet::IN if source == virtq_tx_ev_fd => {
-                                log::trace!("virtio-net: tx queue event");
-                                self.process_tx_queue_event();
-                            }
-                            _ if source == backend_socket => {
-                                if event_set.contains(EventSet::HANG_UP)
-                                    || event_set.contains(EventSet::READ_HANG_UP)
-                                {
-                                    log::error!("Got {event_set:?} on backend fd, virtio-net will stop working");
-                                    eprintln!("LIBKRUN VIRTIO-NET FATAL: Backend process seems to have quit or crashed! Networking is now disabled!");
-                                } else {
-                                    if event_set.contains(EventSet::IN) {
-                                        self.process_rx();
-                                    }
 
-                                    if event_set.contains(EventSet::OUT) {
-                                        self.process_tx();
-                                    }
+                        // Match by source fd first, then check event flags
+                        if source == virtq_rx_ev_fd && event_set.contains(EventSet::IN) {
+                            log::trace!("virtio-net: rx queue event");
+                            self.process_rx_queue_event();
+                        } else if source == virtq_tx_ev_fd && event_set.contains(EventSet::IN) {
+                            log::trace!("virtio-net: tx queue event");
+                            self.process_tx_queue_event();
+                        } else if source == backend_socket {
+                            if event_set.contains(EventSet::HANG_UP)
+                                || event_set.contains(EventSet::READ_HANG_UP)
+                            {
+                                log::error!("Got {event_set:?} on backend fd, virtio-net will stop working");
+                                eprintln!("LIBKRUN VIRTIO-NET FATAL: Backend process seems to have quit or crashed! Networking is now disabled!");
+                            } else {
+                                if event_set.contains(EventSet::IN) {
+                                    self.process_rx();
+                                }
+
+                                if event_set.contains(EventSet::OUT) {
+                                    self.process_tx();
                                 }
                             }
-                            _ => {
-                                log::warn!(
-                                    "Received unknown event: {event_set:?} from fd: {source:?}"
-                                );
-                            }
+                        } else {
+                            log::warn!(
+                                "Received unknown event: {event_set:?} from fd: {source:?}"
+                            );
                         }
                     }
                 }

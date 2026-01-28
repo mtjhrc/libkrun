@@ -6,6 +6,7 @@ use nix::unistd::read;
 use std::io::IoSlice;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs, write_to_iovecs};
@@ -71,6 +72,11 @@ impl Unixstream {
         mem: GuestMemoryMmap,
         interrupt: InterruptTransport,
     ) -> Self {
+        // Set socket to non-blocking mode (critical for epoll-based event loop)
+        if let Err(e) = fd.set_nonblocking(true) {
+            log::error!("Failed to set O_NONBLOCK on the socket: {e}");
+        }
+
         if let Err(e) = setsockopt(&fd, sockopt::SndBuf, &(16 * 1024 * 1024)) {
             log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
         }
@@ -107,7 +113,7 @@ impl Unixstream {
         let fd = socket(
             AddressFamily::Unix,
             SockType::Stream,
-            SockFlag::empty(),
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
             None,
         )
         .map_err(ConnectError::CreateSocket)?;

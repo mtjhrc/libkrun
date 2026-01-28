@@ -114,11 +114,9 @@ impl TxQueueConsumer {
 
         while self.pending_count() < max_frames {
             let Some(head) = self.queue.pop(&self.mem) else {
-                log::trace!("TxQueueConsumer::feed() queue empty");
                 break;
             };
             let head_index = head.index;
-            log::trace!("TxQueueConsumer::feed() got descriptor head_index={}", head_index);
 
             // Build iovecs from descriptor chain
             let mut iovecs: SmallVec<[IoSlice<'static>; 4]> = SmallVec::new();

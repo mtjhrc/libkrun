@@ -2,12 +2,13 @@ use libc::{
     c_char, c_int, ifreq, IFF_NO_PI, IFF_TAP, IFF_VNET_HDR, TUN_F_CSUM, TUN_F_TSO4, TUN_F_TSO6,
     TUN_F_UFO,
 };
-use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
+use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{readv, writev};
 use nix::{ioctl_write_int, ioctl_write_ptr};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::{io, mem, ptr};
+use utils::fd::SetNonblockingExt;
 use virtio_bindings::virtio_net::{
     VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6,
     VIRTIO_NET_F_GUEST_UFO,
@@ -90,17 +91,9 @@ impl Tap {
             }
         }
 
-        match fcntl(&fd, FcntlArg::F_GETFL) {
-            Ok(flags) => {
-                if let Err(e) = fcntl(
-                    &fd,
-                    FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
-                ) {
-                    warn!("error switching to non-blocking: id={fd:?}, err={e}");
-                }
-            }
-            Err(e) => error!("couldn't obtain fd flags id={fd:?}, err={e}"),
-        };
+        if let Err(e) = fd.set_nonblocking(true) {
+            log::warn!("Failed to set O_NONBLOCK on tap: {e}");
+        }
 
         let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
         let rx_provider = RxQueueProducer::new(rx_queue, mem, interrupt);
