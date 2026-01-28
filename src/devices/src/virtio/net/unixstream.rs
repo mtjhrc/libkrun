@@ -13,7 +13,7 @@ use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs, write_to_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::TxQueueConsumer;
+use crate::virtio::tx_queue_consumer::{Consumed, TxQueueConsumer};
 use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};
@@ -187,7 +187,7 @@ impl NetBackend for Unixstream {
                 }
             }
 
-            Ok(total_bytes)
+            Ok(Consumed::Bytes(total_bytes))
         })?;
 
         Ok(())

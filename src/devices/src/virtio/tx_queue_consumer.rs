@@ -12,6 +12,15 @@ use super::iovec_utils::iovecs_len;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
+/// Result of a consume callback - indicates how much was consumed.
+#[derive(Debug, Clone, Copy)]
+pub enum Consumed {
+    /// Number of bytes consumed (e.g., from writev return value)
+    Bytes(usize),
+    /// Number of complete descriptor chains consumed (e.g., from sendmmsg return value)
+    Chains(usize),
+}
+
 /// Metadata for a frame in the batch - tracks origin for add_used()
 #[derive(Debug, Clone, Copy)]
 struct FrameMeta {
@@ -207,39 +216,62 @@ impl TxQueueConsumer {
         &self.frame_iovecs[self.sent_frames..]
     }
 
-    /// Consume pending frames using a callback that performs the actual I/O.
+    /// Consume pending chains using a callback that performs the actual I/O.
     ///
-    /// The callback receives the frame iovecs and returns `Ok(bytes_written)`.
+    /// The callback receives the chain iovecs and returns `Ok(Consumed::Bytes(n))`
+    /// or `Ok(Consumed::Chains(n))` to indicate how much was consumed.
+    ///
+    // TODO: Switch to a completer pattern like rx_queue_producer uses, where the
+    // callback receives a completer object to mark chains as complete.
+    ///
     /// The consumer then:
-    /// - Advances by the returned bytes (completing frames as appropriate)
-    /// - Calls add_used() for completed frames
+    /// - Advances by the returned amount (completing chains as appropriate)
+    /// - Calls add_used() for completed chains
     /// - Signals interrupt if needed
     /// - Compacts internal buffers
     ///
-    /// On error (e.g., EAGAIN), pending frames are kept for retry later.
-    ///
-    /// Returns the number of bytes consumed on success.
-    pub fn consume<F, E>(&mut self, f: F) -> Result<usize, E>
+    /// On error (e.g., EAGAIN), pending chains are kept for retry later.
+    pub fn consume<F, E>(&mut self, f: F) -> Result<Consumed, E>
     where
-        F: FnOnce(&[SmallVec<[IoSlice<'static>; 4]>]) -> Result<usize, E>,
+        F: FnOnce(&[SmallVec<[IoSlice<'static>; 4]>]) -> Result<Consumed, E>,
     {
         if !self.has_pending() {
-            return Ok(0);
+            return Ok(Consumed::Chains(0));
         }
 
         match f(self.frame_iovecs()) {
-            Ok(bytes) => {
-                self.advance_bytes(bytes);
+            Ok(consumed) => {
+                match consumed {
+                    Consumed::Bytes(bytes) => self.advance_bytes(bytes),
+                    Consumed::Chains(count) => self.advance_chains(count),
+                }
                 self.compact();
-                Ok(bytes)
+                Ok(consumed)
             }
             Err(e) => Err(e),
         }
     }
 
-    /// Advance by N bytes, completing frames as bytes are consumed.
+    /// Advance by N complete chains (e.g., from sendmmsg return value).
     ///
-    /// Calls add_used() for completed frames and signals interrupt.
+    /// Calls add_used() for each completed chain and signals interrupt.
+    pub fn advance_chains(&mut self, count: usize) {
+        for _ in 0..count {
+            if self.sent_frames >= self.frame_meta.len() {
+                break;
+            }
+            let meta = &self.frame_meta[self.sent_frames];
+            if let Err(e) = self.queue.add_used(&self.mem, meta.head_index, meta.guest_len as u32) {
+                log::error!("TxQueueConsumer: failed to add_used: {e}");
+            }
+            self.sent_frames += 1;
+        }
+        self.signal_used_if_needed();
+    }
+
+    /// Advance by N bytes, completing chains as bytes are consumed.
+    ///
+    /// Calls add_used() for completed chains and signals interrupt.
     pub fn advance_bytes(&mut self, bytes: usize) {
         self.partial_bytes += bytes;
 
