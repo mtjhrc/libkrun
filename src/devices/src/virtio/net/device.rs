@@ -90,7 +90,7 @@ impl Net {
     ) -> Result<Self> {
         let avail_features = features as u64
             | (1 << VIRTIO_NET_F_MAC)
-            | (1 << VIRTIO_RING_F_EVENT_IDX)
+            // | (1 << VIRTIO_RING_F_EVENT_IDX)  // TODO: re-enable after debugging
             | (1 << VIRTIO_F_VERSION_1);
 
         let mut queue_evts = Vec::new();

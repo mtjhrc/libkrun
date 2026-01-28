@@ -59,6 +59,8 @@ impl Tap {
 
         req.ifr_ifru.ifru_flags = IFF_TAP as i16 | IFF_NO_PI as i16 | IFF_VNET_HDR as i16;
 
+        log::info!("Tap::new() fd={} tap={}", fd.as_raw_fd(), tap_name);
+
         let mut offload_flags: u64 = 0;
         if (vnet_features & (1 << VIRTIO_NET_F_GUEST_CSUM)) != 0 {
             offload_flags |= TUN_F_CSUM as u64;
@@ -78,7 +80,7 @@ impl Tap {
                 return Err(ConnectError::TunSetIff(io::Error::from(err)));
             }
 
-            // TODO(slp): replace hardcoded vnet size with cons
+            // TODO(slp): replace hardcoded vnet size with const
             if let Err(err) = tunsetvnethdrsz(fd.as_raw_fd(), &12) {
                 return Err(ConnectError::TunSetVnetHdrSz(io::Error::from(err)));
             }
@@ -117,26 +119,26 @@ impl NetBackend for Tap {
 
         self.tx_consumer.feed(MAX_BATCH);
 
-        // Send each frame with writev (tap only supports one frame at a time)
+        // Each descriptor chain is one packet. TAP's writev combines iovecs into
+        // a single packet (scatter-gather), so we can use it directly without
+        // flattening. One writev call per packet.
         let _ = self.tx_consumer.consume(|frames| {
-            let mut total_bytes = 0usize;
-
-            for frame in frames {
+            let mut total = 0usize;
+            for frame in frames.iter() {
                 if frame.is_empty() {
                     continue;
                 }
-
-                let frame_len: usize = frame.iter().map(|s| s.len()).sum();
-                log::warn!("Tap TX: {} bytes", frame_len);
-
                 match writev(fd, frame) {
-                    Ok(n) => total_bytes += n,
+                    Ok(n) => total += n,
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(nix::errno::Errno::EPIPE) => return Err(WriteError::ProcessNotRunning),
-                    Err(e) => return Err(WriteError::Internal(e)),
+                    Err(e) => {
+                        log::error!("Tap TX failed: {:?}", e);
+                        return Err(WriteError::Internal(e));
+                    }
                 }
             }
-            Ok(total_bytes)
+            Ok(total)
         })?;
 
         Ok(())
@@ -155,10 +157,7 @@ impl NetBackend for Tap {
                 }
 
                 match readv(fd, chain) {
-                    Ok(n) => {
-                        log::warn!("Tap RX: {} bytes", n);
-                        completer.complete(chain, i, n);
-                    }
+                    Ok(n) => completer.complete(chain, i, n),
                     Err(_) => break, // EAGAIN or error, stop receiving
                 }
             }
@@ -171,4 +170,3 @@ impl NetBackend for Tap {
         self.fd.as_raw_fd()
     }
 }
-

@@ -13,6 +13,9 @@ use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 mod test_net_passt;
 use test_net_passt::TestNetPasst;
 
+mod test_net_tap;
+use test_net_tap::TestNetTap;
+
 mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
@@ -43,6 +46,7 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestTsiTcpGuestListen::new()),
         ),
         TestCase::new("net-passt", Box::new(TestNetPasst::new())),
+        TestCase::new("net-tap", Box::new(TestNetTap::new())),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
     ]
 }
