@@ -110,13 +110,18 @@ impl Unixstream {
         mem: GuestMemoryMmap,
         interrupt: InterruptTransport,
     ) -> Result<Self, ConnectError> {
-        let fd = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
-            None,
-        )
-        .map_err(ConnectError::CreateSocket)?;
+        #[cfg(target_os = "linux")]
+        let flags = SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let flags = SockFlag::empty();
+
+        let fd = socket(AddressFamily::Unix, SockType::Stream, flags, None)
+            .map_err(ConnectError::CreateSocket)?;
+
+        // On macOS, set nonblocking after socket creation since SOCK_NONBLOCK isn't available
+        #[cfg(not(target_os = "linux"))]
+        fd.set_nonblocking(true)
+            .map_err(|e| ConnectError::CreateSocket(nix::Error::from_raw(e.raw_os_error().unwrap_or(libc::EIO))))?;
         let peer_addr = UnixAddr::new(&path).map_err(ConnectError::InvalidAddress)?;
         connect(fd.as_raw_fd(), &peer_addr).map_err(ConnectError::Binding)?;
 

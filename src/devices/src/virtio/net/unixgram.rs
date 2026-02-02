@@ -7,8 +7,7 @@ use nix::sys::socket::{
     bind, connect, getsockopt, send, setsockopt, socket, sockopt, AddressFamily, MsgFlags,
     SockFlag, SockType, UnixAddr,
 };
-#[cfg(target_os = "linux")]
-use nix::unistd::unlink;
+use std::fs::remove_file;
 use smallvec::SmallVec;
 use std::io::IoSlice;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -98,7 +97,7 @@ impl Unixgram {
         let local_addr = UnixAddr::new(&PathBuf::from(format!("{}-krun.sock", path.display())))
             .map_err(ConnectError::InvalidAddress)?;
         if let Some(path) = local_addr.path() {
-            _ = unlink(path);
+            _ = remove_file(path);
         }
         bind(fd.as_raw_fd(), &local_addr).map_err(ConnectError::Binding)?;
 
@@ -354,7 +353,7 @@ impl Unixgram {
             // Create the msgs headers with the required sockets.
             for (i, chain) in chains.iter_mut().enumerate() {
                 if chain.is_empty() {
-                    warn!("Empty chain");
+                    log::warn!("Empty chain");
                     continue;
                 }
 
