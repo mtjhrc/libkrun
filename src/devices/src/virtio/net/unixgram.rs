@@ -274,10 +274,19 @@ impl Unixgram {
                 )
             };
 
-            if ret > 0 {
-                for i in 0..(ret as usize) {
-                    let bytes_received = mmsghdrs[i].msg_len as usize;
-                    completer.complete(&mut chains[i], i, bytes_received);
+            match ret {
+                n if n > 0 => {
+                    for i in 0..(n as usize) {
+                        let bytes_received = mmsghdrs[i].msg_len as usize;
+                        completer.complete(&mut chains[i], i, bytes_received);
+                    }
+                }
+                0 => log::warn!("recvmmsg returned 0 (unexpected)"),
+                _ => {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        log::error!("recvmmsg failed: {err}");
+                    }
                 }
             }
         });
@@ -295,19 +304,13 @@ impl Unixgram {
                 return Ok(Consumed::Chains(0));
             }
 
-            // Build adjusted slices (vnet header already skipped in feed())
-            let mut adjusted: SmallVec<[SmallVec<[IoSlice<'_>; 4]>; 32]> = frames
+            // Build msghdr_x array - IoSlice is repr(transparent) over iovec
+            let mut msghdrs: SmallVec<[msghdr_x; 32]> = frames
                 .iter()
                 .take(MAX_TX_BATCH)
-                .map(|frame| frame.iter().cloned().collect())
-                .collect();
-
-            // Build msghdr_x array - IoSlice is repr(transparent) over iovec
-            let mut msghdrs: SmallVec<[msghdr_x; 32]> = adjusted
-                .iter_mut()
-                .map(|slices| msghdr_x {
-                    msg_iov: slices.as_mut_ptr() as *mut iovec,
-                    msg_iovlen: slices.len() as c_int,
+                .map(|frame| msghdr_x {
+                    msg_iov: frame.as_ptr() as *mut iovec,
+                    msg_iovlen: frame.len() as c_int,
                     ..Default::default()
                 })
                 .collect();
@@ -377,10 +380,19 @@ impl Unixgram {
                 )
             };
 
-            if ret > 0 {
-                for i in 0..(ret as usize) {
-                    let bytes_received = msghdrs[i].msg_datalen;
-                    completer.complete(&mut chains[i], i, bytes_received);
+            match ret {
+                n if n > 0 => {
+                    for i in 0..(n as usize) {
+                        let bytes_received = msghdrs[i].msg_datalen;
+                        completer.complete(&mut chains[i], i, bytes_received);
+                    }
+                }
+                0 => log::warn!("recvmsg_x returned 0 (unexpected)"),
+                _ => {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        log::error!("recvmsg_x failed: {err}");
+                    }
                 }
             }
         });
