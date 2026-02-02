@@ -35,7 +35,7 @@ mod host {
 
     use crate::common::setup_fs_and_enter;
     use crate::{krun_call, krun_call_u32};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
     use krun_sys::*;
     use std::ffi::CString;
     use std::io::Write;
@@ -55,6 +55,10 @@ mod host {
     }
 
     impl Test for TestVsockGuestConnect {
+        fn should_run(&self) -> ShouldRun {
+            ShouldRun::yes_unless_macos("broken on macOS")
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let sock_path = test_setup.tmp_dir.join("test.sock");
             let sock_path_cstr = CString::new(sock_path.as_os_str().as_bytes())?;

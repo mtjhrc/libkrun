@@ -21,11 +21,15 @@ mod host {
 
     use crate::common::setup_fs_and_enter;
     use crate::{krun_call, krun_call_u32};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
     use krun_sys::*;
     use std::thread;
 
     impl Test for TestTsiTcpGuestConnect {
+        fn should_run(&self) -> ShouldRun {
+            ShouldRun::yes_unless_macos("broken on macOS")
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let listener = self.tcp_tester.create_server_socket();
             thread::spawn(move || self.tcp_tester.run_server(listener));
