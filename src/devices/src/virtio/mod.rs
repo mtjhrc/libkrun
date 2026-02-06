@@ -22,6 +22,8 @@ pub mod descriptor_utils;
 pub mod device;
 pub mod file_traits;
 #[cfg(feature = "net")]
+pub mod chain_storage;
+#[cfg(feature = "net")]
 pub mod iovec_utils;
 #[cfg(not(any(feature = "tee", feature = "nitro")))]
 pub mod fs;

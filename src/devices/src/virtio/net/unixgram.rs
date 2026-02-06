@@ -174,7 +174,7 @@ impl NetBackend for Unixgram {
                 // Write default vnet header to beginning of buffer
                 write_to_iovecs(iovecs, &super::DEFAULT_VNET_HDR);
                 // Advance iovecs past vnet header so receive goes after it
-                crate::virtio::iovec_utils::advance_iovecs(iovecs, vnet_offset);
+                crate::virtio::iovec_utils::advance_iovecs_vec(iovecs, vnet_offset);
             }
         });
 

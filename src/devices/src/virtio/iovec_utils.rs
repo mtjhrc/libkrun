@@ -27,7 +27,29 @@ pub fn write_to_iovecs(slices: &mut [IoSliceMut], data: &[u8]) -> usize {
     written
 }
 
-/// Advance iovecs in place by `bytes`, removing fully consumed buffers.
+/// Advance iovecs in place by `bytes`, removing fully consumed buffers (Vec version).
+///
+/// Works with Vec, removing consumed iovecs from the front and
+/// adjusting the first remaining iovec's pointer/length as needed.
+pub fn advance_iovecs_vec(iovecs: &mut Vec<IoSliceMut<'_>>, bytes: usize) {
+    let mut remaining = bytes;
+    while remaining > 0 && !iovecs.is_empty() {
+        let first_len = iovecs[0].len();
+        if first_len <= remaining {
+            iovecs.remove(0);
+            remaining -= first_len;
+        } else {
+            let ptr = iovecs[0].as_mut_ptr();
+            let new_len = first_len - remaining;
+            // Safety: advancing pointer within same allocation
+            let new_slice = unsafe { std::slice::from_raw_parts_mut(ptr.add(remaining), new_len) };
+            iovecs[0] = IoSliceMut::new(new_slice);
+            remaining = 0;
+        }
+    }
+}
+
+/// Advance iovecs in place by `bytes`, removing fully consumed buffers (SmallVec version).
 ///
 /// Works with SmallVec, removing consumed iovecs from the front and
 /// adjusting the first remaining iovec's pointer/length as needed.

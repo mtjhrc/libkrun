@@ -5,27 +5,41 @@
 
 use std::io::IoSliceMut;
 
-use smallvec::SmallVec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
+use super::chain_storage::{RxChainStorage, VecRxStorage};
 use super::iovec_utils::write_to_iovecs;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
-/// A pending descriptor chain with its state.
-struct PendingChain {
+/// Metadata for a pending descriptor chain.
+#[derive(Debug)]
+struct PendingChain<M: Default> {
     head_index: u16,
     max_bytes: usize,
     bytes_used: usize,
     finished: bool,
+    /// User-defined metadata from storage (e.g., Vec capacity for mmsghdr)
+    user_meta: M,
 }
 
 /// RxQueueProducer - owns the RX queue and provides buffers for receiving.
 ///
+/// Generic over storage type S, allowing different backends to use optimized
+/// storage (e.g., mmsghdr for recvmmsg). Default is VecRxStorage.
+///
 /// Pops descriptor chains from the virtio RX queue and provides writable
 /// iovecs for receiving data. Unfinished chains are kept pending for the next
 /// produce() call; finished chains get add_used() with their byte counts.
-pub struct RxQueueProducer {
+///
+/// # Safety
+///
+/// The iovecs stored in chain storage point into guest memory owned by `mem`.
+/// The lifetime is erased to 'static because the struct owns the memory reference.
+/// This is safe as long as:
+/// 1. The struct outlives any use of the iovecs
+/// 2. The guest memory is not unmapped while iovecs are in use
+pub struct RxQueueProducer<S: RxChainStorage = VecRxStorage> {
     /// The virtio RX queue
     queue: Queue,
     /// Guest memory reference
@@ -33,82 +47,72 @@ pub struct RxQueueProducer {
     /// Interrupt for signaling guest
     interrupt: InterruptTransport,
 
-    /// Pending chains with their state
-    pending_chains: SmallVec<[PendingChain; 32]>,
-    /// Writable iovecs for each pending descriptor chain
-    /// the 'static is a lie! - see feed_with_transform
-    pending_iovecs: SmallVec<[SmallVec<[IoSliceMut<'static>; 4]>; 32]>,
+    /// Per-chain storage (type depends on S)
+    chain_storage: Vec<S>,
+    /// Metadata for each chain (parallel to chain_storage)
+    chain_meta: Vec<PendingChain<S::Meta>>,
 }
 
-/// Batch for reporting received bytes per chain.
+/// Batch for producing RX chains.
 ///
-/// Provides access to chains and methods to mark them as complete.
+/// Provides access to pending chains and methods to mark them as complete.
 /// Panics if you access or finish an already-finished chain.
-pub struct RxProducerBatch<'a> {
-    pending_chains: &'a mut [PendingChain],
-    pending_iovecs: &'a mut [SmallVec<[IoSliceMut<'static>; 4]>],
+pub struct RxProducerBatch<'a, S: RxChainStorage> {
+    chain_storage: &'a mut [S],
+    chain_meta: &'a mut [PendingChain<S::Meta>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
 }
 
-/// Advance iovecs in place by `bytes`, removing fully consumed buffers.
-fn advance_iovecs<'a>(iovecs: &mut SmallVec<[IoSliceMut<'a>; 4]>, bytes: usize) {
-    let mut remaining = bytes;
-    while remaining > 0 && !iovecs.is_empty() {
-        let first_len = iovecs[0].len();
-        if first_len <= remaining {
-            iovecs.remove(0);
-            remaining -= first_len;
-        } else {
-            let first = &mut iovecs[0];
-            let ptr = first.as_mut_ptr();
-            let new_len = first_len - remaining;
-            // Safety: advancing pointer within same allocation
-            let new_slice = unsafe { std::slice::from_raw_parts_mut(ptr.add(remaining), new_len) };
-            iovecs[0] = IoSliceMut::new(new_slice);
-            remaining = 0;
-        }
-    }
-}
-
-impl RxProducerBatch<'_> {
+impl<S: RxChainStorage> RxProducerBatch<'_, S> {
     /// Number of pending chains.
     #[inline]
     pub fn len(&self) -> usize {
-        self.pending_chains.len()
+        self.chain_storage.len()
     }
 
     /// Returns true if there are no pending chains.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.pending_chains.is_empty()
+        self.chain_storage.is_empty()
     }
 
-    /// Get chain by index. Panics if already finished.
+    /// Get a single chain's mutable slices by index.
     ///
     /// # Lifetime guarantee
     ///
-    /// The returned chain is guaranteed to remain valid and at a stable memory
+    /// The returned slices are guaranteed to remain valid and at a stable memory
     /// location until `finish()` or `complete()` is called for this index.
     /// This is important for unsafe code that takes raw pointers to the iovecs
     /// (e.g., for recvmmsg/sendmmsg).
     ///
     /// # Panics
     ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn chain_mut(&mut self, index: usize) -> &mut SmallVec<[IoSliceMut<'_>; 4]> {
+    /// Panics if index is out of bounds or if the chain has already been finished.
+    pub fn chain_mut(&mut self, index: usize) -> &mut [IoSliceMut<'static>] {
         assert!(
-            !self.pending_chains[index].finished,
+            !self.chain_meta[index].finished,
             "chain_mut: chain at index {} already finished",
             index
         );
-        // Safety: We're returning a reference with a shorter lifetime than 'static,
-        // which is safe. The caller sees IoSliceMut<'_> tied to our borrow.
-        unsafe {
-            &mut *(&mut self.pending_iovecs[index]
-                as *mut SmallVec<[IoSliceMut<'static>; 4]>
-                as *mut SmallVec<[IoSliceMut<'_>; 4]>)
-        }
+        self.chain_storage[index].as_slices_mut()
+    }
+
+    /// Get direct access to the underlying storage for a chain.
+    ///
+    /// This is useful for backends that need to access storage-specific features
+    /// (e.g., getting mmsghdr from MsgHdrRx storage).
+    ///
+    /// # Panics
+    ///
+    /// Panics if index is out of bounds or if the chain has already been finished.
+    pub fn storage_mut(&mut self, index: usize) -> &mut S {
+        assert!(
+            !self.chain_meta[index].finished,
+            "storage_mut: chain at index {} already finished",
+            index
+        );
+        &mut self.chain_storage[index]
     }
 
     /// Write data to chain and advance (without finishing). Returns bytes written.
@@ -151,13 +155,13 @@ impl RxProducerBatch<'_> {
     /// Get bytes already received for chain at index.
     #[inline]
     pub fn bytes_used(&self, index: usize) -> usize {
-        self.pending_chains[index].bytes_used
+        self.chain_meta[index].bytes_used
     }
 
     /// Get maximum bytes the chain can hold.
     #[inline]
     pub fn max_bytes(&self, index: usize) -> usize {
-        self.pending_chains[index].max_bytes
+        self.chain_meta[index].max_bytes
     }
 
     /// Advance bytes used for chain at index (partial receive).
@@ -170,19 +174,19 @@ impl RxProducerBatch<'_> {
     /// Panics if the chain at `index` has already been finished.
     pub fn advance(&mut self, index: usize, bytes: usize) {
         assert!(
-            !self.pending_chains[index].finished,
+            !self.chain_meta[index].finished,
             "advance: chain at index {} already finished",
             index
         );
-        let chain = &mut self.pending_chains[index];
-        chain.bytes_used += bytes;
+        let meta = &mut self.chain_meta[index];
+        meta.bytes_used += bytes;
         debug_assert!(
-            chain.bytes_used <= chain.max_bytes,
+            meta.bytes_used <= meta.max_bytes,
             "advance: bytes_used {} exceeds max_bytes {}",
-            chain.bytes_used,
-            chain.max_bytes
+            meta.bytes_used,
+            meta.max_bytes
         );
-        advance_iovecs(&mut self.pending_iovecs[index], bytes);
+        self.chain_storage[index].advance(bytes);
     }
 
     /// Mark chain at index as finished.
@@ -194,20 +198,20 @@ impl RxProducerBatch<'_> {
     ///
     /// Panics if the chain at `index` has already been finished.
     pub fn finish(&mut self, index: usize) {
-        let chain = &mut self.pending_chains[index];
+        let meta = &mut self.chain_meta[index];
         assert!(
-            !chain.finished,
+            !meta.finished,
             "finish: chain at index {} already finished",
             index
         );
-        chain.finished = true;
+        meta.finished = true;
         log::trace!(
             "RxProducerBatch::finish: index={} head_index={} bytes_used={}",
             index,
-            chain.head_index,
-            chain.bytes_used
+            meta.head_index,
+            meta.bytes_used
         );
-        if let Err(e) = self.queue.add_used(self.mem, chain.head_index, chain.bytes_used as u32) {
+        if let Err(e) = self.queue.add_used(self.mem, meta.head_index, meta.bytes_used as u32) {
             log::error!("RxProducerBatch: failed to add_used: {e}");
         }
     }
@@ -224,26 +228,27 @@ impl RxProducerBatch<'_> {
 }
 
 
-impl RxQueueProducer {
-    /// Create a new RxQueueProvider with the given queue, memory, and interrupt.
+impl<S: RxChainStorage> RxQueueProducer<S> {
+    /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
             queue,
             mem,
             interrupt,
-            pending_chains: SmallVec::new(),
-            pending_iovecs: SmallVec::new(),
+            chain_storage: Vec::new(),
+            chain_meta: Vec::new(),
         }
     }
 
     /// Number of chains currently pending (ready for receive).
     pub fn pending_count(&self) -> usize {
-        self.pending_chains.len()
+        self.chain_meta.len()
     }
 
-    /// Feed descriptor chains from queue up to max_frames.
+    /// Feed descriptor chains from queue up to max_frames (simple version).
     ///
-    /// Returns the number of new frames added.
+    /// This is the common case - just tracks the byte count of each chain.
+    /// For advanced use cases (e.g., writing headers), use `feed_with_transform`.
     pub fn feed(&mut self, max_frames: usize) -> usize {
         self.feed_with_transform(max_frames, |_iovecs| {
             // No transformation
@@ -260,9 +265,17 @@ impl RxQueueProducer {
     /// network backend doesn't provide.
     ///
     /// Returns the number of frames added.
+    ///
+    /// # Arguments
+    /// * `max_frames` - Maximum frames to feed (including already pending)
+    /// * `transform` - Callback to transform each descriptor chain's iovecs
+    ///
+    /// # Lifetime Note
+    /// The callback uses HRTB to hide the internal 'static lifetime. The iovecs
+    /// point into guest memory owned by this struct - do not store references.
     pub fn feed_with_transform<F>(&mut self, max_frames: usize, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(&mut SmallVec<[IoSliceMut<'a>; 4]>),
+        F: for<'a> FnMut(&mut Vec<IoSliceMut<'a>>),
     {
         let mut added = 0;
 
@@ -275,11 +288,10 @@ impl RxQueueProducer {
             // Safety: The 'static lifetime here is a lie - the slices actually point into
             // `self.mem`. This is safe because:
             // 1. `self` owns `mem`, so the memory outlives these iovecs
-            // 2. The iovecs are stored in `self.pending_iovecs` (requires 'static for storage)
-            // 3. The HRTB `for<'a>` on callbacks erases the 'static before user code sees it
-            // 4. All access goes through `produce()` which borrows `&mut self`, preventing
+            // 2. The iovecs are stored in chain_storage (requires 'static for storage)
+            // 3. All access goes through `produce()` which borrows `&mut self`, preventing
             //    use-after-free (can't drop self while iovecs are in use)
-            let mut iovecs: SmallVec<[IoSliceMut<'static>; 4]> = SmallVec::new();
+            let mut iovecs: Vec<IoSliceMut<'static>> = Vec::new();
             let mut valid = true;
 
             for desc in head.into_iter() {
@@ -289,7 +301,7 @@ impl RxQueueProducer {
                         iovecs.push(iov);
                     } else {
                         log::error!(
-                            "RxQueueProvider: failed to map descriptor addr={:x} len={}",
+                            "RxQueueProducer: failed to map descriptor addr={:x} len={}",
                             desc.addr.raw_value(),
                             desc.len
                         );
@@ -302,11 +314,12 @@ impl RxQueueProducer {
             if !valid || iovecs.is_empty() {
                 // Invalid or empty - mark as used with 0 bytes
                 if let Err(e) = self.queue.add_used(&self.mem, head_index, 0) {
-                    log::error!("RxQueueProvider: failed to add_used: {e}");
+                    log::error!("RxQueueProducer: failed to add_used: {e}");
                 }
                 continue;
             }
 
+            // Compute original chain length before transformation
             let max_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
 
             // Apply transformation (e.g., write vnet header and advance iovecs)
@@ -316,13 +329,18 @@ impl RxQueueProducer {
             let remaining_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
             let transform_bytes = max_bytes - remaining_bytes;
 
-            self.pending_chains.push(PendingChain {
+            // Create storage from the iovecs
+            let mut user_meta = S::Meta::default();
+            let storage = S::from_iovecs(iovecs, &mut user_meta);
+
+            self.chain_storage.push(storage);
+            self.chain_meta.push(PendingChain {
                 head_index,
                 max_bytes,
                 bytes_used: transform_bytes,
                 finished: false,
+                user_meta,
             });
-            self.pending_iovecs.push(iovecs);
             added += 1;
         }
 
@@ -330,15 +348,24 @@ impl RxQueueProducer {
     }
 
     /// Convert a descriptor to a mutable IoSlice pointing into guest memory.
+    ///
+    /// Returns None if the descriptor's memory region cannot be found or mapped.
+    ///
+    /// # Safety
+    /// The returned IoSliceMut has 'static lifetime but actually points into `self.mem`.
+    /// This is safe because `self` owns `mem` and the IoSliceMut won't outlive `self`.
     fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'static>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
         let ptr = slice.ptr_guard_mut().as_ptr();
 
         // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
+        // The slice points into pinned guest memory that won't move.
         let byte_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+
+        // Transmute to 'static - safe because we own the memory reference
         let static_slice: &'static mut [u8] = unsafe { std::mem::transmute(byte_slice) };
-        
+
         Some(IoSliceMut::new(static_slice))
     }
 
@@ -348,16 +375,16 @@ impl RxQueueProducer {
     /// and methods to mark them as complete. Returns the number of chains finished.
     pub fn produce<F>(&mut self, f: F) -> usize
     where
-        F: for<'a> FnOnce(&mut RxProducerBatch<'a>),
+        F: for<'a> FnOnce(&mut RxProducerBatch<'a, S>),
     {
-        if self.pending_chains.is_empty() {
+        if self.chain_meta.is_empty() {
             return 0;
         }
 
         {
             let mut batch = RxProducerBatch {
-                pending_chains: &mut self.pending_chains,
-                pending_iovecs: &mut self.pending_iovecs,
+                chain_storage: &mut self.chain_storage,
+                chain_meta: &mut self.chain_meta,
                 queue: &mut self.queue,
                 mem: &self.mem,
             };
@@ -367,10 +394,12 @@ impl RxQueueProducer {
         // Remove finished chains (can be out-of-order, so remove all marked finished)
         let mut finished_count = 0;
         let mut i = 0;
-        while i < self.pending_chains.len() {
-            if self.pending_chains[i].finished {
-                self.pending_chains.remove(i);
-                self.pending_iovecs.remove(i);
+        while i < self.chain_meta.len() {
+            if self.chain_meta[i].finished {
+                // Clear storage properly (calls S::clear with meta)
+                self.chain_storage[i].clear(&mut self.chain_meta[i].user_meta);
+                self.chain_storage.remove(i);
+                self.chain_meta.remove(i);
                 finished_count += 1;
             } else {
                 i += 1;
@@ -395,7 +424,7 @@ impl RxQueueProducer {
                 log::trace!("RxQueueProducer: needs_notification returned false, not signaling");
             }
             Err(e) => {
-                log::error!("RxQueueProvider: needs_notification error: {e}");
+                log::error!("RxQueueProducer: needs_notification error: {e}");
             }
         }
     }
@@ -418,19 +447,23 @@ impl RxQueueProducer {
 
 #[cfg(test)]
 mod tests {
-    use crate::virtio::iovec_utils::write_to_iovecs;
+    use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
     use crate::virtio::test_utils::{
         create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
     };
 
     use super::RxQueueProducer;
+    use crate::virtio::chain_storage::VecRxStorage;
+
+    /// Helper type alias for tests using default storage
+    type TestRxProducer = RxQueueProducer<VecRxStorage>;
 
     #[test]
     fn test_new_producer_is_empty() {
         let mem = create_memory();
         let queue = create_test_queue();
         let _driver = VirtQueueDriver::new(&queue, &mem);
-        let producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         assert_eq!(producer.pending_count(), 0);
     }
@@ -442,7 +475,7 @@ mod tests {
         let driver = VirtQueueDriver::new(&queue, &mem);
         driver.writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = producer.feed(10);
 
@@ -458,7 +491,7 @@ mod tests {
         // Chain of 2 writable descriptors
         driver.writable(&[512, 1024]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = producer.feed(10);
 
@@ -487,7 +520,7 @@ mod tests {
             .writable(&[1500])
             .writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = producer.feed(10);
 
@@ -507,7 +540,7 @@ mod tests {
             .writable(&[1500])
             .writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = producer.feed(2);
 
@@ -522,7 +555,7 @@ mod tests {
         let driver = VirtQueueDriver::new(&queue, &mem);
         driver.writable(&[1500]).writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         producer.feed(10);
         assert_eq!(producer.pending_count(), 2);
@@ -553,7 +586,7 @@ mod tests {
             .writable(&[1500])
             .writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         producer.feed(10);
 
@@ -579,7 +612,7 @@ mod tests {
         let driver = VirtQueueDriver::new(&queue, &mem);
         driver.writable(&[1500]).writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         producer.feed(10);
 
@@ -607,7 +640,7 @@ mod tests {
         let queue = create_test_queue();
         let _driver = VirtQueueDriver::new(&queue, &mem);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         assert_eq!(producer.feed(10), 0);
         assert_eq!(producer.pending_count(), 0);
@@ -622,7 +655,7 @@ mod tests {
         // Chain with readable then writable (readable should be skipped for RX)
         driver.readable_then_writable(&[b"ignored"], &[1400]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         producer.feed(10);
 
@@ -643,7 +676,7 @@ mod tests {
         // Chain of 3 writable descriptors forming one buffer
         driver.writable(&[100, 200, 300]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         producer.feed(10);
         assert_eq!(producer.pending_count(), 1);
@@ -679,13 +712,13 @@ mod tests {
             .writable(&[6, 12, 6])
             .writable(&[6, 12, 6]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         // First feed: get 2 buffers, skip 2-byte header from each
         let added = producer.feed_with_transform(2, |iovecs| {
             // Write 2-byte header, then advance past it
             write_to_iovecs(iovecs, b"HD");
-            super::advance_iovecs(iovecs, 2);
+            advance_iovecs_vec(iovecs, 2);
         });
         assert_eq!(added, 2);
         assert_eq!(producer.pending_count(), 2);
@@ -710,7 +743,7 @@ mod tests {
         // Second feed: get 1 more (1 pending + 1 new = 2)
         let added = producer.feed_with_transform(2, |iovecs| {
             write_to_iovecs(iovecs, b"HD");
-            super::advance_iovecs(iovecs, 2);
+            advance_iovecs_vec(iovecs, 2);
         });
         assert_eq!(added, 1);
         assert_eq!(producer.pending_count(), 2);
@@ -754,7 +787,7 @@ mod tests {
             .writable(&[1500])
             .writable(&[1500]);
 
-        let mut producer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+        let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         producer.feed(10);
         assert_eq!(producer.pending_count(), 3);
