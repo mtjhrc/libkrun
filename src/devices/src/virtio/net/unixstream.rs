@@ -13,7 +13,7 @@ use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs, write_to_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::{Consumed, TxQueueConsumer};
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};
@@ -174,26 +174,28 @@ impl NetBackend for Unixstream {
 
         let fd = self.fd.as_fd();
 
-        // Frames already have header prepended, just writev each one
-        let _ = self.tx_consumer.consume(|frames| {
+        // Chains already have header prepended, just writev each one
+        self.tx_consumer.consume(|batch| {
             let mut total_bytes = 0usize;
 
-            for frame in frames {
-                if frame.is_empty() {
-                    warn!("Empty frame for send!");
+            for i in 0..batch.len() {
+                let chain = batch.chain(i);
+                if chain.is_empty() {
                     continue;
                 }
 
-                match nix::sys::uio::writev(fd, frame) {
+                match nix::sys::uio::writev(fd, chain) {
                     Ok(n) => total_bytes += n,
                     Err(nix::errno::Errno::EAGAIN) => break,
-                    Err(nix::errno::Errno::EPIPE) => return Err(WriteError::ProcessNotRunning),
-                    Err(e) => return Err(WriteError::Internal(e)),
+                    Err(e) => {
+                        log::error!("Unixstream TX failed: {:?}", e);
+                        break;
+                    }
                 }
             }
 
-            Ok(Consumed::Bytes(total_bytes))
-        })?;
+            batch.advance_bytes(total_bytes);
+        });
 
         Ok(())
     }

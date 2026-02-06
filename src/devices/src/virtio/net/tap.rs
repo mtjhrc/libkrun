@@ -18,7 +18,7 @@ use vm_memory::GuestMemoryMmap;
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::{Consumed, TxQueueConsumer};
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 ioctl_write_ptr!(tunsetiff, b'T', 202, c_int);
@@ -113,26 +113,26 @@ impl NetBackend for Tap {
         self.tx_consumer.feed(MAX_BATCH);
 
         // Each descriptor chain is one packet. TAP's writev combines iovecs into
-        // a single packet (scatter-gather), so we can use it directly without
-        // flattening. One writev call per packet.
-        let _ = self.tx_consumer.consume(|frames| {
+        // a single packet, so we can use it directly without flattening. 
+        // One writev syscall per packet.
+        self.tx_consumer.consume(|batch| {
             let mut total = 0usize;
-            for frame in frames.iter() {
-                if frame.is_empty() {
+            for i in 0..batch.len() {
+                let chain = batch.chain(i);
+                if chain.is_empty() {
                     continue;
                 }
-                match writev(fd, frame) {
+                match writev(fd, chain) {
                     Ok(n) => total += n,
                     Err(nix::errno::Errno::EAGAIN) => break,
-                    Err(nix::errno::Errno::EPIPE) => return Err(WriteError::ProcessNotRunning),
                     Err(e) => {
                         log::error!("Tap TX failed: {:?}", e);
-                        return Err(WriteError::Internal(e));
+                        break;
                     }
                 }
             }
-            Ok(Consumed::Bytes(total))
-        })?;
+            batch.advance_bytes(total);
+        });
 
         Ok(())
     }

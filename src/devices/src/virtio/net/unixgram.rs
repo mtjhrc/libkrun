@@ -19,7 +19,7 @@ use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
 use crate::virtio::iovec_utils::write_to_iovecs;
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::{Consumed, TxQueueConsumer};
+use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 #[cfg(target_os = "macos")]
@@ -197,21 +197,20 @@ impl Unixgram {
     fn send_linux(&mut self) -> Result<(), WriteError> {
         let fd = self.fd.as_raw_fd();
 
-        let _ = self.tx_consumer.consume(|frames| {
-            if frames.is_empty() {
-                return Ok(Consumed::Chains(0));
+        self.tx_consumer.consume(|batch| {
+            if batch.is_empty() {
+                return;
             }
 
-            let mut mmsghdrs: SmallVec<[mmsghdr; 32]> = frames
-                .iter()
-                .take(MAX_TX_BATCH)
-                .map(|frame| {
-                    let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
-                    hdr.msg_hdr.msg_iov = frame.as_ptr() as *mut iovec;
-                    hdr.msg_hdr.msg_iovlen = frame.len() as _;
-                    hdr
-                })
-                .collect();
+            // Build mmsghdr array from chains
+            let mut mmsghdrs: SmallVec<[mmsghdr; 32]> = SmallVec::new();
+            for i in 0..batch.len().min(MAX_TX_BATCH) {
+                let chain = batch.chain(i);
+                let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
+                hdr.msg_hdr.msg_iov = chain.as_ptr() as *mut iovec;
+                hdr.msg_hdr.msg_iovlen = chain.len() as _;
+                mmsghdrs.push(hdr);
+            }
 
             let ret = unsafe {
                 libc::sendmmsg(
@@ -224,19 +223,17 @@ impl Unixgram {
 
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
-                return match err.kind() {
-                    std::io::ErrorKind::WouldBlock => Ok(Consumed::Chains(0)),
-                    _ if err.raw_os_error() == Some(libc::EPIPE) => {
-                        Err(WriteError::ProcessNotRunning)
+                match err.kind() {
+                    std::io::ErrorKind::WouldBlock => {}
+                    _ => {
+                        log::error!("sendmmsg failed: {err}");
                     }
-                    _ => Err(WriteError::Internal(nix::Error::from_raw(
-                        err.raw_os_error().unwrap_or(libc::EIO),
-                    ))),
-                };
+                }
+                return;
             }
 
-            Ok(Consumed::Chains(ret as usize))
-        })?;
+            batch.complete_chains(ret as usize);
+        });
 
         Ok(())
     }
@@ -299,24 +296,23 @@ impl Unixgram {
 #[cfg(target_os = "macos")]
 impl Unixgram {
     fn send_macos(&mut self) -> Result<(), WriteError> {
-        use std::io;
         let fd = self.fd.as_raw_fd();
 
-        let _ = self.tx_consumer.consume(|frames| {
-            if frames.is_empty() {
-                return Ok(Consumed::Chains(0));
+        self.tx_consumer.consume(|batch| {
+            if batch.is_empty() {
+                return;
             }
 
-            // Build msghdr_x array - IoSlice is repr(transparent) over iovec
-            let msghdrs: SmallVec<[msghdr_x; 32]> = frames
-                .iter()
-                .take(MAX_TX_BATCH)
-                .map(|frame| msghdr_x {
-                    msg_iov: frame.as_ptr() as *mut iovec,
-                    msg_iovlen: frame.len() as c_int,
+            // Build msghdr_x array from chains
+            let mut msghdrs: SmallVec<[msghdr_x; 32]> = SmallVec::new();
+            for i in 0..batch.len().min(MAX_TX_BATCH) {
+                let chain = batch.chain(i);
+                msghdrs.push(msghdr_x {
+                    msg_iov: chain.as_ptr() as *mut iovec,
+                    msg_iovlen: chain.len() as c_int,
                     ..Default::default()
-                })
-                .collect();
+                });
+            }
 
             let ret = unsafe {
                 super::socket_x::sendmsg_x(
@@ -328,18 +324,18 @@ impl Unixgram {
             };
 
             if ret < 0 {
-                let err = io::Error::last_os_error();
-                return match err.kind() {
-                    io::ErrorKind::WouldBlock => Ok(Consumed::Chains(0)),
-                    io::ErrorKind::BrokenPipe => Err(WriteError::ProcessNotRunning),
-                    _ => Err(WriteError::Internal(nix::Error::from_raw(
-                        err.raw_os_error().unwrap_or(libc::EIO),
-                    ))),
-                };
+                let err = std::io::Error::last_os_error();
+                match err.kind() {
+                    std::io::ErrorKind::WouldBlock => {}
+                    _ => {
+                        log::error!("sendmsg_x failed: {err}");
+                    }
+                }
+                return;
             }
 
-            Ok(Consumed::Chains(ret as usize))
-        })?;
+            batch.complete_chains(ret as usize);
+        });
 
         Ok(())
     }
