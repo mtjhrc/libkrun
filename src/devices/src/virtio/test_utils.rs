@@ -160,6 +160,22 @@ impl<'a> VirtQueueHarness<'a> {
         self.avail_idx.set(avail + 1);
         self.vq.avail.idx.set(self.avail_idx.get() as u16);
     }
+
+    /// Get the used ring entries as (descriptor_id, len) pairs.
+    pub fn used_entries(&self) -> Vec<(u16, u32)> {
+        let count = self.vq.used.idx.get() as usize;
+        (0..count)
+            .map(|i| {
+                let elem = self.vq.used.ring[i].get();
+                (elem.id as u16, elem.len)
+            })
+            .collect()
+    }
+
+    /// Get the number of used ring entries.
+    pub fn used_count(&self) -> u16 {
+        self.vq.used.idx.get()
+    }
 }
 
 /// Helper for building descriptor chains in tests.
@@ -254,18 +270,38 @@ impl<'a, 'b> DescChainBuilder<'a, 'b> {
     }
 }
 
-/// Extension trait for VirtQueue setup.
-pub trait VirtQueueExt<'a> {
+/// Extension trait for VirtQueue setup and verification in tests.
+pub trait VirtQueueTestExt<'a> {
     fn builder<'b>(&'a self, mem: &'a GuestMemoryMmap) -> DescChainBuilder<'a, 'b>
     where
         'a: 'b;
+
+    /// Get the used ring entries as (descriptor_id, len) pairs.
+    fn used_entries(&self) -> Vec<(u16, u32)>;
+
+    /// Get the number of used ring entries.
+    fn used_count(&self) -> u16;
 }
 
-impl<'a> VirtQueueExt<'a> for VirtQueue<'a> {
+impl<'a> VirtQueueTestExt<'a> for VirtQueue<'a> {
     fn builder<'b>(&'a self, mem: &'a GuestMemoryMmap) -> DescChainBuilder<'a, 'b>
     where
         'a: 'b,
     {
         DescChainBuilder::new(self, mem)
+    }
+
+    fn used_entries(&self) -> Vec<(u16, u32)> {
+        let count = self.used.idx.get() as usize;
+        (0..count)
+            .map(|i| {
+                let elem = self.used.ring[i].get();
+                (elem.id as u16, elem.len)
+            })
+            .collect()
+    }
+
+    fn used_count(&self) -> u16 {
+        self.used.idx.get()
     }
 }

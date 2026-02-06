@@ -332,7 +332,7 @@ mod tests {
 
     use crate::virtio::queue::tests::VirtQueue;
     use crate::virtio::test_utils::{
-        create_interrupt, create_memory, read_data, VirtQueueExt, DATA_ADDR, QUEUE_ADDR,
+        create_interrupt, create_memory, read_data, VirtQueueTestExt, DATA_ADDR, QUEUE_ADDR,
         QUEUE_SIZE,
     };
 
@@ -448,6 +448,12 @@ mod tests {
             &read_data(&mem, GuestAddress(DATA_ADDR + 1500), 17),
             b"Received packet 2"
         );
+
+        // Verify add_used was called with actual bytes written (17), not buffer capacity (1500)
+        let used = vq.used_entries();
+        assert_eq!(used.len(), 2);
+        assert_eq!(used[0], (0, 17)); // desc_id=0, 17 bytes written
+        assert_eq!(used[1], (1, 17)); // desc_id=1, 17 bytes written
     }
 
     #[test]
@@ -570,6 +576,11 @@ mod tests {
             read_data(&mem, GuestAddress(DATA_ADDR + 0x200), 300),
             vec![0xCC; 300]
         );
+
+        // Verify add_used reports 600 bytes for the chained descriptor
+        let used = vq.used_entries();
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0], (0, 600)); // head descriptor is 0, 600 bytes total
     }
 
     #[test]

@@ -338,7 +338,8 @@ mod tests {
 
     use crate::virtio::queue::tests::VirtQueue;
     use crate::virtio::test_utils::{
-        create_interrupt, create_memory, VirtQueueExt, VirtQueueHarness, QUEUE_ADDR, QUEUE_SIZE,
+        create_interrupt, create_memory, VirtQueueHarness, VirtQueueTestExt, QUEUE_ADDR,
+        QUEUE_SIZE,
     };
 
     use super::{Consumed, TxQueueConsumer};
@@ -385,6 +386,11 @@ mod tests {
                 Ok::<_, ()>(Consumed::Bytes(13))
             })
             .unwrap();
+
+        // Verify add_used was called with correct length
+        let used = vq.used_entries();
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0], (0, 13)); // desc_id=0, len=13 (original guest bytes)
     }
 
     #[test]
@@ -488,6 +494,12 @@ mod tests {
 
         assert!(matches!(result, Ok(Consumed::Bytes(21)))); // 10 + 11
         assert_eq!(consumer.pending_count(), 0);
+
+        // Verify add_used was called for both frames with correct lengths
+        let used = vq.used_entries();
+        assert_eq!(used.len(), 2);
+        assert_eq!(used[0], (0, 10)); // "FirstFrame"
+        assert_eq!(used[1], (1, 11)); // "SecondFrame"
     }
 
     #[test]
@@ -610,6 +622,11 @@ mod tests {
 
         assert!(matches!(result, Ok(Consumed::Bytes(100))));
         assert_eq!(consumer.pending_count(), 0);
+
+        // IMPORTANT: add_used reports ORIGINAL guest length (112), not transformed (100)
+        let used = vq.used_entries();
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0], (0, 112)); // 12-byte header + 100-byte payload
     }
 
     #[test]
@@ -762,6 +779,13 @@ mod tests {
             .consume(|_| Ok::<_, ()>(Consumed::Bytes(35)))
             .unwrap();
         assert_eq!(consumer.pending_count(), 0); // all done
+
+        // Verify add_used was called for all 3 frames with ORIGINAL guest lengths (50 each)
+        let used = harness.used_entries();
+        assert_eq!(used.len(), 3);
+        assert_eq!(used[0], (0, 50)); // 10-byte header + 40-byte payload
+        assert_eq!(used[1], (1, 50));
+        assert_eq!(used[2], (2, 50));
     }
 
     #[test]
