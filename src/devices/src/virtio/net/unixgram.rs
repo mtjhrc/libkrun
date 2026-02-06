@@ -244,15 +244,16 @@ impl Unixgram {
     fn recv_linux(&mut self) {
         let fd = self.fd.as_raw_fd();
 
-        self.rx_producer.produce(|chains, completer| {
-            if chains.is_empty() {
+        self.rx_producer.produce(|batch| {
+            if batch.is_empty() {
                 return;
             }
 
             // Build mmsghdr array - iovecs already point past vnet header from feed_with_transform
             let mut mmsghdrs: SmallVec<[mmsghdr; 32]> = SmallVec::new();
 
-            for chain in chains.iter_mut() {
+            for i in 0..batch.len() {
+                let chain = batch.chain_mut(i);
                 if chain.is_empty() {
                     log::error!("Empty chain in recv_linux");
                     continue;
@@ -280,7 +281,7 @@ impl Unixgram {
                     for i in 0..(n as usize) {
                         // vnet header bytes already tracked by feed_with_transform
                         let bytes_received = mmsghdrs[i].msg_len as usize;
-                        completer.complete(&mut chains[i], i, bytes_received);
+                        batch.complete(i, bytes_received);
                     }
                 }
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),
@@ -346,17 +347,18 @@ impl Unixgram {
     fn recv_macos(&mut self) {
         let fd = self.fd.as_raw_fd();
 
-        self.rx_producer.produce(|chains, completer| {
-            if chains.is_empty() {
+        self.rx_producer.produce(|batch| {
+            if batch.is_empty() {
                 log::trace!("recv_macos: no chains available");
                 return;
             }
-            log::trace!("recv_macos: {} chains available", chains.len());
+            log::trace!("recv_macos: {} chains available", batch.len());
 
             // Build msghdr_x array - iovecs already point past vnet header from feed_with_transform
             let mut msghdrs: SmallVec<[msghdr_x; 32]> = SmallVec::new();
 
-            for chain in chains.iter_mut() {
+            for i in 0..batch.len() {
+                let chain = batch.chain_mut(i);
                 if chain.is_empty() {
                     log::error!("Empty chain in recv_macos");
                     continue;
@@ -385,7 +387,7 @@ impl Unixgram {
                         // vnet header bytes already tracked by feed_with_transform
                         let bytes_received = msghdrs[i].msg_datalen;
                         log::trace!("recv_macos: message {i} has {bytes_received} bytes payload");
-                        completer.complete(&mut chains[i], i, bytes_received);
+                        batch.complete(i, bytes_received);
                     }
                 }
                 0 => log::warn!("recvmsg_x returned 0 (unexpected)"),

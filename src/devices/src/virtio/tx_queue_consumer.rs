@@ -55,6 +55,7 @@ pub struct TxQueueConsumer {
 
     /// Per-frame iovecs (outer vec = frames, inner = iovecs per frame)
     /// Safety: these point into `mem` which is owned by this struct
+    /// the 'static is a lie! - see feed_with_transform
     frame_iovecs: SmallVec<[SmallVec<[IoSlice<'static>; 4]>; 32]>,
     /// Metadata for each frame (parallel to frame_iovecs)
     frame_meta: SmallVec<[FrameMeta; 32]>,

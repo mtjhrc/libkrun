@@ -142,15 +142,16 @@ impl NetBackend for Tap {
 
         self.rx_producer.feed(MAX_BATCH);
 
-        self.rx_producer.produce(|chains, completer| {
-            for (i, chain) in chains.iter_mut().enumerate() {
+        self.rx_producer.produce(|batch| {
+            for i in 0..batch.len() {
+                let chain = batch.chain_mut(i);
                 if chain.is_empty() {
                     warn!("Chain {i} was empty");
                     break;
                 }
 
                 match readv(fd, chain) {
-                    Ok(n) => completer.complete(chain, i, n),
+                    Ok(n) => batch.complete(i, n),
                     Err(_) => break, // EAGAIN or error, stop receiving
                 }
             }

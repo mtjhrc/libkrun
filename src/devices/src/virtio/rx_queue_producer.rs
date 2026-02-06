@@ -8,6 +8,7 @@ use std::io::IoSliceMut;
 use smallvec::SmallVec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
+use super::iovec_utils::write_to_iovecs;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
@@ -25,7 +26,7 @@ struct PendingChain {
 /// iovecs for receiving data. Unfinished chains are kept pending for the next
 /// produce() call; finished chains get add_used() with their byte counts.
 pub struct RxQueueProducer {
-    /// The virtio RX queue (owned)
+    /// The virtio RX queue
     queue: Queue,
     /// Guest memory reference
     mem: GuestMemoryMmap,
@@ -35,12 +36,17 @@ pub struct RxQueueProducer {
     /// Pending chains with their state
     pending_chains: SmallVec<[PendingChain; 32]>,
     /// Writable iovecs for each pending descriptor chain
+    /// the 'static is a lie! - see feed_with_transform
     pending_iovecs: SmallVec<[SmallVec<[IoSliceMut<'static>; 4]>; 32]>,
 }
 
-/// Completer for reporting received bytes per chain.
-pub struct RxCompleter<'a> {
+/// Batch for reporting received bytes per chain.
+///
+/// Provides access to chains and methods to mark them as complete.
+/// Panics if you access or finish an already-finished chain.
+pub struct RxProducerBatch<'a> {
     pending_chains: &'a mut [PendingChain],
+    pending_iovecs: &'a mut [SmallVec<[IoSliceMut<'static>; 4]>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
 }
@@ -65,11 +71,65 @@ fn advance_iovecs<'a>(iovecs: &mut SmallVec<[IoSliceMut<'a>; 4]>, bytes: usize) 
     }
 }
 
-impl RxCompleter<'_> {
+impl RxProducerBatch<'_> {
     /// Number of pending chains.
     #[inline]
     pub fn len(&self) -> usize {
         self.pending_chains.len()
+    }
+
+    /// Returns true if there are no pending chains.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.pending_chains.is_empty()
+    }
+
+    /// Get chain by index. Panics if already finished.
+    ///
+    /// # Lifetime guarantee
+    ///
+    /// The returned chain is guaranteed to remain valid and at a stable memory
+    /// location until `finish()` or `complete()` is called for this index.
+    /// This is important for unsafe code that takes raw pointers to the iovecs
+    /// (e.g., for recvmmsg/sendmmsg).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn chain_mut(&mut self, index: usize) -> &mut SmallVec<[IoSliceMut<'_>; 4]> {
+        assert!(
+            !self.pending_chains[index].finished,
+            "chain_mut: chain at index {} already finished",
+            index
+        );
+        // Safety: We're returning a reference with a shorter lifetime than 'static,
+        // which is safe. The caller sees IoSliceMut<'_> tied to our borrow.
+        unsafe {
+            &mut *(&mut self.pending_iovecs[index]
+                as *mut SmallVec<[IoSliceMut<'static>; 4]>
+                as *mut SmallVec<[IoSliceMut<'_>; 4]>)
+        }
+    }
+
+    /// Write data to chain and complete it. Returns error if data doesn't fit.
+    ///
+    /// This is a convenience method that writes the data, advances bytes_used,
+    /// and finishes the chain in one call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` if the chain doesn't have enough space for all the data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn write_complete(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
+        let written = write_to_iovecs(self.chain_mut(index), data);
+        if written != data.len() {
+            return Err(());
+        }
+        self.complete(index, written);
+        Ok(())
     }
 
     /// Get bytes already received for chain at index.
@@ -88,12 +148,16 @@ impl RxCompleter<'_> {
     ///
     /// Also advances the iovecs in place, removing consumed buffers.
     /// Chain remains pending for next produce() call.
-    pub fn advance<'b>(
-        &mut self,
-        iovecs: &mut SmallVec<[IoSliceMut<'b>; 4]>,
-        index: usize,
-        bytes: usize,
-    ) {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn advance(&mut self, index: usize, bytes: usize) {
+        assert!(
+            !self.pending_chains[index].finished,
+            "advance: chain at index {} already finished",
+            index
+        );
         let chain = &mut self.pending_chains[index];
         chain.bytes_used += bytes;
         debug_assert!(
@@ -102,38 +166,43 @@ impl RxCompleter<'_> {
             chain.bytes_used,
             chain.max_bytes
         );
-        advance_iovecs(iovecs, bytes);
+        advance_iovecs(&mut self.pending_iovecs[index], bytes);
     }
 
     /// Mark chain at index as finished.
     ///
-    /// Chain will be removed and add_used called after callback returns.
+    /// Calls add_used immediately. Chain will be removed after callback returns.
     /// Can be called out-of-order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
     pub fn finish(&mut self, index: usize) {
         let chain = &mut self.pending_chains[index];
-        if chain.finished {
-            return;
-        }
+        assert!(
+            !chain.finished,
+            "finish: chain at index {} already finished",
+            index
+        );
         chain.finished = true;
         log::trace!(
-            "RxCompleter::finish: index={} head_index={} bytes_used={}",
+            "RxProducerBatch::finish: index={} head_index={} bytes_used={}",
             index,
             chain.head_index,
             chain.bytes_used
         );
         if let Err(e) = self.queue.add_used(self.mem, chain.head_index, chain.bytes_used as u32) {
-            log::error!("RxCompleter: failed to add_used: {e}");
+            log::error!("RxProducerBatch: failed to add_used: {e}");
         }
     }
 
     /// Convenience: advance bytes and finish in one call.
-    pub fn complete<'b>(
-        &mut self,
-        iovecs: &mut SmallVec<[IoSliceMut<'b>; 4]>,
-        index: usize,
-        bytes: usize,
-    ) {
-        self.advance(iovecs, index, bytes);
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn complete(&mut self, index: usize, bytes: usize) {
+        self.advance(index, bytes);
         self.finish(index);
     }
 }
@@ -257,25 +326,26 @@ impl RxQueueProducer {
         Some(IoSliceMut::new(static_slice))
     }
 
-    /// Produce frames by calling the callback with chains and a completer.
+    /// Produce frames by calling the callback with a batch.
     ///
-    /// The callback receives iovecs (already advanced by previous calls to advance())
-    /// and an RxCompleter to mark chains as used. Returns the number of chains finished.
+    /// The callback receives an `RxProducerBatch` which provides access to chains
+    /// and methods to mark them as complete. Returns the number of chains finished.
     pub fn produce<F>(&mut self, f: F) -> usize
     where
-        F: for<'a> FnOnce(&mut [SmallVec<[IoSliceMut<'a>; 4]>], &mut RxCompleter<'_>),
+        F: for<'a> FnOnce(&mut RxProducerBatch<'a>),
     {
         if self.pending_chains.is_empty() {
             return 0;
         }
 
         {
-            let mut completer = RxCompleter {
+            let mut batch = RxProducerBatch {
                 pending_chains: &mut self.pending_chains,
+                pending_iovecs: &mut self.pending_iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
             };
-            f(&mut self.pending_iovecs, &mut completer);
+            f(&mut batch);
         }
 
         // Remove finished chains (can be out-of-order, so remove all marked finished)
@@ -332,6 +402,7 @@ impl RxQueueProducer {
 
 #[cfg(test)]
 mod tests {
+    use crate::virtio::iovec_utils::write_to_iovecs;
     use crate::virtio::test_utils::{
         create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
     };
@@ -379,11 +450,12 @@ mod tests {
         assert_eq!(producer.pending_count(), 1);
 
         // Verify buffer structure via produce
-        producer.produce(|chains, _completer| {
-            assert_eq!(chains.len(), 1);
-            assert_eq!(chains[0].len(), 2);
-            assert_eq!(chains[0][0].len(), 512);
-            assert_eq!(chains[0][1].len(), 1024);
+        producer.produce(|batch| {
+            assert_eq!(batch.len(), 1);
+            let chain = batch.chain_mut(0);
+            assert_eq!(chain.len(), 2);
+            assert_eq!(chain[0].len(), 512);
+            assert_eq!(chain[1].len(), 1024);
             // Don't mark anything as finished
         });
     }
@@ -439,12 +511,9 @@ mod tests {
         producer.feed(10);
         assert_eq!(producer.pending_count(), 2);
 
-        let completed = producer.produce(|chains, completer| {
-            chains[0][0][..17].copy_from_slice(b"Received packet 1");
-            completer.complete(&mut chains[0], 0, 17);
-
-            chains[1][0][..17].copy_from_slice(b"Received packet 2");
-            completer.complete(&mut chains[1], 1, 17);
+        let completed = producer.produce(|batch| {
+            batch.write_complete(0, b"Received packet 1").unwrap();
+            batch.write_complete(1, b"Received packet 2").unwrap();
         });
 
         assert_eq!(completed, 2);
@@ -472,13 +541,9 @@ mod tests {
 
         producer.feed(10);
 
-        let completed = producer.produce(|chains, completer| {
-            chains[0][0][..10].copy_from_slice(b"0123456789");
-            completer.complete(&mut chains[0], 0, 10);
-
-            chains[1][0][..10].copy_from_slice(b"ABCDEFGHIJ");
-            completer.complete(&mut chains[1], 1, 10);
-
+        let completed = producer.produce(|batch| {
+            batch.write_complete(0, b"0123456789").unwrap();
+            batch.write_complete(1, b"ABCDEFGHIJ").unwrap();
             // Third not filled - don't call complete
         });
 
@@ -503,16 +568,15 @@ mod tests {
         producer.feed(10);
 
         // First produce: no data received (EAGAIN-like)
-        let completed = producer.produce(|_chains, _completer| {
+        let completed = producer.produce(|_batch| {
             // Don't complete anything
         });
         assert_eq!(completed, 0);
         assert_eq!(producer.pending_count(), 2);
 
         // Second produce: fill one buffer
-        let completed = producer.produce(|chains, completer| {
-            chains[0][0][..5].copy_from_slice(b"Hello");
-            completer.complete(&mut chains[0], 0, 5);
+        let completed = producer.produce(|batch| {
+            batch.write_complete(0, b"Hello").unwrap();
             // Don't complete second buffer
         });
         assert_eq!(completed, 1);
@@ -531,7 +595,7 @@ mod tests {
 
         assert_eq!(producer.feed(10), 0);
         assert_eq!(producer.pending_count(), 0);
-        assert_eq!(producer.produce(|_chains, _completer| {}), 0);
+        assert_eq!(producer.produce(|_batch| {}), 0);
     }
 
     #[test]
@@ -547,10 +611,11 @@ mod tests {
         producer.feed(10);
 
         // Verify buffer structure via produce
-        producer.produce(|chains, _completer| {
-            assert_eq!(chains.len(), 1);
-            assert_eq!(chains[0].len(), 1);
-            assert_eq!(chains[0][0].len(), 1400);
+        producer.produce(|batch| {
+            assert_eq!(batch.len(), 1);
+            let chain = batch.chain_mut(0);
+            assert_eq!(chain.len(), 1);
+            assert_eq!(chain[0].len(), 1400);
         });
     }
 
@@ -567,11 +632,11 @@ mod tests {
         producer.feed(10);
         assert_eq!(producer.pending_count(), 1);
 
-        let completed = producer.produce(|chains, completer| {
-            chains[0][0].copy_from_slice(&[0xAA; 100]);
-            chains[0][1].copy_from_slice(&[0xBB; 200]);
-            chains[0][2].copy_from_slice(&[0xCC; 300]);
-            completer.complete(&mut chains[0], 0, 600);
+        let completed = producer.produce(|batch| {
+            let mut data = vec![0xAA; 100];
+            data.extend(vec![0xBB; 200]);
+            data.extend(vec![0xCC; 300]);
+            batch.write_complete(0, &data).unwrap();
         });
 
         assert_eq!(completed, 1);
@@ -586,8 +651,6 @@ mod tests {
 
     #[test]
     fn test_multiple_produce_cycles() {
-        use crate::virtio::iovec_utils::write_to_iovecs;
-
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -605,7 +668,7 @@ mod tests {
         // First feed: get 2 buffers, skip 2-byte header from each
         let added = producer.feed_with_transform(2, |iovecs| {
             // Write 2-byte header, then advance past it
-            iovecs[0][..2].copy_from_slice(b"HD");
+            write_to_iovecs(iovecs, b"HD");
             super::advance_iovecs(iovecs, 2);
         });
         assert_eq!(added, 2);
@@ -615,18 +678,14 @@ mod tests {
         // - Chain 0: write "AAAABBBBBBBBBBBBCC" (18 bytes) spanning all 3 iovecs, complete
         // - Chain 1: write "XXXX" (4 bytes), partial advance, don't complete
         // Note: header bytes are automatically tracked by feed_with_transform
-        let completed = producer.produce(|chains, completer| {
+        let completed = producer.produce(|batch| {
             // Chain 0: spans [4, 12, 2] of the available [4, 12, 6]
-            let data0 = b"AAAABBBBBBBBBBBBCC";
-            let written = write_to_iovecs(&mut chains[0], data0);
-            assert_eq!(written, 18);
-            completer.complete(&mut chains[0], 0, 18);
+            batch.write_complete(0, b"AAAABBBBBBBBBBBBCC").unwrap();
 
             // Chain 1: partial write, just 4 bytes into first iovec
-            let data1 = b"XXXX";
-            let written = write_to_iovecs(&mut chains[1], data1);
+            let written = write_to_iovecs(batch.chain_mut(1), b"XXXX");
             assert_eq!(written, 4);
-            completer.advance(&mut chains[1], 1, 4);
+            batch.advance(1, 4);
             // Don't complete - leave pending
         });
         assert_eq!(completed, 1);
@@ -634,7 +693,7 @@ mod tests {
 
         // Second feed: get 1 more (1 pending + 1 new = 2)
         let added = producer.feed_with_transform(2, |iovecs| {
-            iovecs[0][..2].copy_from_slice(b"HD");
+            write_to_iovecs(iovecs, b"HD");
             super::advance_iovecs(iovecs, 2);
         });
         assert_eq!(added, 1);
@@ -643,18 +702,15 @@ mod tests {
         // Second produce:
         // - Chain 0 (was chain 1): iovecs already advanced, write "YYYYYYYY" (8 more), complete
         // - Chain 1 (chain 2): fresh chain, write spanning iovecs, complete
-        let completed = producer.produce(|chains, completer| {
+        let completed = producer.produce(|batch| {
             // Chain 0: continue after previous 4 bytes, write 8 more
-            let data0 = b"YYYYYYYY";
-            let written = write_to_iovecs(&mut chains[0], data0);
+            // Use write_to_iovecs + complete since we already have partial bytes_used
+            let written = write_to_iovecs(batch.chain_mut(0), b"YYYYYYYY");
             assert_eq!(written, 8);
-            completer.complete(&mut chains[0], 0, 8); // adds to existing bytes_used
+            batch.complete(0, 8); // adds to existing bytes_used
 
             // Chain 1: fresh chain, write spanning first 2 iovecs
-            let data1 = b"ZZZZZZZZZZZZ"; // 12 bytes: fills [4] + 8 of [12]
-            let written = write_to_iovecs(&mut chains[1], data1);
-            assert_eq!(written, 12);
-            completer.complete(&mut chains[1], 1, 12);
+            batch.write_complete(1, b"ZZZZZZZZZZZZ").unwrap(); // 12 bytes: fills [4] + 8 of [12]
         });
         assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 0);
@@ -673,7 +729,7 @@ mod tests {
     #[test]
     fn test_selective_completion() {
         // Verify that only explicitly completed chains are removed.
-        // With the new API, completion is explicit via completer.finish().
+        // With the new API, completion is explicit via batch.finish().
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -688,9 +744,8 @@ mod tests {
         assert_eq!(producer.pending_count(), 3);
 
         // Complete only buffer 0, leave 1 and 2 pending
-        let completed = producer.produce(|chains, completer| {
-            chains[0][0][..4].copy_from_slice(b"pkt0");
-            completer.complete(&mut chains[0], 0, 4);
+        let completed = producer.produce(|batch| {
+            batch.write_complete(0, b"pkt0").unwrap();
             // Don't complete buffers 1 and 2
         });
 

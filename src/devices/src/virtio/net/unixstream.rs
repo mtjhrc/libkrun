@@ -212,8 +212,8 @@ impl NetBackend for Unixstream {
         let header_pos = &mut self.rx_header_pos;
         let expecting = &mut self.expecting_frame_length;
 
-        self.rx_producer.produce(|chains, completer| {
-            for (i, chain) in chains.iter_mut().enumerate() {
+        self.rx_producer.produce(|batch| {
+            for i in 0..batch.len() {
                 // Read frame header
                 let frame_len = match try_read_frame_header(fd, header_buf, header_pos, expecting) {
                     Some(len) => len,
@@ -222,20 +222,20 @@ impl NetBackend for Unixstream {
                 let total_len = vnet_offset + frame_len;
 
                 // Write vnet header at start of new frame
-                if completer.bytes_used(i) == 0 && vnet_offset > 0 {
-                    write_to_iovecs(chain, &super::DEFAULT_VNET_HDR);
-                    completer.advance(chain, i, vnet_offset);
+                if batch.bytes_used(i) == 0 && vnet_offset > 0 {
+                    write_to_iovecs(batch.chain_mut(i), &super::DEFAULT_VNET_HDR);
+                    batch.advance(i, vnet_offset);
                 }
 
                 // Read payload (truncated to remaining frame bytes)
-                let remaining = total_len - completer.bytes_used(i);
-                let iovecs = truncate_iovecs(chain, remaining);
+                let remaining = total_len - batch.bytes_used(i);
+                let iovecs = truncate_iovecs(batch.chain_mut(i), remaining);
 
                 match readv(fd, iovecs) {
                     Ok(n) if n > 0 => {
-                        completer.advance(chain, i, n);
-                        if completer.bytes_used(i) >= total_len {
-                            completer.finish(i);
+                        batch.advance(i, n);
+                        if batch.bytes_used(i) >= total_len {
+                            batch.finish(i);
                             *expecting = None;
                         }
                     }
