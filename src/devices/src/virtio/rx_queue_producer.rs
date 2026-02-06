@@ -325,3 +325,308 @@ impl RxQueueProducer {
         &self.mem
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use vm_memory::GuestAddress;
+
+    use crate::virtio::queue::tests::VirtQueue;
+    use crate::virtio::test_utils::{
+        create_interrupt, create_memory, read_data, VirtQueueExt, DATA_ADDR, QUEUE_ADDR,
+        QUEUE_SIZE,
+    };
+
+    use super::RxQueueProducer;
+
+    /// Create an RxQueueProducer with a configured VirtQueue
+    fn setup_rx_provider(
+        mem: &vm_memory::GuestMemoryMmap,
+    ) -> (RxQueueProducer, VirtQueue<'_>) {
+        let vq = VirtQueue::new(GuestAddress(QUEUE_ADDR), mem, QUEUE_SIZE);
+        let queue = vq.create_queue();
+        let interrupt = create_interrupt();
+        let provider = RxQueueProducer::new(queue, mem.clone(), interrupt);
+        (provider, vq)
+    }
+
+    #[test]
+    fn test_new_provider_is_empty() {
+        let mem = create_memory();
+        let (provider, _vq) = setup_rx_provider(&mem);
+
+        assert_eq!(provider.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_feed_single_writable_descriptor() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable(1500).end_chain();
+
+        let added = provider.feed(10);
+
+        assert_eq!(added, 1);
+        assert_eq!(provider.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_feed_chained_writable_descriptors() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        // Chain of 2 writable descriptors
+        vq.builder(&mem).writable(512).writable(1024).end_chain();
+
+        let added = provider.feed(10);
+
+        assert_eq!(added, 1);
+        assert_eq!(provider.pending_count(), 1);
+
+        // Verify buffer structure via produce
+        provider.produce(|chains, _completer| {
+            assert_eq!(chains.len(), 1);
+            assert_eq!(chains[0].len(), 2);
+            assert_eq!(chains[0][0].len(), 512);
+            assert_eq!(chains[0][1].len(), 1024);
+            // Don't mark anything as finished
+        });
+    }
+
+    #[test]
+    fn test_feed_multiple_buffers() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500, 1500]);
+
+        let added = provider.feed(10);
+
+        assert_eq!(added, 3);
+        assert_eq!(provider.pending_count(), 3);
+    }
+
+    #[test]
+    fn test_feed_respects_max_frames() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500, 1500, 1500, 1500]);
+
+        let added = provider.feed(2);
+
+        assert_eq!(added, 2);
+        assert_eq!(provider.pending_count(), 2);
+    }
+
+    #[test]
+    fn test_produce_fills_buffers() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500]);
+
+        provider.feed(10);
+        assert_eq!(provider.pending_count(), 2);
+
+        let completed = provider.produce(|chains, completer| {
+            chains[0][0][..17].copy_from_slice(b"Received packet 1");
+            completer.complete(&mut chains[0], 0, 17);
+
+            chains[1][0][..17].copy_from_slice(b"Received packet 2");
+            completer.complete(&mut chains[1], 1, 17);
+        });
+
+        assert_eq!(completed, 2);
+        assert_eq!(provider.pending_count(), 0);
+
+        assert_eq!(
+            &read_data(&mem, GuestAddress(DATA_ADDR), 17),
+            b"Received packet 1"
+        );
+        assert_eq!(
+            &read_data(&mem, GuestAddress(DATA_ADDR + 1500), 17),
+            b"Received packet 2"
+        );
+    }
+
+    #[test]
+    fn test_produce_partial_fill() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500, 1500]);
+
+        provider.feed(10);
+
+        let completed = provider.produce(|chains, completer| {
+            chains[0][0][..10].copy_from_slice(b"0123456789");
+            completer.complete(&mut chains[0], 0, 10);
+
+            chains[1][0][..10].copy_from_slice(b"ABCDEFGHIJ");
+            completer.complete(&mut chains[1], 1, 10);
+
+            // Third not filled - don't call complete
+        });
+
+        assert_eq!(completed, 2);
+        assert_eq!(provider.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_produce_keeps_unused_buffers() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500]);
+
+        provider.feed(10);
+
+        // First produce: no data received (EAGAIN-like)
+        let completed = provider.produce(|_chains, _completer| {
+            // Don't complete anything
+        });
+        assert_eq!(completed, 0);
+        assert_eq!(provider.pending_count(), 2);
+
+        // Second produce: fill one buffer
+        let completed = provider.produce(|chains, completer| {
+            chains[0][0][..5].copy_from_slice(b"Hello");
+            completer.complete(&mut chains[0], 0, 5);
+            // Don't complete second buffer
+        });
+        assert_eq!(completed, 1);
+        assert_eq!(provider.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_empty_queue_returns_zero() {
+        let mem = create_memory();
+        let (mut provider, _vq) = setup_rx_provider(&mem);
+
+        assert_eq!(provider.feed(10), 0);
+        assert_eq!(provider.pending_count(), 0);
+        assert_eq!(provider.produce(|_chains, _completer| {}), 0);
+    }
+
+    #[test]
+    fn test_skips_read_only_descriptors() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        // Chain with readable then writable (readable should be skipped for RX)
+        vq.builder(&mem)
+            .readable(b"ignored")
+            .writable(1400)
+            .end_chain();
+
+        provider.feed(10);
+
+        // Verify buffer structure via produce
+        provider.produce(|chains, _completer| {
+            assert_eq!(chains.len(), 1);
+            assert_eq!(chains[0].len(), 1);
+            assert_eq!(chains[0][0].len(), 1400);
+        });
+    }
+
+    #[test]
+    fn test_chained_buffer_receive() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        // Chain of 3 writable descriptors forming one buffer
+        vq.builder(&mem)
+            .writable(100)
+            .writable(200)
+            .writable(300)
+            .end_chain();
+
+        provider.feed(10);
+        assert_eq!(provider.pending_count(), 1);
+
+        let completed = provider.produce(|chains, completer| {
+            chains[0][0].copy_from_slice(&[0xAA; 100]);
+            chains[0][1].copy_from_slice(&[0xBB; 200]);
+            chains[0][2].copy_from_slice(&[0xCC; 300]);
+            completer.complete(&mut chains[0], 0, 600);
+        });
+
+        assert_eq!(completed, 1);
+
+        // Builder spaces each descriptor by max(size, 0x100):
+        // - desc 0: DATA_ADDR + 0x000
+        // - desc 1: DATA_ADDR + 0x100
+        // - desc 2: DATA_ADDR + 0x200
+        assert_eq!(
+            read_data(&mem, GuestAddress(DATA_ADDR), 100),
+            vec![0xAA; 100]
+        );
+        assert_eq!(
+            read_data(&mem, GuestAddress(DATA_ADDR + 0x100), 200),
+            vec![0xBB; 200]
+        );
+        assert_eq!(
+            read_data(&mem, GuestAddress(DATA_ADDR + 0x200), 300),
+            vec![0xCC; 300]
+        );
+    }
+
+    #[test]
+    fn test_multiple_produce_cycles() {
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500, 1500, 1500]);
+
+        // First feed: get 2 buffers
+        provider.feed(2);
+        assert_eq!(provider.pending_count(), 2);
+
+        // First produce: fill 1
+        let completed = provider.produce(|chains, completer| {
+            chains[0][0][..4].copy_from_slice(b"pkt1");
+            completer.complete(&mut chains[0], 0, 4);
+            // Don't complete second
+        });
+        assert_eq!(completed, 1);
+        assert_eq!(provider.pending_count(), 1);
+
+        // Second feed: get 1 more (1 pending + 1 new = 2)
+        provider.feed(2);
+        assert_eq!(provider.pending_count(), 2);
+
+        // Second produce: fill both
+        let completed = provider.produce(|chains, completer| {
+            for (i, chain) in chains.iter_mut().enumerate() {
+                chain[0][..4].copy_from_slice(b"data");
+                completer.complete(chain, i, 4);
+            }
+        });
+        assert_eq!(completed, 2);
+        assert_eq!(provider.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_selective_completion() {
+        // Verify that only explicitly completed chains are removed.
+        // With the new API, completion is explicit via completer.finish().
+        let mem = create_memory();
+        let (mut provider, vq) = setup_rx_provider(&mem);
+
+        vq.builder(&mem).writable_buffers(&[1500, 1500, 1500]);
+
+        provider.feed(10);
+        assert_eq!(provider.pending_count(), 3);
+
+        // Complete only buffer 0, leave 1 and 2 pending
+        let completed = provider.produce(|chains, completer| {
+            chains[0][0][..4].copy_from_slice(b"pkt0");
+            completer.complete(&mut chains[0], 0, 100);
+            // Don't complete buffers 1 and 2
+        });
+
+        assert_eq!(completed, 1);
+        assert_eq!(provider.pending_count(), 2); // buffers 1 and 2 kept
+    }
+}

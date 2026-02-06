@@ -39,7 +39,7 @@ pub mod rx_queue_producer;
 #[cfg(feature = "net")]
 pub mod tx_queue_consumer;
 #[cfg(all(feature = "net", test))]
-mod queue_tests;
+pub(crate) mod test_utils;
 #[cfg(not(feature = "tee"))]
 pub mod rng;
 #[cfg(feature = "snd")]
