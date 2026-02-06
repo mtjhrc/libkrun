@@ -3,23 +3,38 @@
 
 //! Shared test utilities for TxQueueConsumer and RxQueueProducer tests.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
-use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 use crate::legacy::DummyIrqChip;
-use crate::virtio::queue::tests::{VirtQueue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+use crate::virtio::queue::tests::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+use crate::virtio::queue::{Descriptor, Queue};
 use crate::virtio::InterruptTransport;
 
 // Memory layout constants
-pub const QUEUE_ADDR: u64 = 0;
-pub const DATA_ADDR: u64 = 0x2000;
-pub const MEM_SIZE: u64 = 0x10000;
 pub const QUEUE_SIZE: u16 = 16;
+// Queue structure addresses (must be properly aligned)
+pub const DESC_TABLE_ADDR: u64 = 0x0;      // 16 bytes per descriptor * 16 = 256 bytes
+pub const AVAIL_RING_ADDR: u64 = 0x100;    // 2-byte aligned
+pub const USED_RING_ADDR: u64 = 0x200;     // 4-byte aligned
+pub const DATA_ADDR: u64 = 0x1000;         // Data area starts after queue structures
+pub const MEM_SIZE: u64 = 0x100000;
 
 /// Create a GuestMemoryMmap for testing
 pub fn create_memory() -> GuestMemoryMmap {
     GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap()
+}
+
+/// Create a properly configured Queue for testing
+pub fn create_test_queue() -> Queue {
+    let mut queue = Queue::new(QUEUE_SIZE);
+    queue.size = QUEUE_SIZE;
+    queue.ready = true;
+    queue.desc_table = GuestAddress(DESC_TABLE_ADDR);
+    queue.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+    queue.used_ring = GuestAddress(USED_RING_ADDR);
+    queue
 }
 
 /// Create an InterruptTransport for testing
@@ -34,274 +49,457 @@ pub fn read_data(mem: &GuestMemoryMmap, addr: GuestAddress, len: usize) -> Vec<u
     buf
 }
 
-/// Stateful test harness for VirtQueue that persists across multiple add cycles.
-/// Simulates a guest driver that adds descriptors, waits for device to consume,
-/// then adds more descriptors.
-#[allow(dead_code)]
-pub struct VirtQueueHarness<'a> {
-    vq: VirtQueue<'a>,
-    mem: &'a GuestMemoryMmap,
-    /// Next descriptor table index to use
-    desc_idx: Cell<usize>,
-    /// Next available ring index (matches vq.avail.idx)
-    avail_idx: Cell<usize>,
-    /// Next memory address for data allocation
-    next_addr: Cell<u64>,
+/// A segment within a descriptor chain (address + size + optional expected data)
+#[derive(Clone)]
+pub struct DescSegment {
+    /// Guest physical address of this segment
+    pub addr: u64,
+    /// Length of this segment
+    pub len: u32,
+    /// For readable segments: copy of expected data (None for writable)
+    pub expected_data: Option<Vec<u8>>,
 }
 
-#[allow(dead_code)]
-impl<'a> VirtQueueHarness<'a> {
-    pub fn new(mem: &'a GuestMemoryMmap) -> Self {
-        let vq = VirtQueue::new(GuestAddress(QUEUE_ADDR), mem, QUEUE_SIZE);
+/// Information about a built descriptor chain
+#[derive(Clone)]
+pub struct BuiltChain {
+    /// Head descriptor index (used in add_used)
+    pub head_index: u16,
+    /// Segments in this chain
+    pub segments: Vec<DescSegment>,
+}
+
+impl BuiltChain {
+    /// Total length of all segments in this chain
+    pub fn total_len(&self) -> u32 {
+        self.segments.iter().map(|s| s.len).sum()
+    }
+
+    /// Check if this chain is readable (TX - has expected data)
+    pub fn is_readable(&self) -> bool {
+        self.segments.iter().any(|s| s.expected_data.is_some())
+    }
+
+    /// Check if this chain is writable (RX - no expected data)
+    pub fn is_writable(&self) -> bool {
+        self.segments.iter().all(|s| s.expected_data.is_none())
+    }
+}
+
+/// Expected state for a chain in the used ring.
+#[derive(Debug, Clone)]
+pub enum ExpectedUsed<'a> {
+    /// Writable chain - verify content matches exactly
+    Writable(&'a [u8]),
+    /// Readable chain - verify wasn't modified, expect this length in used ring
+    Readable(u32),
+    /// Readable chain - verify wasn't modified, don't check length
+    ReadableAnyLen,
+}
+
+/// Simulates the guest driver side of a VirtIO queue for testing.
+///
+/// Communicates with the device ONLY through guest memory.
+/// Supports incremental descriptor addition during tests.
+/// Tracks chain metadata for verification (assert_used_len_exact, etc).
+pub struct VirtQueueDriver<'a> {
+    mem: &'a GuestMemoryMmap,
+    /// Queue size (max descriptors)
+    queue_size: u16,
+    /// Descriptor table address in guest memory
+    desc_table: GuestAddress,
+    /// Available ring address in guest memory
+    avail_ring: GuestAddress,
+    /// Used ring address in guest memory
+    used_ring: GuestAddress,
+    /// Next descriptor table index to use
+    desc_idx: Cell<usize>,
+    /// Next available ring index (initialized from memory)
+    avail_idx: Cell<u16>,
+    /// Next memory address for data allocation
+    next_addr: Cell<u64>,
+    /// Tracked chains for verification
+    chains: RefCell<Vec<BuiltChain>>,
+}
+
+impl<'a> VirtQueueDriver<'a> {
+    /// Create a new driver by extracting queue addresses from the Queue struct.
+    ///
+    /// The Queue reference is only used to get addresses - it is NOT stored.
+    /// All communication happens through guest memory.
+    pub fn new(queue: &Queue, mem: &'a GuestMemoryMmap) -> Self {
+        // Extract addresses from queue (not stored)
+        let desc_table = queue.desc_table;
+        let avail_ring = queue.avail_ring;
+        let used_ring = queue.used_ring;
+        let queue_size = queue.size;
+
+        // Read current avail_idx from memory to support mid-test construction
+        let avail_idx_addr = avail_ring.unchecked_add(2);
+        let current_avail_idx: u16 = mem.read_obj(avail_idx_addr).unwrap_or(0);
+
         Self {
-            vq,
             mem,
-            desc_idx: Cell::new(0),
-            avail_idx: Cell::new(0),
+            queue_size,
+            desc_table,
+            avail_ring,
+            used_ring,
+            desc_idx: Cell::new(current_avail_idx as usize), // Start after existing descriptors
+            avail_idx: Cell::new(current_avail_idx),
             next_addr: Cell::new(DATA_ADDR),
+            chains: RefCell::new(Vec::new()),
         }
     }
 
-    /// Create the Queue for the consumer/provider.
-    pub fn create_queue(&self) -> crate::virtio::Queue {
-        self.vq.create_queue()
-    }
+    // ========================================================================
+    // Chain building methods
+    // ========================================================================
 
-    /// Add a readable frame (single descriptor chain) with given data.
-    pub fn add_readable(&self, data: &[u8]) {
-        let addr = self.next_addr.get();
-        let size = data.len() as u64;
-        self.next_addr.set(addr + std::cmp::max(size, 0x100));
-        assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
-
-        self.mem.write(data, GuestAddress(addr)).unwrap();
-
-        let idx = self.desc_idx.get();
-        assert!(idx < QUEUE_SIZE as usize, "descriptor table full");
-        self.vq.dtable[idx].set(addr, data.len() as u32, 0, 0);
-        self.desc_idx.set(idx + 1);
-
-        let avail = self.avail_idx.get();
-        self.vq.avail.ring[avail].set(idx as u16);
-        self.avail_idx.set(avail + 1);
-        self.vq.avail.idx.set(self.avail_idx.get() as u16);
-    }
-
-    /// Add a writable buffer (single descriptor chain) with given size.
-    pub fn add_writable(&self, len: u32) {
-        let addr = self.next_addr.get();
-        self.next_addr.set(addr + std::cmp::max(len as u64, 0x100));
-        assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
-
-        let idx = self.desc_idx.get();
-        assert!(idx < QUEUE_SIZE as usize, "descriptor table full");
-        self.vq.dtable[idx].set(addr, len, VIRTQ_DESC_F_WRITE, 0);
-        self.desc_idx.set(idx + 1);
-
-        let avail = self.avail_idx.get();
-        self.vq.avail.ring[avail].set(idx as u16);
-        self.avail_idx.set(avail + 1);
-        self.vq.avail.idx.set(self.avail_idx.get() as u16);
-    }
-
-    /// Add a chained readable frame (multiple descriptors forming one chain).
-    pub fn add_readable_chained(&self, segments: &[&[u8]]) {
-        assert!(!segments.is_empty());
-        let head_idx = self.desc_idx.get();
+    /// Add a readable chain (for TX). Each slice in `segments` becomes a descriptor.
+    ///
+    /// Simple case (1 descriptor): `driver.readable(&[b"data"])`
+    /// Chained case: `driver.readable(&[b"header", b"payload"])`
+    pub fn readable(&self, segments: &[&[u8]]) -> &Self {
+        assert!(!segments.is_empty(), "readable chain must have at least one segment");
+        let head_idx = self.desc_idx.get() as u16;
+        let mut chain_segments = Vec::new();
 
         for (i, data) in segments.iter().enumerate() {
             let addr = self.next_addr.get();
-            let size = data.len() as u64;
-            self.next_addr.set(addr + std::cmp::max(size, 0x100));
+            self.next_addr.set(addr + data.len() as u64);
             assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
 
+            // Write data to guest memory
             self.mem.write(data, GuestAddress(addr)).unwrap();
 
             let idx = self.desc_idx.get();
-            assert!(idx < QUEUE_SIZE as usize, "descriptor table full");
+            assert!(idx < self.queue_size as usize, "descriptor table full");
 
             let is_last = i == segments.len() - 1;
             let flags = if is_last { 0 } else { VIRTQ_DESC_F_NEXT };
             let next = if is_last { 0 } else { (idx + 1) as u16 };
 
-            self.vq.dtable[idx].set(addr, data.len() as u32, flags, next);
+            // Write descriptor to guest memory
+            self.write_descriptor(idx, addr, data.len() as u32, flags, next);
             self.desc_idx.set(idx + 1);
+
+            chain_segments.push(DescSegment {
+                addr,
+                len: data.len() as u32,
+                expected_data: Some(data.to_vec()),
+            });
         }
 
-        let avail = self.avail_idx.get();
-        self.vq.avail.ring[avail].set(head_idx as u16);
-        self.avail_idx.set(avail + 1);
-        self.vq.avail.idx.set(self.avail_idx.get() as u16);
+        // Add to available ring
+        self.add_to_avail_ring(head_idx);
+
+        // Track chain
+        self.chains.borrow_mut().push(BuiltChain {
+            head_index: head_idx,
+            segments: chain_segments,
+        });
+
+        self
     }
 
-    /// Add a chained writable buffer (multiple descriptors forming one chain).
-    pub fn add_writable_chained(&self, sizes: &[u32]) {
-        assert!(!sizes.is_empty());
-        let head_idx = self.desc_idx.get();
+    /// Add a chain with readable prefix and writable suffix.
+    ///
+    /// This is used to test that RX handlers correctly skip readable descriptors.
+    /// Example: `driver.readable_then_writable(&[b"header"], &[1500])`
+    pub fn readable_then_writable(&self, readable: &[&[u8]], writable: &[u32]) -> &Self {
+        assert!(
+            !readable.is_empty() || !writable.is_empty(),
+            "chain must have at least one segment"
+        );
+        let head_idx = self.desc_idx.get() as u16;
+        let mut chain_segments = Vec::new();
+        let total_segments = readable.len() + writable.len();
+        let mut segment_counter = 0;
 
-        for (i, &len) in sizes.iter().enumerate() {
+        // Add readable descriptors
+        for data in readable.iter() {
             let addr = self.next_addr.get();
-            self.next_addr.set(addr + std::cmp::max(len as u64, 0x100));
+            self.next_addr.set(addr + data.len() as u64);
+            assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
+
+            self.mem.write(data, GuestAddress(addr)).unwrap();
+
+            let idx = self.desc_idx.get();
+            assert!(idx < self.queue_size as usize, "descriptor table full");
+
+            segment_counter += 1;
+            let is_last = segment_counter == total_segments;
+            let flags = if is_last { 0 } else { VIRTQ_DESC_F_NEXT };
+            let next = if is_last { 0 } else { (idx + 1) as u16 };
+
+            self.write_descriptor(idx, addr, data.len() as u32, flags, next);
+            self.desc_idx.set(idx + 1);
+
+            chain_segments.push(DescSegment {
+                addr,
+                len: data.len() as u32,
+                expected_data: Some(data.to_vec()),
+            });
+        }
+
+        // Add writable descriptors
+        for &len in writable.iter() {
+            let addr = self.next_addr.get();
+            self.next_addr.set(addr + len as u64);
             assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
 
             let idx = self.desc_idx.get();
-            assert!(idx < QUEUE_SIZE as usize, "descriptor table full");
+            assert!(idx < self.queue_size as usize, "descriptor table full");
+
+            segment_counter += 1;
+            let is_last = segment_counter == total_segments;
+            let flags = VIRTQ_DESC_F_WRITE | if is_last { 0 } else { VIRTQ_DESC_F_NEXT };
+            let next = if is_last { 0 } else { (idx + 1) as u16 };
+
+            self.write_descriptor(idx, addr, len, flags, next);
+            self.desc_idx.set(idx + 1);
+
+            chain_segments.push(DescSegment {
+                addr,
+                len,
+                expected_data: None,
+            });
+        }
+
+        self.add_to_avail_ring(head_idx);
+
+        self.chains.borrow_mut().push(BuiltChain {
+            head_index: head_idx,
+            segments: chain_segments,
+        });
+
+        self
+    }
+
+    /// Add a writable chain (for RX). Each length in `sizes` becomes a descriptor.
+    ///
+    /// Simple case (1 descriptor): `driver.writable(&[1500])`
+    /// Chained case: `driver.writable(&[12, 1500])` (e.g., header + payload)
+    pub fn writable(&self, sizes: &[u32]) -> &Self {
+        assert!(!sizes.is_empty(), "writable chain must have at least one segment");
+        let head_idx = self.desc_idx.get() as u16;
+        let mut chain_segments = Vec::new();
+
+        for (i, &len) in sizes.iter().enumerate() {
+            let addr = self.next_addr.get();
+            self.next_addr.set(addr + len as u64);
+            assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
+
+            let idx = self.desc_idx.get();
+            assert!(idx < self.queue_size as usize, "descriptor table full");
 
             let is_last = i == sizes.len() - 1;
             let flags = VIRTQ_DESC_F_WRITE | if is_last { 0 } else { VIRTQ_DESC_F_NEXT };
             let next = if is_last { 0 } else { (idx + 1) as u16 };
 
-            self.vq.dtable[idx].set(addr, len, flags, next);
+            // Write descriptor to guest memory
+            self.write_descriptor(idx, addr, len, flags, next);
             self.desc_idx.set(idx + 1);
+
+            chain_segments.push(DescSegment {
+                addr,
+                len,
+                expected_data: None,
+            });
         }
 
-        let avail = self.avail_idx.get();
-        self.vq.avail.ring[avail].set(head_idx as u16);
-        self.avail_idx.set(avail + 1);
-        self.vq.avail.idx.set(self.avail_idx.get() as u16);
+        // Add to available ring
+        self.add_to_avail_ring(head_idx);
+
+        // Track chain
+        self.chains.borrow_mut().push(BuiltChain {
+            head_index: head_idx,
+            segments: chain_segments,
+        });
+
+        self
     }
+
+    fn write_descriptor(&self, idx: usize, addr: u64, len: u32, flags: u16, next: u16) {
+        let desc = Descriptor { addr, len, flags, next };
+        let desc_addr = self.desc_table.unchecked_add((idx * 16) as u64);
+        self.mem.write_obj(desc, desc_addr).unwrap();
+    }
+
+    fn add_to_avail_ring(&self, desc_idx: u16) {
+        let avail_idx = self.avail_idx.get();
+
+        // Write descriptor index to ring[avail_idx]
+        // Available ring layout: flags(2) + idx(2) + ring[size](2*size)
+        let ring_entry_addr = self.avail_ring.unchecked_add(4 + (avail_idx as u64) * 2);
+        self.mem.write_obj(desc_idx, ring_entry_addr).unwrap();
+
+        // Increment and write avail idx
+        let new_avail_idx = avail_idx + 1;
+        self.avail_idx.set(new_avail_idx);
+        let avail_idx_addr = self.avail_ring.unchecked_add(2);
+        self.mem.write_obj(new_avail_idx, avail_idx_addr).unwrap();
+    }
+
+    // ========================================================================
+    // Query methods
+    // ========================================================================
 
     /// Get the used ring entries as (descriptor_id, len) pairs.
     pub fn used_entries(&self) -> Vec<(u16, u32)> {
-        let count = self.vq.used.idx.get() as usize;
-        (0..count)
-            .map(|i| {
-                let elem = self.vq.used.ring[i].get();
-                (elem.id as u16, elem.len)
-            })
-            .collect()
+        // Used ring layout: flags(2) + idx(2) + ring[size]({id:4, len:4}*size)
+        let used_idx_addr = self.used_ring.unchecked_add(2);
+        let used_idx: u16 = self.mem.read_obj(used_idx_addr).unwrap();
+
+        let mut entries = Vec::new();
+        for i in 0..used_idx {
+            // Each used element is 8 bytes: u32 id, u32 len
+            let elem_addr = self.used_ring.unchecked_add(4 + (i as u64) * 8);
+            let id: u32 = self.mem.read_obj(elem_addr).unwrap();
+            let len: u32 = self.mem.read_obj(elem_addr.unchecked_add(4)).unwrap();
+            entries.push((id as u16, len));
+        }
+        entries
     }
 
     /// Get the number of used ring entries.
     pub fn used_count(&self) -> u16 {
-        self.vq.used.idx.get()
+        let used_idx_addr = self.used_ring.unchecked_add(2);
+        self.mem.read_obj(used_idx_addr).unwrap()
     }
-}
 
-/// Helper for building descriptor chains in tests.
-pub struct DescChainBuilder<'a, 'b> {
-    vq: &'a VirtQueue<'b>,
-    mem: &'a GuestMemoryMmap,
-    desc_idx: usize,
-    avail_idx: usize,
-    chain_head: Option<u16>,
-    prev_desc: Option<u16>,
-    next_addr: u64,
-}
+    /// Get the number of chains tracked.
+    pub fn chain_count(&self) -> usize {
+        self.chains.borrow().len()
+    }
 
-impl<'a, 'b> DescChainBuilder<'a, 'b> {
-    fn new(vq: &'a VirtQueue<'b>, mem: &'a GuestMemoryMmap) -> Self {
-        Self {
-            vq,
-            mem,
-            desc_idx: 0,
-            avail_idx: 0,
-            chain_head: None,
-            prev_desc: None,
-            next_addr: DATA_ADDR,
+    // ========================================================================
+    // Verification methods
+    // ========================================================================
+
+    /// Assert the used ring matches expected entries.
+    ///
+    /// Each entry is `(chain_idx, expected)` where `expected` is:
+    /// - `Writable(bytes)` - verify writable chain content matches
+    /// - `Readable(len)` - verify readable chain wasn't modified, check length
+    /// - `ReadableAnyLen` - verify readable chain wasn't modified, skip length check
+    pub fn assert_used(&self, expected: &[(usize, ExpectedUsed<'_>)]) {
+        let used = self.used_entries();
+        let chains = self.chains.borrow();
+
+        assert_eq!(
+            used.len(),
+            expected.len(),
+            "used ring count mismatch: expected {}, got {}",
+            expected.len(),
+            used.len()
+        );
+
+        for (i, (chain_idx, expectation)) in expected.iter().enumerate() {
+            let chain = &chains[*chain_idx];
+            let (actual_id, actual_len) = used[i];
+
+            // Verify descriptor ID
+            assert_eq!(
+                actual_id, chain.head_index,
+                "used[{}] descriptor id mismatch: expected {} (chain {}), got {}",
+                i, chain.head_index, chain_idx, actual_id
+            );
+
+            match expectation {
+                ExpectedUsed::Writable(expected_bytes) => {
+                    // Verify length
+                    assert_eq!(
+                        actual_len,
+                        expected_bytes.len() as u32,
+                        "used[{}] length mismatch: expected {}, got {}",
+                        i,
+                        expected_bytes.len(),
+                        actual_len
+                    );
+                    // Verify content
+                    let actual_data =
+                        self.read_chain_bytes_internal(&chains, *chain_idx, expected_bytes.len());
+                    assert_eq!(
+                        actual_data, *expected_bytes,
+                        "used[{}] content mismatch for chain {}: expected {:?}, got {:?}",
+                        i, chain_idx, expected_bytes, actual_data
+                    );
+                }
+                ExpectedUsed::Readable(expected_len) => {
+                    // Verify readable data wasn't modified
+                    self.assert_chain_unchanged(&chains, *chain_idx);
+                    // Verify length
+                    assert_eq!(
+                        actual_len, *expected_len,
+                        "used[{}] length mismatch: expected {}, got {}",
+                        i, expected_len, actual_len
+                    );
+                }
+                ExpectedUsed::ReadableAnyLen => {
+                    // Verify readable data wasn't modified (skip length check)
+                    self.assert_chain_unchanged(&chains, *chain_idx);
+                }
+            }
         }
     }
 
-    /// Add a readable descriptor with data (for TX).
-    pub fn readable(mut self, data: &[u8]) -> Self {
-        let addr = self.next_addr;
-        let size = data.len() as u64;
-        self.next_addr += std::cmp::max(size, 0x100);
-        assert!(self.next_addr <= MEM_SIZE, "descriptor data exceeds guest memory");
-
-        self.mem.write(data, GuestAddress(addr)).unwrap();
-        self.add_desc(addr, data.len() as u32, 0);
-        self
-    }
-
-    /// Add a writable descriptor buffer (for RX).
-    pub fn writable(mut self, len: u32) -> Self {
-        let addr = self.next_addr;
-        self.next_addr += std::cmp::max(len as u64, 0x100);
-        assert!(self.next_addr <= MEM_SIZE, "descriptor buffer exceeds guest memory");
-
-        self.add_desc(addr, len, VIRTQ_DESC_F_WRITE);
-        self
-    }
-
-    /// End the current chain and make it available.
-    pub fn end_chain(mut self) -> Self {
-        if let Some(head) = self.chain_head.take() {
-            assert!(self.avail_idx < QUEUE_SIZE as usize, "available ring overflow");
-            self.vq.avail.ring[self.avail_idx].set(head);
-            self.avail_idx += 1;
-            self.vq.avail.idx.set(self.avail_idx as u16);
+    /// Assert a single chain's readable segments weren't modified.
+    fn assert_chain_unchanged(&self, chains: &[BuiltChain], chain_idx: usize) {
+        let chain = &chains[chain_idx];
+        for (seg_idx, seg) in chain.segments.iter().enumerate() {
+            if let Some(expected) = &seg.expected_data {
+                let actual = read_data(self.mem, GuestAddress(seg.addr), seg.len as usize);
+                assert_eq!(
+                    &actual, expected,
+                    "chain {} segment {} at addr {:x} was modified: expected {:?}, got {:?}",
+                    chain_idx, seg_idx, seg.addr, expected, actual
+                );
+            }
         }
-        self.prev_desc = None;
-        self
     }
 
-    /// Add multiple readable frames (each is a separate chain).
-    pub fn readable_frames(mut self, frames: &[&[u8]]) -> Self {
-        for data in frames {
-            self = self.readable(data).end_chain();
+    /// Get the slice for a writable chain's segment in guest memory.
+    pub fn writable_slice(&self, chain_idx: usize, segment_idx: usize) -> &[u8] {
+        let chains = self.chains.borrow();
+        let chain = &chains[chain_idx];
+        let seg = &chain.segments[segment_idx];
+        assert!(
+            seg.expected_data.is_none(),
+            "writable_slice called on readable segment"
+        );
+        let slice = self
+            .mem
+            .get_slice(GuestAddress(seg.addr), seg.len as usize)
+            .expect("failed to get slice from guest memory");
+        // Safety: guest memory is pinned and we have a reference to mem
+        unsafe { std::slice::from_raw_parts(slice.ptr_guard_mut().as_ptr(), seg.len as usize) }
+    }
+
+    /// Read data from all segments of a chain into a contiguous Vec.
+    pub fn read_chain(&self, chain_idx: usize) -> Vec<u8> {
+        let chains = self.chains.borrow();
+        self.read_chain_internal(&chains, chain_idx)
+    }
+
+    fn read_chain_internal(&self, chains: &[BuiltChain], chain_idx: usize) -> Vec<u8> {
+        let chain = &chains[chain_idx];
+        let mut data = Vec::new();
+        for seg in &chain.segments {
+            let seg_data = read_data(self.mem, GuestAddress(seg.addr), seg.len as usize);
+            data.extend(seg_data);
         }
-        self
+        data
     }
 
-    /// Add multiple writable buffers (each is a separate chain).
-    pub fn writable_buffers(mut self, sizes: &[u32]) -> Self {
-        for &size in sizes {
-            self = self.writable(size).end_chain();
-        }
-        self
+    /// Read up to `len` bytes from a chain.
+    pub fn read_chain_bytes(&self, chain_idx: usize, len: usize) -> Vec<u8> {
+        let chains = self.chains.borrow();
+        self.read_chain_bytes_internal(&chains, chain_idx, len)
     }
 
-    fn add_desc(&mut self, addr: u64, len: u32, flags: u16) {
-        let idx = self.desc_idx;
-        assert!(idx < QUEUE_SIZE as usize, "descriptor table overflow");
-        self.desc_idx += 1;
-
-        if let Some(prev) = self.prev_desc {
-            let old_flags = self.vq.dtable[prev as usize].flags.get();
-            self.vq.dtable[prev as usize].flags.set(old_flags | VIRTQ_DESC_F_NEXT);
-            self.vq.dtable[prev as usize].next.set(idx as u16);
-        } else {
-            self.chain_head = Some(idx as u16);
-        }
-
-        self.vq.dtable[idx].set(addr, len, flags, 0);
-        self.prev_desc = Some(idx as u16);
-    }
-}
-
-/// Extension trait for VirtQueue setup and verification in tests.
-pub trait VirtQueueTestExt<'a> {
-    fn builder<'b>(&'a self, mem: &'a GuestMemoryMmap) -> DescChainBuilder<'a, 'b>
-    where
-        'a: 'b;
-
-    /// Get the used ring entries as (descriptor_id, len) pairs.
-    fn used_entries(&self) -> Vec<(u16, u32)>;
-
-    /// Get the number of used ring entries.
-    fn used_count(&self) -> u16;
-}
-
-impl<'a> VirtQueueTestExt<'a> for VirtQueue<'a> {
-    fn builder<'b>(&'a self, mem: &'a GuestMemoryMmap) -> DescChainBuilder<'a, 'b>
-    where
-        'a: 'b,
-    {
-        DescChainBuilder::new(self, mem)
-    }
-
-    fn used_entries(&self) -> Vec<(u16, u32)> {
-        let count = self.used.idx.get() as usize;
-        (0..count)
-            .map(|i| {
-                let elem = self.used.ring[i].get();
-                (elem.id as u16, elem.len)
-            })
-            .collect()
-    }
-
-    fn used_count(&self) -> u16 {
-        self.used.idx.get()
+    fn read_chain_bytes_internal(&self, chains: &[BuiltChain], chain_idx: usize, len: usize) -> Vec<u8> {
+        let full = self.read_chain_internal(chains, chain_idx);
+        full[..len.min(full.len())].to_vec()
     }
 }

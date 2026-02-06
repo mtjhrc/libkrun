@@ -179,10 +179,10 @@ impl NetBackend for Unixgram {
         });
 
         #[cfg(target_os = "linux")]
-        self.recv_linux(vnet_offset);
+        self.recv_linux();
 
         #[cfg(target_os = "macos")]
-        self.recv_macos(vnet_offset);
+        self.recv_macos();
 
         Ok(())
     }
@@ -241,7 +241,7 @@ impl Unixgram {
         Ok(())
     }
 
-    fn recv_linux(&mut self, vnet_offset: usize) {
+    fn recv_linux(&mut self) {
         let fd = self.fd.as_raw_fd();
 
         self.rx_producer.produce(|chains, completer| {
@@ -278,10 +278,9 @@ impl Unixgram {
             match ret {
                 n if n > 0 => {
                     for i in 0..(n as usize) {
+                        // vnet header bytes already tracked by feed_with_transform
                         let bytes_received = mmsghdrs[i].msg_len as usize;
-                        // Total bytes = vnet header (written during feed) + payload received
-                        let total_bytes = vnet_offset + bytes_received;
-                        completer.complete(&mut chains[i], i, total_bytes);
+                        completer.complete(&mut chains[i], i, bytes_received);
                     }
                 }
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),
@@ -308,7 +307,7 @@ impl Unixgram {
             }
 
             // Build msghdr_x array - IoSlice is repr(transparent) over iovec
-            let mut msghdrs: SmallVec<[msghdr_x; 32]> = frames
+            let msghdrs: SmallVec<[msghdr_x; 32]> = frames
                 .iter()
                 .take(MAX_TX_BATCH)
                 .map(|frame| msghdr_x {
@@ -344,7 +343,7 @@ impl Unixgram {
         Ok(())
     }
 
-    fn recv_macos(&mut self, vnet_offset: usize) {
+    fn recv_macos(&mut self) {
         let fd = self.fd.as_raw_fd();
 
         self.rx_producer.produce(|chains, completer| {
@@ -383,11 +382,10 @@ impl Unixgram {
                 n if n > 0 => {
                     log::trace!("recv_macos: recvmsg_x returned {n} messages");
                     for i in 0..(n as usize) {
+                        // vnet header bytes already tracked by feed_with_transform
                         let bytes_received = msghdrs[i].msg_datalen;
-                        // Total bytes = vnet header (written during feed) + payload received
-                        let total_bytes = vnet_offset + bytes_received;
-                        log::trace!("recv_macos: message {i} has {bytes_received} bytes payload, {total_bytes} total");
-                        completer.complete(&mut chains[i], i, total_bytes);
+                        log::trace!("recv_macos: message {i} has {bytes_received} bytes payload");
+                        completer.complete(&mut chains[i], i, bytes_received);
                     }
                 }
                 0 => log::warn!("recvmsg_x returned 0 (unexpected)"),

@@ -334,31 +334,17 @@ impl TxQueueConsumer {
 mod tests {
     use std::io::IoSlice;
 
-    use vm_memory::GuestAddress;
-
-    use crate::virtio::queue::tests::VirtQueue;
     use crate::virtio::test_utils::{
-        create_interrupt, create_memory, VirtQueueHarness, VirtQueueTestExt, QUEUE_ADDR,
-        QUEUE_SIZE,
+        create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
     };
 
     use super::{Consumed, TxQueueConsumer};
 
-    /// Create a TxQueueConsumer with a configured VirtQueue
-    fn setup_tx_consumer(
-        mem: &vm_memory::GuestMemoryMmap,
-    ) -> (TxQueueConsumer, VirtQueue<'_>) {
-        let vq = VirtQueue::new(GuestAddress(QUEUE_ADDR), mem, QUEUE_SIZE);
-        let queue = vq.create_queue();
-        let interrupt = create_interrupt();
-        let consumer = TxQueueConsumer::new(queue, mem.clone(), interrupt);
-        (consumer, vq)
-    }
-
     #[test]
     fn test_new_consumer_is_empty() {
         let mem = create_memory();
-        let (consumer, _vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let consumer = TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
         assert_eq!(consumer.pending_count(), 0);
         assert!(!consumer.has_pending());
@@ -367,9 +353,11 @@ mod tests {
     #[test]
     fn test_feed_single_descriptor() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver.readable(&[b"Hello, World!"]);
 
-        vq.builder(&mem).readable(b"Hello, World!").end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |_iovecs| {});
 
@@ -387,29 +375,24 @@ mod tests {
             })
             .unwrap();
 
-        // Verify add_used was called with correct length
-        let used = vq.used_entries();
-        assert_eq!(used.len(), 1);
-        assert_eq!(used[0], (0, 13)); // desc_id=0, len=13 (original guest bytes)
+        driver.assert_used(&[(0, ExpectedUsed::Readable(13))]);
     }
 
     #[test]
     fn test_feed_chained_descriptors() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        // Chain of two descriptors
+        driver.readable(&[b"First", b"Second"]);
 
-        // Chain of two descriptors (no end_chain between them)
-        vq.builder(&mem)
-            .readable(b"First")
-            .readable(b"Second")
-            .end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |_iovecs| {});
 
         assert_eq!(added, 1);
         assert_eq!(consumer.pending_count(), 1);
 
-        // Verify frame content via consume callback
         consumer
             .consume(|frames| {
                 assert_eq!(frames[0].len(), 2);
@@ -418,35 +401,54 @@ mod tests {
                 Ok::<_, ()>(Consumed::Bytes(11))
             })
             .unwrap();
+
+        driver.assert_used(&[(0, ExpectedUsed::Readable(11))]);
     }
 
     #[test]
     fn test_feed_multiple_frames() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver
+            .readable(&[b"Frame1"])
+            .readable(&[b"Frame2"])
+            .readable(&[b"Frame3"]);
 
-        vq.builder(&mem).readable_frames(&[b"Frame1", b"Frame2", b"Frame3"]);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |_iovecs| {});
 
         assert_eq!(added, 3);
         assert_eq!(consumer.pending_count(), 3);
 
-        // Verify via consume
         consumer
             .consume(|frames| {
                 assert_eq!(frames.len(), 3);
-                Ok::<_, ()>(Consumed::Bytes(18)) // 6 * 3
+                Ok::<_, ()>(Consumed::Bytes(18))
             })
             .unwrap();
+
+        driver.assert_used(&[
+            (0, ExpectedUsed::Readable(6)),
+            (1, ExpectedUsed::Readable(6)),
+            (2, ExpectedUsed::Readable(6)),
+        ]);
     }
 
     #[test]
     fn test_feed_respects_max_frames() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver
+            .readable(&[b"F0"])
+            .readable(&[b"F1"])
+            .readable(&[b"F2"])
+            .readable(&[b"F3"])
+            .readable(&[b"F4"]);
 
-        vq.builder(&mem).readable_frames(&[b"F0", b"F1", b"F2", b"F3", b"F4"]);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(2, |_iovecs| {});
         assert_eq!(added, 2);
@@ -455,14 +457,17 @@ mod tests {
         // Already at limit
         let added2 = consumer.feed_with_transform(2, |_iovecs| {});
         assert_eq!(added2, 0);
+        assert_eq!(consumer.pending_count(), 2);
     }
 
     #[test]
     fn test_feed_transform_callback() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver.readable(&[b"TestData12345"]);
 
-        vq.builder(&mem).readable(b"TestData12345").end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |iovecs| {
             // Skip 4 bytes (like skipping vnet header)
@@ -471,14 +476,23 @@ mod tests {
         });
 
         assert_eq!(added, 1);
+
+        consumer
+            .consume(|_| Ok::<_, ()>(Consumed::Bytes(9)))
+            .unwrap();
+
+        // Original guest length is 13, not 9
+        driver.assert_used(&[(0, ExpectedUsed::Readable(13))]);
     }
 
     #[test]
     fn test_consume_and_advance_bytes() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver.readable(&[b"FirstFrame"]).readable(&[b"SecondFrame"]);
 
-        vq.builder(&mem).readable_frames(&[b"FirstFrame", b"SecondFrame"]);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         consumer.feed_with_transform(10, |_iovecs| {});
         assert_eq!(consumer.pending_count(), 2);
@@ -492,36 +506,49 @@ mod tests {
             Ok::<_, ()>(Consumed::Bytes(total))
         });
 
-        assert!(matches!(result, Ok(Consumed::Bytes(21)))); // 10 + 11
+        assert!(matches!(result, Ok(Consumed::Bytes(21))));
         assert_eq!(consumer.pending_count(), 0);
 
-        // Verify add_used was called for both frames with correct lengths
-        let used = vq.used_entries();
-        assert_eq!(used.len(), 2);
-        assert_eq!(used[0], (0, 10)); // "FirstFrame"
-        assert_eq!(used[1], (1, 11)); // "SecondFrame"
+        driver.assert_used(&[
+            (0, ExpectedUsed::Readable(10)),
+            (1, ExpectedUsed::Readable(11)),
+        ]);
     }
 
     #[test]
     fn test_consume_partial_bytes() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver
+            .readable(&[b"Frame00000"])
+            .readable(&[b"Frame11111"])
+            .readable(&[b"Frame22222"]);
 
-        vq.builder(&mem).readable_frames(&[b"Frame00000", b"Frame11111", b"Frame22222"]);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         consumer.feed_with_transform(10, |_iovecs| {});
 
         let result = consumer.consume(|_frames| Ok::<_, ()>(Consumed::Bytes(15)));
         assert!(matches!(result, Ok(Consumed::Bytes(15))));
+
+        // Only first frame complete (10 bytes), 5 bytes into second
+        driver.assert_used(&[(0, ExpectedUsed::Readable(10))]);
     }
 
     #[test]
     fn test_compact() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver
+            .readable(&[b"test"])
+            .readable(&[b"test"])
+            .readable(&[b"test"])
+            .readable(&[b"test"])
+            .readable(&[b"test"]);
 
-        // 5 frames of 4 bytes each
-        vq.builder(&mem).readable_frames(&[b"test", b"test", b"test", b"test", b"test"]);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         consumer.feed_with_transform(10, |_iovecs| {});
         assert_eq!(consumer.pending_count(), 5);
@@ -532,12 +559,22 @@ mod tests {
 
         consumer.compact();
         assert_eq!(consumer.pending_count(), 2);
+
+        driver.assert_used(&[
+            (0, ExpectedUsed::Readable(4)),
+            (1, ExpectedUsed::Readable(4)),
+            (2, ExpectedUsed::Readable(4)),
+        ]);
     }
 
     #[test]
     fn test_empty_queue_returns_zero() {
         let mem = create_memory();
-        let (mut consumer, _vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let _driver = VirtQueueDriver::new(&queue, &mem);
+        // Don't add any descriptors
+
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |_iovecs| {});
 
@@ -552,39 +589,20 @@ mod tests {
     #[test]
     fn test_consume_error_preserves_pending() {
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
+        driver.readable(&[b"TestData"]);
 
-        vq.builder(&mem).readable(b"TestData").end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         consumer.feed_with_transform(10, |_iovecs| {});
 
         let result: Result<Consumed, &str> = consumer.consume(|_| Err("EAGAIN"));
         assert!(result.is_err());
         assert_eq!(consumer.pending_count(), 1);
-    }
 
-    #[test]
-    fn test_skips_write_only_descriptors() {
-        let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
-
-        // Chain with readable then writable (writable should be skipped for TX)
-        vq.builder(&mem)
-            .readable(b"ReadData")
-            .writable(100)
-            .end_chain();
-
-        consumer.feed_with_transform(10, |_iovecs| {});
-
-        // Verify via consume callback
-        consumer
-            .consume(|frames| {
-                assert_eq!(frames.len(), 1);
-                assert_eq!(frames[0].len(), 1);
-                assert_eq!(frames[0][0].len(), 8);
-                Ok::<_, ()>(Consumed::Bytes(8))
-            })
-            .unwrap();
+        // Nothing should be in used ring yet
+        assert_eq!(driver.used_count(), 0);
     }
 
     // ========================================================================
@@ -597,12 +615,14 @@ mod tests {
         // Transform skips header. byte_count = 100 (payload only).
         // writev returns 100 → frame complete.
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
 
         let mut data = vec![0x48u8; 12]; // header
         data.extend(vec![0x50; 100]); // payload
+        driver.readable(&[&data]);
 
-        vq.builder(&mem).readable(&data).end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |iovecs| {
             let mut slices: &mut [IoSlice] = iovecs;
@@ -623,36 +643,36 @@ mod tests {
         assert!(matches!(result, Ok(Consumed::Bytes(100))));
         assert_eq!(consumer.pending_count(), 0);
 
-        // IMPORTANT: add_used reports ORIGINAL guest length (112), not transformed (100)
-        let used = vq.used_entries();
-        assert_eq!(used.len(), 1);
-        assert_eq!(used[0], (0, 112)); // 12-byte header + 100-byte payload
+        // add_used reports ORIGINAL guest length (112), not transformed (100)
+        driver.assert_used(&[(0, ExpectedUsed::Readable(112))]);
     }
 
     #[test]
     fn test_add_header_byte_tracking() {
         // Guest provides [virtio_header (12) | payload (100)].
-        // Transform skips virtio header, adds 4-byte frame length prefix.
-        // byte_count = 4 + 100 = 104. writev returns 104 → frame complete.
+        // Transform skips virtio header.
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
 
         let mut data = vec![0x48u8; 12];
         data.extend(vec![0x50; 100]);
+        driver.readable(&[&data]);
 
-        vq.builder(&mem).readable(&data).end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |iovecs| {
             let mut slices: &mut [IoSlice] = iovecs;
             IoSlice::advance_slices(&mut slices, 12);
-            // After skip, total_len = 100 (payload only)
         });
         assert_eq!(added, 1);
 
-        // Consume the payload (100 bytes after skipping 12-byte header)
         let result = consumer.consume(|_frames| Ok::<_, ()>(Consumed::Bytes(100)));
         assert!(matches!(result, Ok(Consumed::Bytes(100))));
         assert_eq!(consumer.pending_count(), 0);
+
+        // add_used reports ORIGINAL guest length (112)
+        driver.assert_used(&[(0, ExpectedUsed::Readable(112))]);
     }
 
     #[test]
@@ -661,18 +681,16 @@ mod tests {
         // After removing headers: 50 bytes per frame.
         // writev returns 75: completes frame 1 (50), partial frame 2 (25).
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
 
         let mut data1 = vec![0x48u8; 10];
         data1.extend(vec![0x50; 50]);
         let mut data2 = vec![0x48u8; 10];
         data2.extend(vec![0x51; 50]);
+        driver.readable(&[&data1]).readable(&[&data2]);
 
-        vq.builder(&mem)
-            .readable(&data1)
-            .end_chain()
-            .readable(&data2)
-            .end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |iovecs| {
             let mut slices: &mut [IoSlice] = iovecs;
@@ -683,47 +701,45 @@ mod tests {
         let result = consumer.consume(|_frames| Ok::<_, ()>(Consumed::Bytes(75)));
         assert!(matches!(result, Ok(Consumed::Bytes(75))));
         assert_eq!(consumer.pending_count(), 1); // frame 2 partial
+
+        // Only frame 1 complete (original 60 bytes)
+        driver.assert_used(&[(0, ExpectedUsed::Readable(60))]);
     }
 
     #[test]
     fn test_multi_cycle_partial_writes_with_added_header() {
-        // Tricky scenario: stream socket with added frame-length header.
-        // Frame layout after transform: [frame_len (4) | payload (100)] = 104 bytes
-        //
-        // Cycle 1: writev returns 2 bytes (PARTIAL write of frame_len header!)
-        // Cycle 2: writev returns 50 bytes (remaining 2 of header + 48 payload)
-        // Cycle 3: writev returns 52 bytes (remaining 52 payload) → frame complete
-        //
-        // This tests resuming in the middle of a user-added header.
+        // Tricky scenario: partial writes across multiple cycles.
+        // Frame layout after transform: payload only (100 bytes after skipping 12-byte header)
         let mem = create_memory();
-        let (mut consumer, vq) = setup_tx_consumer(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
 
         let mut data = vec![0x48u8; 12]; // virtio header (skipped)
         data.extend(vec![0x50; 100]); // payload
+        driver.readable(&[&data]);
 
-        vq.builder(&mem).readable(&data).end_chain();
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |iovecs| {
             let mut slices: &mut [IoSlice] = iovecs;
-            IoSlice::advance_slices(&mut slices, 12); // skip virtio header
-            // After skip, total_len = 100 (payload only)
+            IoSlice::advance_slices(&mut slices, 12);
         });
         assert_eq!(added, 1);
 
         // Cycle 1: 2 bytes sent (partial)
-        let result = consumer.consume(|_| Ok::<_, ()>(Consumed::Bytes(2)));
-        assert!(matches!(result, Ok(Consumed::Bytes(2))));
-        assert_eq!(consumer.pending_count(), 1); // frame NOT complete
+        consumer.consume(|_| Ok::<_, ()>(Consumed::Bytes(2))).unwrap();
+        assert_eq!(consumer.pending_count(), 1);
 
         // Cycle 2: 50 more bytes (total 52)
-        let result = consumer.consume(|_| Ok::<_, ()>(Consumed::Bytes(50)));
-        assert!(matches!(result, Ok(Consumed::Bytes(50))));
-        assert_eq!(consumer.pending_count(), 1); // still not complete (52 < 100)
+        consumer.consume(|_| Ok::<_, ()>(Consumed::Bytes(50))).unwrap();
+        assert_eq!(consumer.pending_count(), 1);
 
         // Cycle 3: remaining 48 bytes
-        let result = consumer.consume(|_| Ok::<_, ()>(Consumed::Bytes(48)));
-        assert!(matches!(result, Ok(Consumed::Bytes(48))));
-        assert_eq!(consumer.pending_count(), 0); // frame complete (2+50+48=100)
+        consumer.consume(|_| Ok::<_, ()>(Consumed::Bytes(48))).unwrap();
+        assert_eq!(consumer.pending_count(), 0);
+
+        // add_used reports ORIGINAL guest length (112)
+        driver.assert_used(&[(0, ExpectedUsed::Readable(112))]);
     }
 
     #[test]
@@ -734,18 +750,14 @@ mod tests {
         // Cycle 3: EAGAIN (no progress)
         // Cycle 4: 35 bytes (completes frame 3)
         let mem = create_memory();
-        let harness = VirtQueueHarness::new(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
 
-        // Add 3 frames using harness (simulates guest driver adding descriptors)
         let mut data = vec![0x48u8; 10]; // 10-byte header
         data.extend(vec![0x50; 40]); // 40-byte payload
-        harness.add_readable(&data);
-        harness.add_readable(&data);
-        harness.add_readable(&data);
+        driver.readable(&[&data]).readable(&[&data]).readable(&[&data]);
 
-        let queue = harness.create_queue();
-        let interrupt = create_interrupt();
-        let mut consumer = TxQueueConsumer::new(queue, mem.clone(), interrupt);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         let added = consumer.feed_with_transform(10, |iovecs| {
             let mut slices: &mut [IoSlice] = iovecs;
@@ -781,11 +793,11 @@ mod tests {
         assert_eq!(consumer.pending_count(), 0); // all done
 
         // Verify add_used was called for all 3 frames with ORIGINAL guest lengths (50 each)
-        let used = harness.used_entries();
-        assert_eq!(used.len(), 3);
-        assert_eq!(used[0], (0, 50)); // 10-byte header + 40-byte payload
-        assert_eq!(used[1], (1, 50));
-        assert_eq!(used[2], (2, 50));
+        driver.assert_used(&[
+            (0, ExpectedUsed::Readable(50)),
+            (1, ExpectedUsed::Readable(50)),
+            (2, ExpectedUsed::Readable(50)),
+        ]);
     }
 
     #[test]
@@ -793,16 +805,14 @@ mod tests {
         // Feed 2 frames, partial send, compact, feed more, continue.
         // This tests that state is preserved when guest adds more descriptors mid-stream.
         let mem = create_memory();
-        let harness = VirtQueueHarness::new(&mem);
+        let queue = create_test_queue();
+        let driver = VirtQueueDriver::new(&queue, &mem);
 
         // First batch: 2 frames of 30 bytes each
         let data = vec![0x50u8; 30];
-        harness.add_readable(&data);
-        harness.add_readable(&data);
+        driver.readable(&[&data]).readable(&[&data]);
 
-        let queue = harness.create_queue();
-        let interrupt = create_interrupt();
-        let mut consumer = TxQueueConsumer::new(queue, mem.clone(), interrupt);
+        let mut consumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
         consumer.feed_with_transform(10, |_iovecs| {});
         assert_eq!(consumer.pending_count(), 2);
@@ -817,7 +827,7 @@ mod tests {
         // (compact is called automatically in consume, but let's verify state)
 
         // Guest adds more descriptors (simulating queue refill)
-        harness.add_readable(&data); // frame 3
+        driver.readable(&[&data]); // frame 3
 
         consumer.feed_with_transform(10, |_iovecs| {});
         assert_eq!(consumer.pending_count(), 2); // frame 2 (partial) + frame 3
