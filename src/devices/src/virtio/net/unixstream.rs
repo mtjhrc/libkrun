@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs, write_to_iovecs};
+use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
@@ -164,7 +164,6 @@ impl NetBackend for Unixstream {
             // For now, Box::leak the header bytes to get 'static lifetime.
             let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
             iovecs.insert(0, IoSlice::new(header));
-
         });
         log::trace!("Unixstream::send() fed {} frames, pending={}", fed, self.tx_consumer.pending_count());
 
@@ -176,8 +175,6 @@ impl NetBackend for Unixstream {
 
         // Chains already have header prepended, just writev each one
         self.tx_consumer.consume(|batch| {
-            let mut total_bytes = 0usize;
-
             for i in 0..batch.len() {
                 let chain = batch.chain(i);
                 if chain.is_empty() {
@@ -185,16 +182,14 @@ impl NetBackend for Unixstream {
                 }
 
                 match nix::sys::uio::writev(fd, chain) {
-                    Ok(n) => total_bytes += n,
+                    Ok(n) => batch.complete_bytes(n),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
-                        log::error!("Unixstream TX failed: {:?}", e);
+                        log::error!("writev to unixstream failed: {e:?}");
                         break;
                     }
                 }
             }
-
-            batch.advance_bytes(total_bytes);
         });
 
         Ok(())
@@ -225,8 +220,7 @@ impl NetBackend for Unixstream {
 
                 // Write vnet header at start of new frame
                 if batch.bytes_used(i) == 0 && vnet_offset > 0 {
-                    write_to_iovecs(batch.chain_mut(i), &super::DEFAULT_VNET_HDR);
-                    batch.advance(i, vnet_offset);
+                    batch.write_advance(i, &super::DEFAULT_VNET_HDR);
                 }
 
                 // Read payload (truncated to remaining frame bytes)
@@ -241,7 +235,12 @@ impl NetBackend for Unixstream {
                             *expecting = None;
                         }
                     }
-                    _ => break,
+                    Ok(_) => break, // EOF or 0 bytes
+                    Err(nix::errno::Errno::EAGAIN) => break,
+                    Err(e) => {
+                        log::error!("readv from unixstream failed: {e:?}");
+                        break;
+                    }
                 }
             }
         });

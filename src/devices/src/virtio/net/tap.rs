@@ -116,22 +116,20 @@ impl NetBackend for Tap {
         // a single packet, so we can use it directly without flattening. 
         // One writev syscall per packet.
         self.tx_consumer.consume(|batch| {
-            let mut total = 0usize;
             for i in 0..batch.len() {
                 let chain = batch.chain(i);
                 if chain.is_empty() {
                     continue;
                 }
                 match writev(fd, chain) {
-                    Ok(n) => total += n,
+                    Ok(n) => batch.complete_bytes(n),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
-                        log::error!("Tap TX failed: {:?}", e);
+                        log::error!("writev to tap failed: {e:?}");
                         break;
                     }
                 }
             }
-            batch.advance_bytes(total);
         });
 
         Ok(())
@@ -152,7 +150,10 @@ impl NetBackend for Tap {
 
                 match readv(fd, chain) {
                     Ok(n) => batch.complete(i, n),
-                    Err(_) => break, // EAGAIN or error, stop receiving
+                    Err(nix::errno::Errno::EAGAIN) => break,
+                    Err(e) => {
+                        log::error!("readv from tap failed: {e:?}");
+                    }
                 }
             }
         });

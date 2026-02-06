@@ -111,6 +111,22 @@ impl RxProducerBatch<'_> {
         }
     }
 
+    /// Write data to chain and advance (without finishing). Returns bytes written.
+    ///
+    /// This is a convenience method for partial receives where you need to write
+    /// some data (like a header) but the frame is not yet complete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn write_advance(&mut self, index: usize, data: &[u8]) -> usize {
+        let written = write_to_iovecs(self.chain_mut(index), data);
+        if written > 0 {
+            self.advance(index, written);
+        }
+        written
+    }
+
     /// Write data to chain and complete it. Returns error if data doesn't fit.
     ///
     /// This is a convenience method that writes the data, advances bytes_used,

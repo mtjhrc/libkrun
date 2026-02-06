@@ -328,7 +328,7 @@ impl Unixgram {
                 match err.kind() {
                     std::io::ErrorKind::WouldBlock => {}
                     _ => {
-                        log::error!("sendmsg_x failed: {err}");
+                        log::error!("sendmsg_x failed: {err:?}");
                     }
                 }
                 return;
@@ -391,8 +391,6 @@ impl Unixgram {
                     let err = std::io::Error::last_os_error();
                     if err.kind() != std::io::ErrorKind::WouldBlock {
                         log::error!("recvmsg_x failed: {err}");
-                    } else {
-                        log::trace!("recv_macos: WouldBlock");
                     }
                 }
             }

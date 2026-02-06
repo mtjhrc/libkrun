@@ -61,7 +61,7 @@ impl TxConsumerBatch<'_> {
     /// # Lifetime guarantee
     ///
     /// The returned chain is guaranteed to remain valid and at a stable memory
-    /// location until `complete_chains()` or `advance_bytes()` marks it complete.
+    /// location until `complete_chains()` or `complete_bytes()` marks it complete.
     /// This is important for unsafe code that takes raw pointers to the iovecs.
     ///
     /// # Panics
@@ -113,12 +113,12 @@ impl TxConsumerBatch<'_> {
         }
     }
 
-    /// Advance by N bytes, completing chains as bytes accumulate.
+    /// Complete chains by byte count.
     ///
     /// Use this when your I/O operation returns a byte count. Chains are
-    /// marked complete when enough bytes have been consumed. Handles partial
-    /// chain progress across multiple calls.
-    pub fn advance_bytes(&mut self, bytes: usize) {
+    /// marked complete (add_used called) when enough bytes have been consumed.
+    /// Handles partial chain progress across multiple calls.
+    pub fn complete_bytes(&mut self, bytes: usize) {
         *self.partial_bytes += bytes;
 
         // Complete chains while we have enough bytes
@@ -129,7 +129,7 @@ impl TxConsumerBatch<'_> {
             if *self.partial_bytes >= meta.total_len {
                 meta.completed = true;
                 log::trace!(
-                    "TxConsumerBatch::advance_bytes: completing head_index={} guest_len={}",
+                    "TxConsumerBatch::complete_bytes: head_index={} guest_len={}",
                     meta.head_index,
                     meta.guest_len
                 );
@@ -349,7 +349,7 @@ impl TxQueueConsumer {
     /// The callback receives a `TxConsumerBatch` which provides:
     /// - `chain(i)` - access to chain iovecs by index (panics if already completed)
     /// - `complete_chains(n)` - mark first N chains as complete
-    /// - `advance_bytes(n)` - mark chains complete based on byte count
+    /// - `complete_bytes(n)` - mark chains complete based on byte count
     ///
     /// Returns the number of chains completed. Completed chains are removed
     /// from the pending list and interrupt is signaled if needed.
@@ -470,7 +470,7 @@ mod tests {
             assert_eq!(batch.len(), 1);
             assert_eq!(batch.chain(0).len(), 1);
             assert_eq!(&*batch.chain(0)[0], b"Hello, World!");
-            batch.advance_bytes(13);
+            batch.complete_bytes(13);
         });
 
         assert_eq!(completed, 1);
@@ -496,7 +496,7 @@ mod tests {
             assert_eq!(batch.chain(0).len(), 2);
             assert_eq!(&*batch.chain(0)[0], b"First");
             assert_eq!(&*batch.chain(0)[1], b"Second");
-            batch.advance_bytes(11);
+            batch.complete_bytes(11);
         });
 
         assert_eq!(completed, 1);
@@ -522,7 +522,7 @@ mod tests {
 
         let completed = consumer.consume(|batch| {
             assert_eq!(batch.len(), 3);
-            batch.advance_bytes(18); // 6 + 6 + 6
+            batch.complete_bytes(18); // 6 + 6 + 6
         });
 
         assert_eq!(completed, 3);
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(added, 1);
 
         consumer.consume(|batch| {
-            batch.advance_bytes(9); // payload only
+            batch.complete_bytes(9); // payload only
         });
 
         // Original guest length is 13, not 9
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn test_consume_and_advance_bytes() {
+    fn test_consume_and_complete_bytes() {
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -596,7 +596,7 @@ mod tests {
 
         let completed = consumer.consume(|batch| {
             assert_eq!(batch.total_bytes(), 21);
-            batch.advance_bytes(batch.total_bytes());
+            batch.complete_bytes(batch.total_bytes());
         });
 
         assert_eq!(completed, 2);
@@ -623,7 +623,7 @@ mod tests {
         consumer.feed_with_transform(10, |_iovecs| {});
 
         let completed = consumer.consume(|batch| {
-            batch.advance_bytes(15);
+            batch.complete_bytes(15);
         });
 
         // Only first chain complete (10 bytes), 5 bytes into second
@@ -650,7 +650,7 @@ mod tests {
 
         // Advance 12 bytes = 3 complete chains (compact is called internally)
         let completed = consumer.consume(|batch| {
-            batch.advance_bytes(12);
+            batch.complete_bytes(12);
         });
         assert_eq!(completed, 3);
         assert_eq!(consumer.pending_count(), 2);
@@ -693,7 +693,7 @@ mod tests {
 
         // Callback doesn't complete anything (simulating EAGAIN/WouldBlock)
         let completed = consumer.consume(|_batch| {
-            // Don't call advance_bytes or complete_chains
+            // Don't call complete_bytes or complete_chains
         });
         assert_eq!(completed, 0);
         assert_eq!(consumer.pending_count(), 1);
@@ -731,7 +731,7 @@ mod tests {
             // Sum bytes in chain 0 (should be 100, not 112)
             let total: usize = batch.chain(0).iter().map(|iov| iov.len()).sum();
             assert_eq!(total, 100); // payload only
-            batch.advance_bytes(100);
+            batch.complete_bytes(100);
         });
 
         assert_eq!(completed, 1);
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(added, 1);
 
         let completed = consumer.consume(|batch| {
-            batch.advance_bytes(100);
+            batch.complete_bytes(100);
         });
         assert_eq!(completed, 1);
         assert_eq!(consumer.pending_count(), 0);
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(added, 2);
 
         let completed = consumer.consume(|batch| {
-            batch.advance_bytes(75);
+            batch.complete_bytes(75);
         });
         assert_eq!(completed, 1);
         assert_eq!(consumer.pending_count(), 1); // chain 2 partial
@@ -825,15 +825,15 @@ mod tests {
         assert_eq!(added, 1);
 
         // Cycle 1: 2 bytes sent (partial)
-        consumer.consume(|batch| batch.advance_bytes(2));
+        consumer.consume(|batch| batch.complete_bytes(2));
         assert_eq!(consumer.pending_count(), 1);
 
         // Cycle 2: 50 more bytes (total 52)
-        consumer.consume(|batch| batch.advance_bytes(50));
+        consumer.consume(|batch| batch.complete_bytes(50));
         assert_eq!(consumer.pending_count(), 1);
 
         // Cycle 3: remaining 48 bytes
-        consumer.consume(|batch| batch.advance_bytes(48));
+        consumer.consume(|batch| batch.complete_bytes(48));
         assert_eq!(consumer.pending_count(), 0);
 
         // add_used reports ORIGINAL guest length (112)
@@ -865,14 +865,14 @@ mod tests {
         assert_eq!(consumer.pending_count(), 3);
 
         // Cycle 1: 25 bytes (partial chain 1)
-        consumer.consume(|batch| batch.advance_bytes(25));
+        consumer.consume(|batch| batch.complete_bytes(25));
         assert_eq!(consumer.pending_count(), 3); // no chain complete yet
 
         // Cycle 2: 60 bytes → total 85 bytes
         // Chain 1: 40 bytes (complete at 40)
         // Chain 2: 40 bytes (complete at 80)
         // Chain 3: 5 bytes into it (at 85)
-        consumer.consume(|batch| batch.advance_bytes(60));
+        consumer.consume(|batch| batch.complete_bytes(60));
         assert_eq!(consumer.pending_count(), 1); // chains 1,2 complete
 
         // Cycle 3: no progress (simulating WouldBlock)
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(consumer.pending_count(), 1); // still pending
 
         // Cycle 4: 35 bytes (completes chain 3)
-        consumer.consume(|batch| batch.advance_bytes(35));
+        consumer.consume(|batch| batch.complete_bytes(35));
         assert_eq!(consumer.pending_count(), 0); // all done
 
         // Verify add_used was called for all 3 chains with ORIGINAL guest lengths (50 each)
@@ -911,7 +911,7 @@ mod tests {
         assert_eq!(consumer.pending_count(), 2);
 
         // Send 45 bytes (chain 1 complete, 15 into chain 2)
-        consumer.consume(|batch| batch.advance_bytes(45));
+        consumer.consume(|batch| batch.complete_bytes(45));
         assert_eq!(consumer.pending_count(), 1);
 
         // Compact removes completed chain 1
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(consumer.pending_count(), 2); // chain 2 (partial) + chain 3
 
         // Send remaining 15 of chain 2 + all 30 of chain 3 = 45
-        consumer.consume(|batch| batch.advance_bytes(45));
+        consumer.consume(|batch| batch.complete_bytes(45));
         assert_eq!(consumer.pending_count(), 0);
     }
 }
