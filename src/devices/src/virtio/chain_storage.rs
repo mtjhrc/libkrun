@@ -1,25 +1,21 @@
 // Copyright 2026 Red Hat, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic chain storage traits for TX/RX queue operations.
+//! Generic chain storage trait for TX/RX queue operations.
 //!
-//! These traits abstract over how iovecs are stored per descriptor chain,
+//! This trait abstracts over how iovecs are stored per descriptor chain,
 //! allowing different backends to use optimized storage (e.g., mmsghdr for sendmmsg).
 
-use std::io::{IoSlice, IoSliceMut};
+use libc::iovec;
 
-/// Storage for a single TX chain's iovecs.
+/// Base storage trait for descriptor chain iovecs.
 ///
-/// Implementations store iovecs and provide access for I/O operations.
-/// The default is `VecTxStorage` which simply wraps the Vec.
-/// For sendmmsg, `MsgHdrTx` stores the pointer directly in mmsghdr.
-pub trait TxChainStorage: Sized {
+/// Construction is not part of the trait - each storage type provides its own
+/// constructor.
+pub trait ChainStorage: Sized + Send {
     /// User-defined metadata stored alongside each chain (e.g., Vec capacity).
     type Meta: Default;
 
-    /// Create storage from a Vec of IoSlices (takes ownership).
-    fn from_iovecs(iovecs: Vec<IoSlice<'static>>, meta: &mut Self::Meta) -> Self;
-
     /// Number of slices in this chain.
     fn len(&self) -> usize;
 
@@ -27,9 +23,6 @@ pub trait TxChainStorage: Sized {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    /// Get slices for I/O (writev, etc.)
-    fn as_slices(&self) -> &[IoSlice<'static>];
 
     /// Total bytes across all slices.
     fn total_bytes(&self) -> usize;
@@ -38,107 +31,58 @@ pub trait TxChainStorage: Sized {
     fn clear(&mut self, meta: &mut Self::Meta);
 }
 
-/// Storage for a single RX chain's iovecs.
+/// Trait for storage types that support advancing (consuming bytes from front).
 ///
-/// Similar to TxChainStorage but for writable buffers.
-pub trait RxChainStorage: Sized {
-    /// User-defined metadata stored alongside each chain.
-    type Meta: Default;
-
-    /// Create storage from a Vec of IoSliceMuts (takes ownership).
-    fn from_iovecs(iovecs: Vec<IoSliceMut<'static>>, meta: &mut Self::Meta) -> Self;
-
-    /// Number of slices in this chain.
-    fn len(&self) -> usize;
-
-    /// Check if empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Get mutable slices for I/O (readv, etc.)
-    fn as_slices_mut(&mut self) -> &mut [IoSliceMut<'static>];
-
-    /// Total bytes across all slices.
-    fn total_bytes(&self) -> usize;
-
+/// This is used by RX operations where the caller tracks byte counts manually
+/// (e.g., via readv return values) rather than having the kernel fill them in.
+pub trait AdvanceBytes {
     /// Advance slices by removing consumed bytes from the front.
     fn advance(&mut self, bytes: usize);
-
-    /// Clear/reset and drop resources.
-    fn clear(&mut self, meta: &mut Self::Meta);
 }
 
-/// Default TX chain storage - simply wraps a Vec<IoSlice>.
-pub struct VecTxStorage(Vec<IoSlice<'static>>);
+/// Trait for RX storage types that track completed byte counts.
+///
+/// Storage types like mmsghdr (Linux) or msghdr_x (macOS) have a field
+/// that the kernel fills with the number of bytes received. This trait
+/// provides access to that value for batch completion.
+pub trait CompletedBytes {
+    /// Get the number of bytes completed for this chain.
+    fn completed_bytes(&self) -> usize;
+}
 
-impl TxChainStorage for VecTxStorage {
+// ChainStorage implemented for Vec<iovec> - the default storage type.
+// Raw iovec has no lifetime, avoiding the need for fake 'static lifetimes.
+
+impl ChainStorage for Vec<iovec> {
     type Meta = ();
 
-    fn from_iovecs(iovecs: Vec<IoSlice<'static>>, _meta: &mut ()) -> Self {
-        Self(iovecs)
-    }
-
     fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn as_slices(&self) -> &[IoSlice<'static>] {
-        &self.0
+        Vec::len(self)
     }
 
     fn total_bytes(&self) -> usize {
-        self.0.iter().map(|s| s.len()).sum()
+        self.iter().map(|s| s.iov_len).sum()
     }
 
     fn clear(&mut self, _meta: &mut ()) {
-        self.0.clear();
+        Vec::clear(self);
     }
 }
 
-/// Default RX chain storage - simply wraps a Vec<IoSliceMut>.
-pub struct VecRxStorage(Vec<IoSliceMut<'static>>);
-
-impl RxChainStorage for VecRxStorage {
-    type Meta = ();
-
-    fn from_iovecs(iovecs: Vec<IoSliceMut<'static>>, _meta: &mut ()) -> Self {
-        Self(iovecs)
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn as_slices_mut(&mut self) -> &mut [IoSliceMut<'static>] {
-        &mut self.0
-    }
-
-    fn total_bytes(&self) -> usize {
-        self.0.iter().map(|s| s.len()).sum()
-    }
-
+impl AdvanceBytes for Vec<iovec> {
     fn advance(&mut self, bytes: usize) {
         let mut remaining = bytes;
-        while remaining > 0 && !self.0.is_empty() {
-            let first_len = self.0[0].len();
+        while remaining > 0 && !self.is_empty() {
+            let first_len = self[0].iov_len;
             if first_len <= remaining {
-                self.0.remove(0);
+                self.remove(0);
                 remaining -= first_len;
             } else {
-                // Advance within the first slice
-                let first = &mut self.0[0];
-                let ptr = first.as_mut_ptr();
-                let new_len = first_len - remaining;
-                // Safety: advancing pointer within same allocation
-                let new_slice = unsafe { std::slice::from_raw_parts_mut(ptr.add(remaining), new_len) };
-                self.0[0] = IoSliceMut::new(new_slice);
+                let first = &mut self[0];
+                first.iov_base = unsafe { (first.iov_base as *mut u8).add(remaining) as *mut _ };
+                first.iov_len -= remaining;
                 remaining = 0;
             }
         }
-    }
-
-    fn clear(&mut self, _meta: &mut ()) {
-        self.0.clear();
     }
 }

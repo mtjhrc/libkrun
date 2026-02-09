@@ -8,15 +8,15 @@ use nix::sys::socket::{
     SockFlag, SockType, UnixAddr,
 };
 use std::fs::remove_file;
-use smallvec::SmallVec;
-use std::io::IoSlice;
+use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::iovec_utils::write_to_iovecs;
+use crate::virtio::chain_storage::{ChainStorage, CompletedBytes};
+use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, write_to_iovecs};
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
 use crate::virtio::tx_queue_consumer::TxQueueConsumer;
@@ -27,11 +27,140 @@ use super::socket_x::msghdr_x;
 
 const VFKIT_MAGIC: [u8; 4] = *b"VFKT";
 
+// ============================================================================
+// MsgHdr - Chain storage that IS an mmsghdr/msghdr_x
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+type RawMsgHdr = mmsghdr;
+
+#[cfg(target_os = "macos")]
+type RawMsgHdr = msghdr_x;
+
+/// Chain storage that is a transparent wrapper over mmsghdr/msghdr_x.
+///
+/// The iovec pointer is stored directly in the header, avoiding allocation
+/// of a separate mmsghdr array for sendmmsg/sendmsg_x/recvmmsg/recvmsg_x.
+///
+/// Used for both TX and RX operations. For RX, also implements `CompletedBytes`
+/// to read the kernel-filled byte count.
+///
+/// # Safety
+/// Uses `mem::forget` to transfer iovec Vec ownership into the header.
+/// The capacity is stored in `Meta` for proper cleanup via `Vec::from_raw_parts()`.
+#[repr(transparent)]
+pub struct MsgHdr(RawMsgHdr);
+
+// Safety: The raw pointer inside points to heap memory that we have exclusive ownership of.
+// Transferring to another thread is safe because we transfer ownership of the entire struct.
+unsafe impl Send for MsgHdr {}
+
+impl ChainStorage for MsgHdr {
+    /// Stores the Vec capacity for cleanup
+    type Meta = usize;
+
+    fn len(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            self.0.msg_hdr.msg_iovlen
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.0.msg_iovlen as usize
+        }
+    }
+
+    fn total_bytes(&self) -> usize {
+        let (ptr, len) = self.iov_ptr_len();
+        if ptr.is_null() {
+            0
+        } else {
+            let slices = unsafe { std::slice::from_raw_parts(ptr as *const iovec, len) };
+            slices.iter().map(|s| s.iov_len).sum()
+        }
+    }
+
+    fn clear(&mut self, capacity: &mut Self::Meta) {
+        let (ptr, len) = self.iov_ptr_len();
+        if !ptr.is_null() {
+            // Reconstruct Vec to drop it properly
+            unsafe {
+                let _: Vec<iovec> = Vec::from_raw_parts(ptr, len, *capacity);
+            }
+            self.set_iov_null();
+            *capacity = 0;
+        }
+    }
+}
+
+impl MsgHdr {
+    /// Create MsgHdr from raw iovec pointer and length.
+    #[inline]
+    fn from_raw(iov_ptr: *mut iovec, len: usize) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_hdr.msg_iov = iov_ptr;
+            hdr.msg_hdr.msg_iovlen = len;
+            Self(hdr)
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Self(msghdr_x {
+                msg_iov: iov_ptr,
+                msg_iovlen: len as c_int,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[inline]
+    fn iov_ptr_len(&self) -> (*mut iovec, usize) {
+        #[cfg(target_os = "linux")]
+        {
+            (self.0.msg_hdr.msg_iov, self.0.msg_hdr.msg_iovlen)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            (self.0.msg_iov, self.0.msg_iovlen as usize)
+        }
+    }
+
+    #[inline]
+    fn set_iov_null(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.0.msg_hdr.msg_iov = std::ptr::null_mut();
+            self.0.msg_hdr.msg_iovlen = 0;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.0.msg_iov = std::ptr::null_mut();
+            self.0.msg_iovlen = 0;
+        }
+    }
+}
+
+impl CompletedBytes for MsgHdr {
+    #[cfg(target_os = "linux")]
+    #[inline]
+    fn completed_bytes(&self) -> usize {
+        self.0.msg_len as usize
+    }
+
+    #[cfg(target_os = "macos")]
+    #[inline]
+    fn completed_bytes(&self) -> usize {
+        self.0.msg_datalen
+    }
+}
+
 pub struct Unixgram {
     fd: OwnedFd,
     include_vnet_header: bool,
-    tx_consumer: TxQueueConsumer,
-    rx_producer: RxQueueProducer,
+    tx_consumer: TxQueueConsumer<MsgHdr>,
+    rx_producer: RxQueueProducer<MsgHdr>,
 }
 
 impl Unixgram {
@@ -65,13 +194,13 @@ impl Unixgram {
         }
 
         let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
-        let rx_provider = RxQueueProducer::new(rx_queue, mem, interrupt);
+        let rx_producer = RxQueueProducer::new(rx_queue, mem, interrupt);
 
         Self {
             fd,
             include_vnet_header,
             tx_consumer,
-            rx_producer: rx_provider,
+            rx_producer,
         }
     }
 
@@ -114,7 +243,7 @@ impl Unixgram {
             log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
         }
         if let Err(e) = setsockopt(&fd, sockopt::RcvBuf, &(7 * 1024 * 1024)) {
-            log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
+            log::warn!("Failed to increase SO_RCVBUF (performance may be decreased): {e}");
         }
 
         log::debug!(
@@ -123,7 +252,14 @@ impl Unixgram {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        Ok(Self::new(fd, include_vnet_header, tx_queue, rx_queue, mem, interrupt))
+        Ok(Self::new(
+            fd,
+            include_vnet_header,
+            tx_queue,
+            rx_queue,
+            mem,
+            interrupt,
+        ))
     }
 }
 
@@ -138,10 +274,17 @@ impl NetBackend for Unixgram {
             0
         };
 
-        // Feed frames from queue
-        self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |iovecs| {
-            let mut slices_mut: &mut [IoSlice] = iovecs;
-            IoSlice::advance_slices(&mut slices_mut, skip);
+        // Feed frames from queue, skipping vnet header
+        self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |mut iovecs| {
+            if skip > 0 {
+                advance_tx_iovecs_vec(&mut iovecs, skip);
+            }
+            // IoSlice is repr(transparent) over iovec
+            let ptr = iovecs.as_mut_ptr() as *mut iovec;
+            let len = iovecs.len();
+            let cap = iovecs.capacity();
+            std::mem::forget(iovecs);
+            (MsgHdr::from_raw(ptr, len), cap)
         });
 
         if !self.tx_consumer.has_pending() {
@@ -149,14 +292,10 @@ impl NetBackend for Unixgram {
         }
 
         #[cfg(target_os = "linux")]
-        {
-            self.send_linux()?;
-        }
+        self.send_linux()?;
 
         #[cfg(target_os = "macos")]
-        {
-            self.send_macos()?;
-        }
+        self.send_macos()?;
 
         Ok(())
     }
@@ -169,13 +308,19 @@ impl NetBackend for Unixgram {
         };
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
-        self.rx_producer.feed_with_transform(MAX_RX_BATCH, |iovecs| {
+        self.rx_producer.feed_with_transform(MAX_RX_BATCH, |mut iovecs| {
             if vnet_offset > 0 {
                 // Write default vnet header to beginning of buffer
-                write_to_iovecs(iovecs, &super::DEFAULT_VNET_HDR);
+                write_to_iovecs(&mut iovecs, &super::DEFAULT_VNET_HDR);
                 // Advance iovecs past vnet header so receive goes after it
-                crate::virtio::iovec_utils::advance_iovecs_vec(iovecs, vnet_offset);
+                crate::virtio::iovec_utils::advance_iovecs_vec(&mut iovecs, vnet_offset);
             }
+            // Safety: IoSliceMut is repr(transparent) over iovec, so the cast is valid
+            let ptr = iovecs.as_mut_ptr() as *mut iovec;
+            let len = iovecs.len();
+            let cap = iovecs.capacity();
+            std::mem::forget(iovecs);
+            (MsgHdr::from_raw(ptr, len), cap)
         });
 
         #[cfg(target_os = "linux")]
@@ -202,23 +347,13 @@ impl Unixgram {
                 return;
             }
 
-            // Build mmsghdr array from chains
-            let mut mmsghdrs: SmallVec<[mmsghdr; 32]> = SmallVec::new();
-            for i in 0..batch.len().min(MAX_TX_BATCH) {
-                let chain = batch.chain(i);
-                let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
-                hdr.msg_hdr.msg_iov = chain.as_ptr() as *mut iovec;
-                hdr.msg_hdr.msg_iovlen = chain.len() as _;
-                mmsghdrs.push(hdr);
-            }
+            let len = batch.len();
+            // Safety: No chains have been completed yet, so 0..len is valid.
+            let storage = batch.chains(0..len);
+            let ptr = storage.as_ptr() as *mut mmsghdr;
 
             let ret = unsafe {
-                libc::sendmmsg(
-                    fd,
-                    mmsghdrs.as_mut_ptr(),
-                    mmsghdrs.len() as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                )
+                libc::sendmmsg(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT)
             };
 
             if ret < 0 {
@@ -246,41 +381,17 @@ impl Unixgram {
                 return;
             }
 
-            // Build mmsghdr array - iovecs already point past vnet header from feed_with_transform
-            let mut mmsghdrs: SmallVec<[mmsghdr; 32]> = SmallVec::new();
-
-            for i in 0..batch.len() {
-                let chain = batch.chain_mut(i);
-                if chain.is_empty() {
-                    log::error!("Empty chain in recv_linux");
-                    continue;
-                }
-
-                // IoSliceMut is repr(transparent) over iovec
-                let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
-                hdr.msg_hdr.msg_iov = chain.as_mut_ptr() as *mut iovec;
-                hdr.msg_hdr.msg_iovlen = chain.len() as _;
-                mmsghdrs.push(hdr);
-            }
+            let len = batch.len();
+            // Safety: No chains have been finished yet, so 0..len is valid.
+            let storage = batch.chains_mut(0..len);
+            let ptr = storage.as_mut_ptr() as *mut mmsghdr;
 
             let ret = unsafe {
-                libc::recvmmsg(
-                    fd,
-                    mmsghdrs.as_mut_ptr(),
-                    mmsghdrs.len() as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                    std::ptr::null_mut(),
-                )
+                libc::recvmmsg(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT, std::ptr::null_mut())
             };
 
             match ret {
-                n if n > 0 => {
-                    for i in 0..(n as usize) {
-                        // vnet header bytes already tracked by feed_with_transform
-                        let bytes_received = mmsghdrs[i].msg_len as usize;
-                        batch.complete(i, bytes_received);
-                    }
-                }
+                n if n > 0 => batch.complete(0..n as usize),
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),
                 _ => {
                     let err = std::io::Error::last_os_error();
@@ -303,22 +414,17 @@ impl Unixgram {
                 return;
             }
 
-            // Build msghdr_x array from chains
-            let mut msghdrs: SmallVec<[msghdr_x; 32]> = SmallVec::new();
-            for i in 0..batch.len().min(MAX_TX_BATCH) {
-                let chain = batch.chain(i);
-                msghdrs.push(msghdr_x {
-                    msg_iov: chain.as_ptr() as *mut iovec,
-                    msg_iovlen: chain.len() as c_int,
-                    ..Default::default()
-                });
-            }
+            let len = batch.len();
+            // Safety: No chains have been completed yet, so 0..len is valid.
+            // MsgHdr is repr(transparent) over msghdr_x.
+            let storage = batch.chains(0..len);
+            let ptr = storage.as_ptr() as *const super::socket_x::msghdr_x;
 
             let ret = unsafe {
                 super::socket_x::sendmsg_x(
                     fd,
-                    msghdrs.as_ptr(),
-                    msghdrs.len() as libc::c_uint,
+                    ptr,
+                    len as libc::c_uint,
                     libc::MSG_DONTWAIT,
                 )
             };
@@ -350,41 +456,24 @@ impl Unixgram {
             }
             log::trace!("recv_macos: {} chains available", batch.len());
 
-            // Build msghdr_x array - iovecs already point past vnet header from feed_with_transform
-            let mut msghdrs: SmallVec<[msghdr_x; 32]> = SmallVec::new();
-
-            for i in 0..batch.len() {
-                let chain = batch.chain_mut(i);
-                if chain.is_empty() {
-                    log::error!("Empty chain in recv_macos");
-                    continue;
-                }
-
-                msghdrs.push(msghdr_x {
-                    msg_iov: chain.as_mut_ptr() as *mut iovec,
-                    msg_iovlen: chain.len() as c_int,
-                    ..Default::default()
-                });
-            }
+            let len = batch.len();
+            // No chains in the batch have been finished yet, so 0..len is valid.
+            let storage = batch.chains_mut(0..len);
+            let ptr = storage.as_mut_ptr() as *mut super::socket_x::msghdr_x;
 
             let ret = unsafe {
                 super::socket_x::recvmsg_x(
                     fd,
-                    msghdrs.as_mut_ptr(),
-                    msghdrs.len() as libc::c_uint,
+                    ptr,
+                    len as libc::c_uint,
                     libc::MSG_DONTWAIT,
                 )
             };
 
             match ret {
                 n if n > 0 => {
-                    log::trace!("recv_macos: recvmsg_x returned {n} messages");
-                    for i in 0..(n as usize) {
-                        // vnet header bytes already tracked by feed_with_transform
-                        let bytes_received = msghdrs[i].msg_datalen;
-                        log::trace!("recv_macos: message {i} has {bytes_received} bytes payload");
-                        batch.complete(i, bytes_received);
-                    }
+                    log::trace!("recv_macos: recvmsg_x returned {} messages", n);
+                    batch.complete(0..n as usize);
                 }
                 0 => log::warn!("recvmsg_x returned 0 (unexpected)"),
                 _ => {

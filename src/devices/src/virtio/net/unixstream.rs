@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::iovec_utils::{iovecs_len, truncate_iovecs};
+use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, iovecs_len, truncate_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
@@ -60,6 +60,8 @@ pub struct Unixstream {
     rx_header_pos: usize,
     /// For RX: expected frame length (None when header not yet complete)
     expecting_frame_length: Option<u32>,
+    // TODO: lets have one allocation ptr for the u32 sending length box, and use that for every 
+    // packet where we need to send the length or actually it could even be our expecting_frame_length LOL 
 }
 
 impl Unixstream {
@@ -152,18 +154,18 @@ impl NetBackend for Unixstream {
         };
 
         // Feed frames from queue, prepending frame length header
-        let fed = self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |iovecs| {
+        let fed = self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |mut iovecs| {
             // Skip vnet header
-            let mut slices: &mut [IoSlice] = iovecs;
-            IoSlice::advance_slices(&mut slices, skip);
+            advance_tx_iovecs_vec(&mut iovecs, skip);
 
             // Calculate payload length (after vnet skip)
-            let payload_len = iovecs_len(slices);
+            let payload_len = iovecs_len(&iovecs);
 
             // FIXME: This leaks memory! Need proper header storage in TxQueueConsumer.
             // For now, Box::leak the header bytes to get 'static lifetime.
             let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
             iovecs.insert(0, IoSlice::new(header));
+            (iovecs, ())
         });
         log::trace!("Unixstream::send() fed {} frames, pending={}", fed, self.tx_consumer.pending_count());
 
@@ -176,7 +178,7 @@ impl NetBackend for Unixstream {
         // Chains already have header prepended, just writev each one
         self.tx_consumer.consume(|batch| {
             for i in 0..batch.len() {
-                let chain = batch.chain(i);
+                let chain = batch.io_slices(i);
                 if chain.is_empty() {
                     continue;
                 }
@@ -220,16 +222,17 @@ impl NetBackend for Unixstream {
 
                 // Write vnet header at start of new frame
                 if batch.bytes_used(i) == 0 && vnet_offset > 0 {
-                    batch.write_advance(i, &super::DEFAULT_VNET_HDR);
+                    // Header is small, chain should always have space
+                    let _ = batch.write_advance(i, &super::DEFAULT_VNET_HDR);
                 }
 
                 // Read payload (truncated to remaining frame bytes)
                 let remaining = total_len - batch.bytes_used(i);
-                let iovecs = truncate_iovecs(batch.chain_mut(i), remaining);
+                let iovecs = truncate_iovecs(batch.io_slices_mut(i), remaining);
 
                 match readv(fd, iovecs) {
                     Ok(n) if n > 0 => {
-                        batch.advance(i, n);
+                        batch.advance_bytes(i, n);
                         if batch.bytes_used(i) >= total_len {
                             batch.finish(i);
                             *expecting = None;

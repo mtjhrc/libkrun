@@ -117,7 +117,7 @@ impl NetBackend for Tap {
         // One writev syscall per packet.
         self.tx_consumer.consume(|batch| {
             for i in 0..batch.len() {
-                let chain = batch.chain(i);
+                let chain = batch.io_slices(i);
                 if chain.is_empty() {
                     continue;
                 }
@@ -149,7 +149,7 @@ impl NetBackend for Tap {
                 }
 
                 match readv(fd, chain) {
-                    Ok(n) => batch.complete(i, n),
+                    Ok(n) => batch.complete_bytes(i, n),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
                         log::error!("readv from tap failed: {e:?}");

@@ -4,10 +4,12 @@
 //! RX queue producer for batched virtio receive operations.
 
 use std::io::IoSliceMut;
+use std::ops::Range;
 
+use libc::iovec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
-use super::chain_storage::{RxChainStorage, VecRxStorage};
+use super::chain_storage::{AdvanceBytes, ChainStorage, CompletedBytes};
 use super::iovec_utils::write_to_iovecs;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
@@ -26,20 +28,15 @@ struct PendingChain<M: Default> {
 /// RxQueueProducer - owns the RX queue and provides buffers for receiving.
 ///
 /// Generic over storage type S, allowing different backends to use optimized
-/// storage (e.g., mmsghdr for recvmmsg). Default is VecRxStorage.
+/// storage (e.g., mmsghdr for recvmmsg). Default is Vec<iovec>.
 ///
 /// Pops descriptor chains from the virtio RX queue and provides writable
 /// iovecs for receiving data. Unfinished chains are kept pending for the next
 /// produce() call; finished chains get add_used() with their byte counts.
 ///
-/// # Safety
-///
-/// The iovecs stored in chain storage point into guest memory owned by `mem`.
-/// The lifetime is erased to 'static because the struct owns the memory reference.
-/// This is safe as long as:
-/// 1. The struct outlives any use of the iovecs
-/// 2. The guest memory is not unmapped while iovecs are in use
-pub struct RxQueueProducer<S: RxChainStorage = VecRxStorage> {
+/// The iovecs point into guest memory owned by `mem`. This is safe because
+/// the struct owns the memory reference and outlives any use of the iovecs.
+pub struct RxQueueProducer<S: ChainStorage = Vec<iovec>> {
     /// The virtio RX queue
     queue: Queue,
     /// Guest memory reference
@@ -57,14 +54,17 @@ pub struct RxQueueProducer<S: RxChainStorage = VecRxStorage> {
 ///
 /// Provides access to pending chains and methods to mark them as complete.
 /// Panics if you access or finish an already-finished chain.
-pub struct RxProducerBatch<'a, S: RxChainStorage> {
+pub struct RxProducerBatch<'a, S: ChainStorage> {
     chain_storage: &'a mut [S],
     chain_meta: &'a mut [PendingChain<S::Meta>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
+    /// Index of first unfinished chain. Chains 0..first_unfinished are finished.
+    /// For sequential finishing (0, 1, 2...), this advances efficiently.
+    first_unfinished: usize,
 }
 
-impl<S: RxChainStorage> RxProducerBatch<'_, S> {
+impl<S: ChainStorage> RxProducerBatch<'_, S> {
     /// Number of pending chains.
     #[inline]
     pub fn len(&self) -> usize {
@@ -77,28 +77,7 @@ impl<S: RxChainStorage> RxProducerBatch<'_, S> {
         self.chain_storage.is_empty()
     }
 
-    /// Get a single chain's mutable slices by index.
-    ///
-    /// # Lifetime guarantee
-    ///
-    /// The returned slices are guaranteed to remain valid and at a stable memory
-    /// location until `finish()` or `complete()` is called for this index.
-    /// This is important for unsafe code that takes raw pointers to the iovecs
-    /// (e.g., for recvmmsg/sendmmsg).
-    ///
-    /// # Panics
-    ///
-    /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn chain_mut(&mut self, index: usize) -> &mut [IoSliceMut<'static>] {
-        assert!(
-            !self.chain_meta[index].finished,
-            "chain_mut: chain at index {} already finished",
-            index
-        );
-        self.chain_storage[index].as_slices_mut()
-    }
-
-    /// Get direct access to the underlying storage for a chain.
+    /// Get mutable access to a chain's storage by index.
     ///
     /// This is useful for backends that need to access storage-specific features
     /// (e.g., getting mmsghdr from MsgHdrRx storage).
@@ -106,50 +85,48 @@ impl<S: RxChainStorage> RxProducerBatch<'_, S> {
     /// # Panics
     ///
     /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn storage_mut(&mut self, index: usize) -> &mut S {
+    pub fn chain_mut(&mut self, index: usize) -> &mut S {
         assert!(
             !self.chain_meta[index].finished,
-            "storage_mut: chain at index {} already finished",
+            "chain_mut: chain at index {} already finished",
             index
         );
         &mut self.chain_storage[index]
     }
 
-    /// Write data to chain and advance (without finishing). Returns bytes written.
+    /// Get mutable access to chains in a range (checked).
     ///
-    /// This is a convenience method for partial receives where you need to write
-    /// some data (like a header) but the frame is not yet complete.
+    /// Returns a mutable slice of chain storage for the given range.
+    /// Optimized for sequential finishing: if `range.start >= first_unfinished`,
+    /// all chains in range are guaranteed unfinished (O(1) check).
     ///
     /// # Panics
     ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn write_advance(&mut self, index: usize, data: &[u8]) -> usize {
-        let written = write_to_iovecs(self.chain_mut(index), data);
-        if written > 0 {
-            self.advance(index, written);
+    /// Panics if any chain in the range has already been finished.
+    pub fn chains_mut(&mut self, range: Range<usize>) -> &mut [S] {
+        // Fast path: if range starts at or after first_unfinished, all are unfinished
+        if range.start < self.first_unfinished {
+            // Slow path: range may include finished chains, check each
+            for i in range.clone() {
+                assert!(
+                    !self.chain_meta[i].finished,
+                    "all_chains_mut: chain at index {} already finished",
+                    i
+                );
+            }
         }
-        written
+        &mut self.chain_storage[range]
     }
 
-    /// Write data to chain and complete it. Returns error if data doesn't fit.
+    /// Get mutable access to chains in a range (unchecked).
     ///
-    /// This is a convenience method that writes the data, advances bytes_used,
-    /// and finishes the chain in one call.
+    /// # Safety
     ///
-    /// # Errors
-    ///
-    /// Returns `Err(())` if the chain doesn't have enough space for all the data.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn write_complete(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
-        let written = write_to_iovecs(self.chain_mut(index), data);
-        if written != data.len() {
-            return Err(());
-        }
-        self.complete(index, written);
-        Ok(())
+    /// This provides unchecked access to storage including already-finished
+    /// chains. The caller must ensure they only access valid (non-finished) chains.
+    #[inline]
+    pub unsafe fn chains_mut_unchecked(&mut self, range: Range<usize>) -> &mut [S] {
+        self.chain_storage.get_unchecked_mut(range)
     }
 
     /// Get bytes already received for chain at index.
@@ -164,35 +141,11 @@ impl<S: RxChainStorage> RxProducerBatch<'_, S> {
         self.chain_meta[index].max_bytes
     }
 
-    /// Advance bytes used for chain at index (partial receive).
-    ///
-    /// Also advances the iovecs in place, removing consumed buffers.
-    /// Chain remains pending for next produce() call.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn advance(&mut self, index: usize, bytes: usize) {
-        assert!(
-            !self.chain_meta[index].finished,
-            "advance: chain at index {} already finished",
-            index
-        );
-        let meta = &mut self.chain_meta[index];
-        meta.bytes_used += bytes;
-        debug_assert!(
-            meta.bytes_used <= meta.max_bytes,
-            "advance: bytes_used {} exceeds max_bytes {}",
-            meta.bytes_used,
-            meta.max_bytes
-        );
-        self.chain_storage[index].advance(bytes);
-    }
-
     /// Mark chain at index as finished.
     ///
     /// Calls add_used immediately. Chain will be removed after callback returns.
-    /// Can be called out-of-order.
+    /// Can be called out-of-order, but sequential finishing (0, 1, 2...) is
+    /// optimized via `first_unfinished` tracking.
     ///
     /// # Panics
     ///
@@ -214,6 +167,44 @@ impl<S: RxChainStorage> RxProducerBatch<'_, S> {
         if let Err(e) = self.queue.add_used(self.mem, meta.head_index, meta.bytes_used as u32) {
             log::error!("RxProducerBatch: failed to add_used: {e}");
         }
+
+        // Update first_unfinished for sequential finishing optimization
+        if index == self.first_unfinished {
+            // Scan forward to find next unfinished chain
+            while self.first_unfinished < self.chain_meta.len()
+                && self.chain_meta[self.first_unfinished].finished
+            {
+                self.first_unfinished += 1;
+            }
+        }
+    }
+}
+
+/// Methods for storage types that support advancing (caller tracks byte counts).
+impl<S: ChainStorage + AdvanceBytes> RxProducerBatch<'_, S> {
+    /// Advance bytes used for chain at index (partial receive).
+    ///
+    /// Also advances the iovecs in place, removing consumed buffers.
+    /// Chain remains pending for next produce() call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn advance_bytes(&mut self, index: usize, bytes: usize) {
+        assert!(
+            !self.chain_meta[index].finished,
+            "advance_bytes: chain at index {} already finished",
+            index
+        );
+        let meta = &mut self.chain_meta[index];
+        meta.bytes_used += bytes;
+        debug_assert!(
+            meta.bytes_used <= meta.max_bytes,
+            "advance_bytes: bytes_used {} exceeds max_bytes {}",
+            meta.bytes_used,
+            meta.max_bytes
+        );
+        self.chain_storage[index].advance(bytes);
     }
 
     /// Convenience: advance bytes and finish in one call.
@@ -221,14 +212,98 @@ impl<S: RxChainStorage> RxProducerBatch<'_, S> {
     /// # Panics
     ///
     /// Panics if the chain at `index` has already been finished.
-    pub fn complete(&mut self, index: usize, bytes: usize) {
-        self.advance(index, bytes);
+    pub fn complete_bytes(&mut self, index: usize, bytes: usize) {
+        self.advance_bytes(index, bytes);
         self.finish(index);
     }
 }
 
+/// Methods for storage types that track completed byte counts (e.g., mmsghdr).
+impl<S: ChainStorage + CompletedBytes> RxProducerBatch<'_, S> {
+    /// Complete chains at the given indices using byte counts from storage.
+    ///
+    /// Reads `completed_bytes()` from each chain's storage and completes it.
+    /// Use this after recvmmsg/recvmsg_x returns the number of messages received.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Complete first N chains
+    /// batch.complete(0..count);
+    /// // Complete specific chains
+    /// batch.complete([0, 2, 5]);
+    /// ```
+    pub fn complete(&mut self, indices: impl IntoIterator<Item = usize>) {
+        for i in indices {
+            let bytes = self.chain_mut(i).completed_bytes();
+            // Update bytes_used directly (no storage advance needed for CompletedBytes types)
+            self.chain_meta[i].bytes_used += bytes;
+            self.finish(i);
+        }
+    }
+}
 
-impl<S: RxChainStorage> RxQueueProducer<S> {
+/// Specialized methods for the default Vec<iovec> storage type.
+impl RxProducerBatch<'_, Vec<iovec>> {
+    /// Get a chain's iovecs as mutable IoSliceMut references.
+    ///
+    /// # Panics
+    ///
+    /// Panics if index is out of bounds or if the chain has already been finished.
+    pub fn io_slices_mut(&mut self, index: usize) -> &mut [IoSliceMut<'_>] {
+        assert!(
+            !self.chain_meta[index].finished,
+            "io_slices_mut: chain at index {} already finished",
+            index
+        );
+        let slice = &mut self.chain_storage[index][..];
+        // Safety: IoSliceMut is repr(transparent) over iovec.
+        // The lifetime is tied to &mut self, ensuring the iovecs remain valid.
+        unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
+    }
+
+    /// Write data to chain and advance bytes_used (without finishing).
+    ///
+    /// Useful for writing headers (e.g., vnet header for RX) before receiving
+    /// the actual payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` if the chain doesn't have enough space for all the data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn write_advance(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
+        let written = write_to_iovecs(self.io_slices_mut(index), data);
+        if written != data.len() {
+            return Err(());
+        }
+        self.advance_bytes(index, written);
+        Ok(())
+    }
+
+    /// Write data to chain and complete it.
+    ///
+    /// Writes the data, advances bytes_used, and finishes the chain in one call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` if the chain doesn't have enough space for all the data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn write_complete(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
+        let written = write_to_iovecs(self.io_slices_mut(index), data);
+        if written != data.len() {
+            return Err(());
+        }
+        self.complete_bytes(index, written);
+        Ok(())
+    }
+}
+
+impl<S: ChainStorage> RxQueueProducer<S> {
     /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
@@ -245,15 +320,6 @@ impl<S: RxChainStorage> RxQueueProducer<S> {
         self.chain_meta.len()
     }
 
-    /// Feed descriptor chains from queue up to max_frames (simple version).
-    ///
-    /// This is the common case - just tracks the byte count of each chain.
-    /// For advanced use cases (e.g., writing headers), use `feed_with_transform`.
-    pub fn feed(&mut self, max_frames: usize) -> usize {
-        self.feed_with_transform(max_frames, |_iovecs| {
-            // No transformation
-        })
-    }
 
     /// Feed descriptor chains from queue, applying callback to each.
     ///
@@ -275,7 +341,7 @@ impl<S: RxChainStorage> RxQueueProducer<S> {
     /// point into guest memory owned by this struct - do not store references.
     pub fn feed_with_transform<F>(&mut self, max_frames: usize, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(&mut Vec<IoSliceMut<'a>>),
+        F: for<'a> FnMut(Vec<IoSliceMut<'a>>) -> (S, S::Meta),
     {
         let mut added = 0;
 
@@ -322,16 +388,11 @@ impl<S: RxChainStorage> RxQueueProducer<S> {
             // Compute original chain length before transformation
             let max_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
 
-            // Apply transformation (e.g., write vnet header and advance iovecs)
-            transform(&mut iovecs);
+            // Apply transformation (callback takes ownership, returns storage)
+            let (storage, user_meta) = transform(iovecs);
 
             // Track bytes consumed by transform (header written + advanced)
-            let remaining_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
-            let transform_bytes = max_bytes - remaining_bytes;
-
-            // Create storage from the iovecs
-            let mut user_meta = S::Meta::default();
-            let storage = S::from_iovecs(iovecs, &mut user_meta);
+            let transform_bytes = max_bytes - storage.total_bytes();
 
             self.chain_storage.push(storage);
             self.chain_meta.push(PendingChain {
@@ -387,24 +448,28 @@ impl<S: RxChainStorage> RxQueueProducer<S> {
                 chain_meta: &mut self.chain_meta,
                 queue: &mut self.queue,
                 mem: &self.mem,
+                first_unfinished: 0,
             };
             f(&mut batch);
         }
 
-        // Remove finished chains (can be out-of-order, so remove all marked finished)
+        // Remove finished chains in O(n) by swapping unfinished to front, then truncating
         let mut finished_count = 0;
-        let mut i = 0;
-        while i < self.chain_meta.len() {
-            if self.chain_meta[i].finished {
-                // Clear storage properly (calls S::clear with meta)
-                self.chain_storage[i].clear(&mut self.chain_meta[i].user_meta);
-                self.chain_storage.remove(i);
-                self.chain_meta.remove(i);
+        let mut write = 0;
+        for read in 0..self.chain_meta.len() {
+            if self.chain_meta[read].finished {
+                self.chain_storage[read].clear(&mut self.chain_meta[read].user_meta);
                 finished_count += 1;
             } else {
-                i += 1;
+                if write != read {
+                    self.chain_storage.swap(write, read);
+                    self.chain_meta.swap(write, read);
+                }
+                write += 1;
             }
         }
+        self.chain_storage.truncate(write);
+        self.chain_meta.truncate(write);
 
         if finished_count > 0 {
             self.signal_used_if_needed();
@@ -445,6 +510,21 @@ impl<S: RxChainStorage> RxQueueProducer<S> {
     }
 }
 
+/// Convenience methods for the default storage type (Vec<iovec>).
+impl RxQueueProducer<Vec<iovec>> {
+    /// Feed descriptor chains from queue without transformation.
+    ///
+    /// This is a convenience method for the common case where no header
+    /// transformation is needed.
+    pub fn feed(&mut self, max_frames: usize) -> usize {
+        self.feed_with_transform(max_frames, |iovecs| {
+            // Safety: IoSliceMut is repr(transparent) over iovec
+            let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
+            (raw, ())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
@@ -453,10 +533,9 @@ mod tests {
     };
 
     use super::RxQueueProducer;
-    use crate::virtio::chain_storage::VecRxStorage;
 
-    /// Helper type alias for tests using default storage
-    type TestRxProducer = RxQueueProducer<VecRxStorage>;
+    /// Helper type alias for tests using default storage (Vec<iovec>)
+    type TestRxProducer = RxQueueProducer;
 
     #[test]
     fn test_new_producer_is_empty() {
@@ -501,7 +580,7 @@ mod tests {
         // Verify buffer structure via produce
         producer.produce(|batch| {
             assert_eq!(batch.len(), 1);
-            let chain = batch.chain_mut(0);
+            let chain = batch.io_slices_mut(0);
             assert_eq!(chain.len(), 2);
             assert_eq!(chain[0].len(), 512);
             assert_eq!(chain[1].len(), 1024);
@@ -662,7 +741,7 @@ mod tests {
         // Verify buffer structure via produce
         producer.produce(|batch| {
             assert_eq!(batch.len(), 1);
-            let chain = batch.chain_mut(0);
+            let chain = batch.io_slices_mut(0);
             assert_eq!(chain.len(), 1);
             assert_eq!(chain[0].len(), 1400);
         });
@@ -715,10 +794,11 @@ mod tests {
         let mut producer: TestRxProducer = RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
 
         // First feed: get 2 buffers, skip 2-byte header from each
-        let added = producer.feed_with_transform(2, |iovecs| {
+        let added = producer.feed_with_transform(2, |mut iovecs| {
             // Write 2-byte header, then advance past it
-            write_to_iovecs(iovecs, b"HD");
-            advance_iovecs_vec(iovecs, 2);
+            write_to_iovecs(&mut iovecs, b"HD");
+            advance_iovecs_vec(&mut iovecs, 2);
+            (iovecs, ())
         });
         assert_eq!(added, 2);
         assert_eq!(producer.pending_count(), 2);
@@ -732,18 +812,19 @@ mod tests {
             batch.write_complete(0, b"AAAABBBBBBBBBBBBCC").unwrap();
 
             // Chain 1: partial write, just 4 bytes into first iovec
-            let written = write_to_iovecs(batch.chain_mut(1), b"XXXX");
+            let written = write_to_iovecs(batch.io_slices_mut(1), b"XXXX");
             assert_eq!(written, 4);
-            batch.advance(1, 4);
+            batch.advance_bytes(1, 4);
             // Don't complete - leave pending
         });
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 1);
 
         // Second feed: get 1 more (1 pending + 1 new = 2)
-        let added = producer.feed_with_transform(2, |iovecs| {
-            write_to_iovecs(iovecs, b"HD");
-            advance_iovecs_vec(iovecs, 2);
+        let added = producer.feed_with_transform(2, |mut iovecs| {
+            write_to_iovecs(&mut iovecs, b"HD");
+            advance_iovecs_vec(&mut iovecs, 2);
+            (iovecs, ())
         });
         assert_eq!(added, 1);
         assert_eq!(producer.pending_count(), 2);
@@ -754,9 +835,9 @@ mod tests {
         let completed = producer.produce(|batch| {
             // Chain 0: continue after previous 4 bytes, write 8 more
             // Use write_to_iovecs + complete since we already have partial bytes_used
-            let written = write_to_iovecs(batch.chain_mut(0), b"YYYYYYYY");
+            let written = write_to_iovecs(batch.io_slices_mut(0), b"YYYYYYYY");
             assert_eq!(written, 8);
-            batch.complete(0, 8); // adds to existing bytes_used
+            batch.complete_bytes(0, 8); // adds to existing bytes_used
 
             // Chain 1: fresh chain, write spanning first 2 iovecs
             batch.write_complete(1, b"ZZZZZZZZZZZZ").unwrap(); // 12 bytes: fills [4] + 8 of [12]
