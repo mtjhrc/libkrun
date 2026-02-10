@@ -46,6 +46,7 @@ type RawMsgHdr = msghdr_x;
 /// # Safety
 /// Uses `mem::forget` to transfer iovec Vec ownership into the header.
 /// The capacity is stored in `Meta` for proper cleanup via `Vec::from_raw_parts()`.
+#[repr(transparent)]
 pub struct MsgHdr(RawMsgHdr);
 
 // Safety: The raw pointer inside points to heap memory that we have exclusive ownership of.
