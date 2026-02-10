@@ -9,7 +9,7 @@ use std::ops::Range;
 use libc::iovec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
-use super::chain_storage::{AdvanceBytes, ChainStorage, CompletedBytes};
+use super::chain_storage::{AdvanceBytes, ChainsMemoryRepr, IovecVec, TruncateBytes};
 use super::iovec_utils::write_to_iovecs;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
@@ -36,7 +36,7 @@ struct PendingChain<M: Default> {
 ///
 /// The iovecs point into guest memory owned by `mem`. This is safe because
 /// the struct owns the memory reference and outlives any use of the iovecs.
-pub struct RxQueueProducer<S: ChainStorage = Vec<iovec>> {
+pub struct RxQueueProducer<S: ChainsMemoryRepr = IovecVec> {
     /// The virtio RX queue
     queue: Queue,
     /// Guest memory reference
@@ -54,7 +54,7 @@ pub struct RxQueueProducer<S: ChainStorage = Vec<iovec>> {
 ///
 /// Provides access to pending chains and methods to mark them as complete.
 /// Panics if you access or finish an already-finished chain.
-pub struct RxProducerBatch<'a, S: ChainStorage> {
+pub struct RxProducerBatch<'a, S: ChainsMemoryRepr> {
     chain_storage: &'a mut [S],
     chain_meta: &'a mut [PendingChain<S::Meta>],
     queue: &'a mut Queue,
@@ -64,7 +64,7 @@ pub struct RxProducerBatch<'a, S: ChainStorage> {
     first_unfinished: usize,
 }
 
-impl<S: ChainStorage> RxProducerBatch<'_, S> {
+impl<S: ChainsMemoryRepr> RxProducerBatch<'_, S> {
     /// Number of pending chains.
     #[inline]
     pub fn len(&self) -> usize {
@@ -178,72 +178,70 @@ impl<S: ChainStorage> RxProducerBatch<'_, S> {
             }
         }
     }
+
+    /// Complete a chain with the given byte count.
+    ///
+    /// Updates bytes_used and marks the chain as finished.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn complete(&mut self, index: usize, bytes: usize) {
+        self.chain_meta[index].bytes_used += bytes;
+        self.finish(index);
+    }
 }
 
-/// Methods for storage types that support advancing (caller tracks byte counts).
-impl<S: ChainStorage + AdvanceBytes> RxProducerBatch<'_, S> {
+/// Methods for storage types that support advancing (for partial receives).
+impl<S: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, S> {
     /// Advance bytes used for chain at index (partial receive).
     ///
-    /// Also advances the iovecs in place, removing consumed buffers.
+    /// Updates bytes_used and advances the iovecs in place.
     /// Chain remains pending for next produce() call.
     ///
     /// # Panics
     ///
     /// Panics if the chain at `index` has already been finished.
-    pub fn advance_bytes(&mut self, index: usize, bytes: usize) {
+    pub fn advance(&mut self, index: usize, bytes: usize) {
         assert!(
             !self.chain_meta[index].finished,
-            "advance_bytes: chain at index {} already finished",
+            "advance: chain at index {} already finished",
             index
         );
         let meta = &mut self.chain_meta[index];
         meta.bytes_used += bytes;
         debug_assert!(
             meta.bytes_used <= meta.max_bytes,
-            "advance_bytes: bytes_used {} exceeds max_bytes {}",
+            "advance: bytes_used {} exceeds max_bytes {}",
             meta.bytes_used,
             meta.max_bytes
         );
         self.chain_storage[index].advance(bytes);
     }
+}
 
-    /// Convenience: advance bytes and finish in one call.
+/// Methods for storage types that support truncating (limiting receive size).
+impl<S: ChainsMemoryRepr + TruncateBytes> RxProducerBatch<'_, S> {
+    /// Truncate chain at index to limit receive to `max_bytes`.
+    ///
+    /// This is useful when you know the frame size ahead of time and want to
+    /// limit how much data can be received into the buffer.
     ///
     /// # Panics
     ///
     /// Panics if the chain at `index` has already been finished.
-    pub fn complete_bytes(&mut self, index: usize, bytes: usize) {
-        self.advance_bytes(index, bytes);
-        self.finish(index);
+    pub fn truncate(&mut self, index: usize, max_bytes: usize) {
+        assert!(
+            !self.chain_meta[index].finished,
+            "truncate: chain at index {} already finished",
+            index
+        );
+        self.chain_storage[index].truncate_bytes(max_bytes);
     }
 }
 
-/// Methods for storage types that track completed byte counts (e.g., mmsghdr).
-impl<S: ChainStorage + CompletedBytes> RxProducerBatch<'_, S> {
-    /// Complete chains at the given indices using byte counts from storage.
-    ///
-    /// Reads `completed_bytes()` from each chain's storage and completes it.
-    /// Use this after recvmmsg/recvmsg_x returns the number of messages received.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Complete first N chains
-    /// batch.complete(0..count);
-    /// // Complete specific chains
-    /// batch.complete([0, 2, 5]);
-    /// ```
-    pub fn complete(&mut self, indices: impl IntoIterator<Item = usize>) {
-        for i in indices {
-            let bytes = self.chain_mut(i).completed_bytes();
-            // Update bytes_used directly (no storage advance needed for CompletedBytes types)
-            self.chain_meta[i].bytes_used += bytes;
-            self.finish(i);
-        }
-    }
-}
-
-/// Specialized methods for the default Vec<iovec> storage type.
-impl RxProducerBatch<'_, Vec<iovec>> {
+/// Specialized methods for the default IovecVec storage type.
+impl RxProducerBatch<'_, IovecVec> {
     /// Get a chain's iovecs as mutable IoSliceMut references.
     ///
     /// # Panics
@@ -255,8 +253,7 @@ impl RxProducerBatch<'_, Vec<iovec>> {
             "io_slices_mut: chain at index {} already finished",
             index
         );
-        let slice = &mut self.chain_storage[index][..];
-        // Safety: IoSliceMut is repr(transparent) over iovec.
+        let slice = &mut self.chain_storage[index].0[..];
         // The lifetime is tied to &mut self, ensuring the iovecs remain valid.
         unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
     }
@@ -278,7 +275,7 @@ impl RxProducerBatch<'_, Vec<iovec>> {
         if written != data.len() {
             return Err(());
         }
-        self.advance_bytes(index, written);
+        self.advance(index, written);
         Ok(())
     }
 
@@ -298,12 +295,12 @@ impl RxProducerBatch<'_, Vec<iovec>> {
         if written != data.len() {
             return Err(());
         }
-        self.complete_bytes(index, written);
+        self.complete(index, written);
         Ok(())
     }
 }
 
-impl<S: ChainStorage> RxQueueProducer<S> {
+impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
     /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
@@ -510,23 +507,25 @@ impl<S: ChainStorage> RxQueueProducer<S> {
     }
 }
 
-/// Convenience methods for the default storage type (Vec<iovec>).
-impl RxQueueProducer<Vec<iovec>> {
+/// Convenience methods for the default storage type (IovecVec).
+impl RxQueueProducer<IovecVec> {
     /// Feed descriptor chains from queue without transformation.
     ///
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
     pub fn feed(&mut self, max_frames: usize) -> usize {
         self.feed_with_transform(max_frames, |iovecs| {
-            // Safety: IoSliceMut is repr(transparent) over iovec
             let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
-            (raw, ())
+            (IovecVec(raw), ())
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::IoSliceMut;
+
+    use crate::virtio::chain_storage::IovecVec;
     use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
     use crate::virtio::test_utils::{
         create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
@@ -534,8 +533,13 @@ mod tests {
 
     use super::RxQueueProducer;
 
-    /// Helper type alias for tests using default storage (Vec<iovec>)
+    /// Helper type alias for tests using default storage
     type TestRxProducer = RxQueueProducer;
+
+    /// Helper to convert IoSliceMut to IovecVec (for test callbacks)
+    fn to_iovec(iovecs: Vec<IoSliceMut<'_>>) -> IovecVec {
+        IovecVec(unsafe { std::mem::transmute(iovecs) })
+    }
 
     #[test]
     fn test_new_producer_is_empty() {
@@ -798,7 +802,7 @@ mod tests {
             // Write 2-byte header, then advance past it
             write_to_iovecs(&mut iovecs, b"HD");
             advance_iovecs_vec(&mut iovecs, 2);
-            (iovecs, ())
+            (to_iovec(iovecs), ())
         });
         assert_eq!(added, 2);
         assert_eq!(producer.pending_count(), 2);
@@ -814,7 +818,7 @@ mod tests {
             // Chain 1: partial write, just 4 bytes into first iovec
             let written = write_to_iovecs(batch.io_slices_mut(1), b"XXXX");
             assert_eq!(written, 4);
-            batch.advance_bytes(1, 4);
+            batch.advance(1, 4);
             // Don't complete - leave pending
         });
         assert_eq!(completed, 1);
@@ -824,7 +828,7 @@ mod tests {
         let added = producer.feed_with_transform(2, |mut iovecs| {
             write_to_iovecs(&mut iovecs, b"HD");
             advance_iovecs_vec(&mut iovecs, 2);
-            (iovecs, ())
+            (to_iovec(iovecs), ())
         });
         assert_eq!(added, 1);
         assert_eq!(producer.pending_count(), 2);
@@ -837,7 +841,7 @@ mod tests {
             // Use write_to_iovecs + complete since we already have partial bytes_used
             let written = write_to_iovecs(batch.io_slices_mut(0), b"YYYYYYYY");
             assert_eq!(written, 8);
-            batch.complete_bytes(0, 8); // adds to existing bytes_used
+            batch.complete(0, 8); // adds to existing bytes_used
 
             // Chain 1: fresh chain, write spanning first 2 iovecs
             batch.write_complete(1, b"ZZZZZZZZZZZZ").unwrap(); // 12 bytes: fills [4] + 8 of [12]

@@ -113,7 +113,7 @@ impl NetBackend for Tap {
         self.tx_consumer.feed(MAX_BATCH);
 
         // Each descriptor chain is one packet. TAP's writev combines iovecs into
-        // a single packet, so we can use it directly without flattening. 
+        // a single packet, so we can use it directly without flattening.
         // One writev syscall per packet.
         self.tx_consumer.consume(|batch| {
             for i in 0..batch.len() {
@@ -122,7 +122,7 @@ impl NetBackend for Tap {
                     continue;
                 }
                 match writev(fd, chain) {
-                    Ok(n) => batch.complete_bytes(n),
+                    Ok(_) => batch.complete(i),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
                         log::error!("writev to tap failed: {e:?}");
@@ -142,14 +142,14 @@ impl NetBackend for Tap {
 
         self.rx_producer.produce(|batch| {
             for i in 0..batch.len() {
-                let chain = batch.chain_mut(i);
-                if chain.is_empty() {
-                    warn!("Chain {i} was empty");
+                let iovecs = batch.io_slices_mut(i);
+                if iovecs.is_empty() {
+                    log::warn!("Chain {i} was empty");
                     break;
                 }
 
-                match readv(fd, chain) {
-                    Ok(n) => batch.complete_bytes(i, n),
+                match readv(fd, iovecs) {
+                    Ok(n) => batch.complete(i, n),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
                         log::error!("readv from tap failed: {e:?}");

@@ -6,23 +6,24 @@
 use std::io::IoSlice;
 use std::ops::Range;
 
+use libc::iovec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
-use super::chain_storage::ChainStorage;
+use super::chain_storage::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
-/// Metadata for a chain in the batch - tracks origin for add_used()
+/// Metadata for a pending descriptor chain.
 #[derive(Debug, Clone)]
-struct ChainMeta<M: Default> {
-    /// Descriptor chain head index for queue.add_used()
+struct PendingChain<M: Default> {
     head_index: u16,
     /// Total bytes in iovecs (for I/O completion tracking)
-    total_len: usize,
+    max_bytes: usize,
     /// Bytes from guest descriptors (for add_used reporting)
     guest_len: usize,
-    /// Whether this chain has been marked as completed
-    completed: bool,
+    /// Bytes sent so far (for partial send tracking)
+    bytes_used: usize,
+    finished: bool,
     /// User-defined metadata from storage (e.g., Vec capacity for mmsghdr)
     user_meta: M,
 }
@@ -34,19 +35,17 @@ struct ChainMeta<M: Default> {
 /// completion (for backends that track partial progress).
 ///
 /// Panics if you access or complete an already-completed chain.
-pub struct TxConsumerBatch<'a, S: ChainStorage> {
-    chain_storage: &'a [S],
-    chain_meta: &'a mut [ChainMeta<S::Meta>],
+pub struct TxConsumerBatch<'a, S: ChainsMemoryRepr> {
+    chain_storage: &'a mut [S],
+    chain_meta: &'a mut [PendingChain<S::Meta>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
-    /// Tracks bytes for partial chain completion
-    partial_bytes: &'a mut usize,
-    /// Index of first uncompleted chain. Chains 0..first_completed are completed.
+    /// Index of first uncompleted chain. Chains 0..first_finished are completed.
     /// For sequential completion, this equals the number of completed chains.
-    first_completed: usize,
+    first_finished: usize,
 }
 
-impl<S: ChainStorage> TxConsumerBatch<'_, S> {
+impl<S: ChainsMemoryRepr> TxConsumerBatch<'_, S> {
     /// Number of pending chains in this batch.
     #[inline]
     pub fn len(&self) -> usize {
@@ -69,7 +68,7 @@ impl<S: ChainStorage> TxConsumerBatch<'_, S> {
     /// Panics if index is out of bounds or if the chain has already been completed.
     pub fn chain(&self, index: usize) -> &S {
         assert!(
-            !self.chain_meta[index].completed,
+            !self.chain_meta[index].finished,
             "chain: chain at index {} already completed",
             index
         );
@@ -79,19 +78,19 @@ impl<S: ChainStorage> TxConsumerBatch<'_, S> {
     /// Get access to chains in a range (checked).
     ///
     /// Returns a slice of chain storage for the given range.
-    /// Optimized for sequential completion: if `range.start >= first_completed`,
+    /// Optimized for sequential completion: if `range.start >= first_finished`,
     /// all chains in range are guaranteed uncompleted (O(1) check).
     ///
     /// # Panics
     ///
     /// Panics if any chain in the range has already been completed.
     pub fn chains(&self, range: Range<usize>) -> &[S] {
-        // Fast path: if range starts at or after first_completed, all are uncompleted
-        if range.start < self.first_completed {
+        // Fast path: if range starts at or after first_finished, all are uncompleted
+        if range.start < self.first_finished {
             // Slow path: range may include completed chains, check each
             for i in range.clone() {
                 assert!(
-                    !self.chain_meta[i].completed,
+                    !self.chain_meta[i].finished,
                     "chains: chain at index {} already completed",
                     i
                 );
@@ -111,74 +110,49 @@ impl<S: ChainStorage> TxConsumerBatch<'_, S> {
         self.chain_storage.get_unchecked(range)
     }
 
-    /// Mark the first N chains as complete.
-    ///
-    /// Use this when your I/O operation returns the number of complete
-    /// messages sent. Calls add_used() for each completed chain.
+    /// Mark chains in a range as complete.
     ///
     /// # Panics
     ///
-    /// Panics if any of the first N chains have already been completed.
-    pub fn complete_chains(&mut self, count: usize) {
-        for i in 0..count {
-            if i >= self.chain_meta.len() {
-                break;
-            }
-            let meta = &mut self.chain_meta[i];
-            assert!(
-                !meta.completed,
-                "complete_chains: chain at index {} already completed",
-                i
-            );
-            meta.completed = true;
-            log::trace!(
-                "TxConsumerBatch::complete_chains: index={} head_index={} guest_len={}",
-                i,
-                meta.head_index,
-                meta.guest_len
-            );
-            if let Err(e) = self.queue.add_used(self.mem, meta.head_index, meta.guest_len as u32) {
-                log::error!("TxConsumerBatch: failed to add_used: {e}");
-            }
-
-            // Update first_completed for sequential completion optimization
-            if i == self.first_completed {
-                self.first_completed += 1;
-            }
+    /// Panics if any chain in the range has already been completed.
+    pub fn complete_many(&mut self, range: Range<usize>) {
+        for i in range {
+            self.complete(i);
         }
     }
 
-    /// Complete chains by byte count.
+    /// Complete a chain.
     ///
-    /// Use this when your I/O operation returns a byte count. Chains are
-    /// marked complete (add_used called) when enough bytes have been consumed.
-    /// Handles partial chain progress across multiple calls.
-    pub fn complete_bytes(&mut self, bytes: usize) {
-        *self.partial_bytes += bytes;
+    /// Marks the chain as completed and calls add_used with guest_len.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been completed.
+    pub fn complete(&mut self, index: usize) {
+        let meta = &mut self.chain_meta[index];
+        assert!(
+            !meta.finished,
+            "complete: chain at index {} already completed",
+            index
+        );
+        meta.finished = true;
+        log::trace!(
+            "TxConsumerBatch::complete: index={} head_index={} guest_len={}",
+            index,
+            meta.head_index,
+            meta.guest_len
+        );
+        if let Err(e) = self.queue.add_used(self.mem, meta.head_index, meta.guest_len as u32) {
+            log::error!("TxConsumerBatch: failed to add_used: {e}");
+        }
 
-        // Complete chains while we have enough bytes
-        for (i, meta) in self.chain_meta.iter_mut().enumerate() {
-            if meta.completed {
-                continue; // Skip already completed chains
-            }
-            if *self.partial_bytes >= meta.total_len {
-                meta.completed = true;
-                log::trace!(
-                    "TxConsumerBatch::complete_bytes: head_index={} guest_len={}",
-                    meta.head_index,
-                    meta.guest_len
-                );
-                if let Err(e) = self.queue.add_used(self.mem, meta.head_index, meta.guest_len as u32) {
-                    log::error!("TxConsumerBatch: failed to add_used: {e}");
-                }
-                *self.partial_bytes -= meta.total_len;
-
-                // Update first_completed for sequential completion optimization
-                if i == self.first_completed {
-                    self.first_completed += 1;
-                }
-            } else {
-                break; // Not enough bytes for next chain
+        // Update first_finished for sequential completion optimization
+        if index == self.first_finished {
+            // Scan forward to find next uncompleted chain
+            while self.first_finished < self.chain_meta.len()
+                && self.chain_meta[self.first_finished].finished
+            {
+                self.first_finished += 1;
             }
         }
     }
@@ -186,49 +160,115 @@ impl<S: ChainStorage> TxConsumerBatch<'_, S> {
     /// Get the number of chains completed so far in this batch.
     #[inline]
     pub fn completed_count(&self) -> usize {
-        self.first_completed
+        self.first_finished
+    }
+
+    /// Get bytes already sent for chain at index.
+    #[inline]
+    pub fn bytes_used(&self, index: usize) -> usize {
+        self.chain_meta[index].bytes_used
+    }
+
+    /// Get maximum bytes the chain can hold.
+    #[inline]
+    pub fn max_bytes(&self, index: usize) -> usize {
+        self.chain_meta[index].max_bytes
     }
 
     /// Get total bytes across all pending (non-completed) chains.
     pub fn total_bytes(&self) -> usize {
         self.chain_meta
             .iter()
-            .filter(|m| !m.completed)
-            .map(|m| m.total_len)
+            .filter(|m| !m.finished)
+            .map(|m| m.max_bytes)
             .sum()
+    }
+
+    /// Mark chain at index as finished.
+    ///
+    /// Calls add_used immediately. Chain will be removed after consume() returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn finish(&mut self, index: usize) {
+        let meta = &mut self.chain_meta[index];
+        assert!(
+            !meta.finished,
+            "finish: chain at index {} already finished",
+            index
+        );
+        meta.finished = true;
+        log::trace!(
+            "TxConsumerBatch::finish: index={} head_index={} guest_len={}",
+            index,
+            meta.head_index,
+            meta.guest_len
+        );
+        if let Err(e) = self.queue.add_used(self.mem, meta.head_index, meta.guest_len as u32) {
+            log::error!("TxConsumerBatch: failed to add_used: {e}");
+        }
+
+        // Update first_finished for sequential completion optimization
+        if index == self.first_finished {
+            while self.first_finished < self.chain_meta.len()
+                && self.chain_meta[self.first_finished].finished
+            {
+                self.first_finished += 1;
+            }
+        }
     }
 }
 
-/// Specialized methods for the default Vec<IoSlice<'static>> storage type.
-impl TxConsumerBatch<'_, Vec<IoSlice<'static>>> {
+/// Methods for storage types that support advancing (for partial sends).
+impl<S: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, S> {
+    /// Advance bytes used for chain at index (partial send).
+    ///
+    /// Updates bytes_used and advances the iovecs in place.
+    /// Chain remains pending for next consume() call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn advance(&mut self, index: usize, bytes: usize) {
+        assert!(
+            !self.chain_meta[index].finished,
+            "advance: chain at index {} already finished",
+            index
+        );
+        self.chain_meta[index].bytes_used += bytes;
+        self.chain_storage[index].advance(bytes);
+    }
+}
+
+/// Specialized methods for the default IovecVec storage type.
+impl TxConsumerBatch<'_, IovecVec> {
     /// Get a chain's iovecs as IoSlice references.
     ///
     /// # Panics
     ///
-    /// Panics if index is out of bounds or if the chain has already been completed.
+    /// Panics if index is out of bounds or if the chain has already been finished.
     pub fn io_slices(&self, index: usize) -> &[IoSlice<'_>] {
         assert!(
-            !self.chain_meta[index].completed,
+            !self.chain_meta[index].finished,
             "io_slices: chain at index {} already completed",
             index
         );
-        &self.chain_storage[index][..]
+        let slice = &self.chain_storage[index].0[..];
+        // iovec and IoSlice have the same memory layout
+        unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
     }
 }
 
 /// TxQueueConsumer - owns the TX queue and manages chain batching.
 ///
 /// Generic over storage type S, allowing different backends to use optimized
-/// storage (e.g., mmsghdr for sendmmsg). Default is VecStorage for IoSlice.
-///
-/// # Safety
+/// storage (e.g., mmsghdr for sendmmsg). Default is Vec<iovec>.
 ///
 /// The iovecs stored in chain storage point into guest memory owned by `mem`.
-/// The lifetime is erased to 'static because the struct owns the memory reference.
-/// This is safe as long as:
-/// 1. The struct outlives any use of the iovecs
-/// 2. The guest memory is not unmapped while iovecs are in use
-pub struct TxQueueConsumer<S: ChainStorage = Vec<IoSlice<'static>>> {
+/// This is safe because the struct owns the memory reference and outlives any
+/// use of the iovecs.
+pub struct TxQueueConsumer<S: ChainsMemoryRepr = IovecVec> {
     /// The virtio TX queue (owned)
     queue: Queue,
     /// Guest memory reference
@@ -239,15 +279,13 @@ pub struct TxQueueConsumer<S: ChainStorage = Vec<IoSlice<'static>>> {
     /// Per-chain storage (type depends on S)
     chain_storage: Vec<S>,
     /// Metadata for each chain (parallel to chain_storage)
-    chain_meta: Vec<ChainMeta<S::Meta>>,
+    chain_meta: Vec<PendingChain<S::Meta>>,
 
     /// Number of chains fully sent
     sent_chains: usize,
-    /// Bytes consumed from the first pending chain (for partial write tracking)
-    partial_bytes: usize,
 }
 
-impl<S: ChainStorage> TxQueueConsumer<S> {
+impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
     /// Create a new TxQueueConsumer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
@@ -257,7 +295,6 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
             chain_storage: Vec::new(),
             chain_meta: Vec::new(),
             sent_chains: 0,
-            partial_bytes: 0,
         }
     }
 
@@ -272,10 +309,6 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
     /// # Arguments
     /// * `max_chains` - Maximum chains to feed (including already pending)
     /// * `transform_chain` - Callback that takes iovecs and returns (storage, meta)
-    ///
-    /// # Lifetime Note
-    /// The callback uses HRTB to hide the internal 'static lifetime. The iovecs
-    /// point into guest memory owned by this struct - do not store references.
     pub fn feed_with_transform<F>(&mut self, max_chains: usize, mut transform_chain: F) -> usize
     where
         F: for<'a> FnMut(Vec<IoSlice<'a>>) -> (S, S::Meta),
@@ -288,15 +321,7 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
             };
             let head_index = head.index;
 
-            // Build iovecs from descriptor chain into a Vec.
-            //
-            // Safety: The 'static lifetime here is a lie - the slices actually point into
-            // `self.mem`. This is safe because:
-            // 1. `self` owns `mem`, so the memory outlives these iovecs
-            // 2. The iovecs are stored in chain_storage (requires 'static for storage)
-            // 3. All access goes through `consume()` which borrows `&mut self`, preventing
-            //    use-after-free (can't drop self while iovecs are in use)
-            let mut iovecs: Vec<IoSlice<'static>> = Vec::new();
+            let mut iovecs: Vec<IoSlice<'_>> = Vec::new();
             let mut valid = true;
 
             for desc in head.into_iter() {
@@ -331,14 +356,15 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
             let (storage, user_meta) = transform_chain(iovecs);
 
             // Compute final length from storage
-            let total_len = storage.total_bytes();
+            let max_bytes = storage.total_bytes();
 
             self.chain_storage.push(storage);
-            self.chain_meta.push(ChainMeta {
+            self.chain_meta.push(PendingChain {
                 head_index,
-                total_len,
+                max_bytes,
                 guest_len,
-                completed: false,
+                bytes_used: 0,
+                finished: false,
                 user_meta,
             });
             added += 1;
@@ -350,23 +376,14 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
     /// Convert a descriptor to an IoSlice pointing into guest memory.
     ///
     /// Returns None if the descriptor's memory region cannot be found or mapped.
-    ///
-    /// # Safety
-    /// The returned IoSlice has 'static lifetime but actually points into `self.mem`.
-    /// This is safe because `self` owns `mem` and the IoSlice won't outlive `self`.
-    fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'static>> {
+    fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
         let ptr = slice.ptr_guard_mut().as_ptr();
 
         // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
-        // The slice points into pinned guest memory that won't move.
         let byte_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-        // Transmute to 'static - safe because we own the memory reference
-        let static_slice: &'static [u8] = unsafe { std::mem::transmute(byte_slice) };
-
-        Some(IoSlice::new(static_slice))
+        Some(IoSlice::new(byte_slice))
     }
 
     /// Number of chains pending (not yet sent)
@@ -398,7 +415,7 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
 
         let completed_count;
         {
-            let pending_storage = &self.chain_storage[self.sent_chains..];
+            let pending_storage = &mut self.chain_storage[self.sent_chains..];
             let pending_meta = &mut self.chain_meta[self.sent_chains..];
 
             let mut batch = TxConsumerBatch {
@@ -406,12 +423,11 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
                 chain_meta: pending_meta,
                 queue: &mut self.queue,
                 mem: &self.mem,
-                partial_bytes: &mut self.partial_bytes,
-                first_completed: 0,
+                first_finished: 0,
             };
 
             f(&mut batch);
-            completed_count = batch.completed_count;
+            completed_count = batch.first_finished;
         }
 
         // Update sent_chains based on what was completed
@@ -469,14 +485,17 @@ impl<S: ChainStorage> TxQueueConsumer<S> {
     }
 }
 
-/// Convenience methods for the default storage type (Vec<IoSlice<'static>>).
-impl TxQueueConsumer<Vec<IoSlice<'static>>> {
+/// Convenience methods for the default storage type (IovecVec).
+impl TxQueueConsumer<IovecVec> {
     /// Feed descriptor chains from queue without transformation.
     ///
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
     pub fn feed(&mut self, max_chains: usize) -> usize {
-        self.feed_with_transform(max_chains, |iovecs| (iovecs, ()))
+        self.feed_with_transform(max_chains, |iovecs| {
+            let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
+            (IovecVec(raw), ())
+        })
     }
 }
 
@@ -484,6 +503,7 @@ impl TxQueueConsumer<Vec<IoSlice<'static>>> {
 mod tests {
     use std::io::IoSlice;
 
+    use crate::virtio::chain_storage::IovecVec;
     use crate::virtio::test_utils::{
         create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
     };
@@ -492,6 +512,11 @@ mod tests {
 
     /// Helper type alias for tests using default storage
     type TestTxConsumer = TxQueueConsumer;
+
+    /// Helper to convert IoSlice to IovecVec (for test callbacks)
+    fn to_iovec(iovecs: Vec<IoSlice<'_>>) -> IovecVec {
+        IovecVec(unsafe { std::mem::transmute(iovecs) })
+    }
 
     #[test]
     fn test_new_consumer_is_empty() {
@@ -512,7 +537,7 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        let added = consumer.feed(10);
 
         assert_eq!(added, 1);
         assert_eq!(consumer.pending_count(), 1);
@@ -523,7 +548,7 @@ mod tests {
             assert_eq!(batch.len(), 1);
             assert_eq!(batch.io_slices(0).len(), 1);
             assert_eq!(&*batch.io_slices(0)[0], b"Hello, World!");
-            batch.complete_bytes(13);
+            batch.complete(0);
         });
 
         assert_eq!(completed, 1);
@@ -540,7 +565,7 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        let added = consumer.feed(10);
 
         assert_eq!(added, 1);
         assert_eq!(consumer.pending_count(), 1);
@@ -549,7 +574,7 @@ mod tests {
             assert_eq!(batch.io_slices(0).len(), 2);
             assert_eq!(&*batch.io_slices(0)[0], b"First");
             assert_eq!(&*batch.io_slices(0)[1], b"Second");
-            batch.complete_bytes(11);
+            batch.complete(0);
         });
 
         assert_eq!(completed, 1);
@@ -568,14 +593,14 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        let added = consumer.feed(10);
 
         assert_eq!(added, 3);
         assert_eq!(consumer.pending_count(), 3);
 
         let completed = consumer.consume(|batch| {
             assert_eq!(batch.len(), 3);
-            batch.complete_bytes(18); // 6 + 6 + 6
+            batch.complete_many(0..3);
         });
 
         assert_eq!(completed, 3);
@@ -600,12 +625,12 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(2, |iovecs| (iovecs, ()));
+        let added = consumer.feed(2);
         assert_eq!(added, 2);
         assert_eq!(consumer.pending_count(), 2);
 
         // Already at limit
-        let added2 = consumer.feed_with_transform(2, |iovecs| (iovecs, ()));
+        let added2 = consumer.feed(2);
         assert_eq!(added2, 0);
         assert_eq!(consumer.pending_count(), 2);
     }
@@ -628,13 +653,13 @@ mod tests {
                 let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(4), new_len) };
                 iovecs[0] = IoSlice::new(new_slice);
             }
-            (iovecs, ())
+            (to_iovec(iovecs), ())
         });
 
         assert_eq!(added, 1);
 
         consumer.consume(|batch| {
-            batch.complete_bytes(9); // payload only
+            batch.complete(0);
         });
 
         // Original guest length is 13, not 9
@@ -650,12 +675,12 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        consumer.feed(10);
         assert_eq!(consumer.pending_count(), 2);
 
         let completed = consumer.consume(|batch| {
             assert_eq!(batch.total_bytes(), 21);
-            batch.complete_bytes(batch.total_bytes());
+            batch.complete_many(0..batch.len());
         });
 
         assert_eq!(completed, 2);
@@ -668,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn test_consume_partial_bytes() {
+    fn test_consume_partial() {
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -679,14 +704,15 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        consumer.feed(10);
 
+        // Complete only first chain
         let completed = consumer.consume(|batch| {
-            batch.complete_bytes(15);
+            batch.complete(0);
         });
 
-        // Only first chain complete (10 bytes), 5 bytes into second
         assert_eq!(completed, 1);
+        assert_eq!(consumer.pending_count(), 2);
         driver.assert_used(&[(0, ExpectedUsed::Readable(10))]);
     }
 
@@ -704,12 +730,12 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        consumer.feed(10);
         assert_eq!(consumer.pending_count(), 5);
 
-        // Advance 12 bytes = 3 complete chains (compact is called internally)
+        // Complete 3 chains (compact is called internally)
         let completed = consumer.consume(|batch| {
-            batch.complete_bytes(12);
+            batch.complete_many(0..3);
         });
         assert_eq!(completed, 3);
         assert_eq!(consumer.pending_count(), 2);
@@ -730,7 +756,7 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        let added = consumer.feed(10);
 
         assert_eq!(added, 0);
         assert_eq!(consumer.pending_count(), 0);
@@ -748,7 +774,7 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        consumer.feed(10);
 
         // Callback doesn't complete anything (simulating EAGAIN/WouldBlock)
         let completed = consumer.consume(|_batch| {
@@ -785,7 +811,7 @@ mod tests {
                 let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(12), new_len) };
                 iovecs[0] = IoSlice::new(new_slice);
             }
-            (iovecs, ())
+            (to_iovec(iovecs), ())
         });
         assert_eq!(added, 1);
 
@@ -793,7 +819,7 @@ mod tests {
             // Sum bytes in chain 0 (should be 100, not 112)
             let total: usize = batch.io_slices(0).iter().map(|iov| iov.len()).sum();
             assert_eq!(total, 100); // payload only
-            batch.complete_bytes(100);
+            batch.complete(0);
         });
 
         assert_eq!(completed, 1);
@@ -825,20 +851,23 @@ mod tests {
                 let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(12), new_len) };
                 iovecs[0] = IoSlice::new(new_slice);
             }
-            (iovecs, ())
+            (to_iovec(iovecs), ())
         });
         assert_eq!(added, 1);
 
         // Cycle 1: 2 bytes sent (partial)
-        consumer.consume(|batch| batch.complete_bytes(2));
+        consumer.consume(|batch| batch.advance(0, 2));
         assert_eq!(consumer.pending_count(), 1);
 
         // Cycle 2: 50 more bytes (total 52)
-        consumer.consume(|batch| batch.complete_bytes(50));
+        consumer.consume(|batch| batch.advance(0, 50));
         assert_eq!(consumer.pending_count(), 1);
 
-        // Cycle 3: remaining 48 bytes
-        consumer.consume(|batch| batch.complete_bytes(48));
+        // Cycle 3: remaining 48 bytes - now complete
+        consumer.consume(|batch| {
+            batch.advance(0, 48);
+            batch.finish(0);
+        });
         assert_eq!(consumer.pending_count(), 0);
 
         // add_used reports ORIGINAL guest length (112)
@@ -859,24 +888,29 @@ mod tests {
 
         let mut consumer: TestTxConsumer = TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
 
-        consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
+        consumer.feed(10);
         assert_eq!(consumer.pending_count(), 2);
 
-        // Send 45 bytes (chain 1 complete, 15 into chain 2)
-        consumer.consume(|batch| batch.complete_bytes(45));
+        // Complete only first chain, advance partial on second
+        consumer.consume(|batch| {
+            batch.complete(0);
+            batch.advance(1, 15); // partial send on chain 1 (now index 0 after compact)
+        });
         assert_eq!(consumer.pending_count(), 1);
 
-        // Compact removes completed chain 1
+        // Compact removes completed chain 0
         // (compact is called automatically in consume, but let's verify state)
 
         // Guest adds more descriptors (simulating queue refill)
-        driver.readable(&[&data]); // chain 3
+        driver.readable(&[&data]); // chain 2
 
-        consumer.feed_with_transform(10, |iovecs| (iovecs, ()));
-        assert_eq!(consumer.pending_count(), 2); // chain 2 (partial) + chain 3
+        consumer.feed(10);
+        assert_eq!(consumer.pending_count(), 2); // chain 1 (partial) + chain 2
 
-        // Send remaining 15 of chain 2 + all 30 of chain 3 = 45
-        consumer.consume(|batch| batch.complete_bytes(45));
+        // Complete remaining chains
+        consumer.consume(|batch| {
+            batch.complete_many(0..2);
+        });
         assert_eq!(consumer.pending_count(), 0);
     }
 }

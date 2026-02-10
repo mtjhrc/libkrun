@@ -8,14 +8,13 @@ use nix::sys::socket::{
     SockFlag, SockType, UnixAddr,
 };
 use std::fs::remove_file;
-use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::chain_storage::{ChainStorage, CompletedBytes};
+use crate::virtio::chain_storage::ChainsMemoryRepr;
 use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, write_to_iovecs};
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
@@ -37,25 +36,23 @@ type RawMsgHdr = mmsghdr;
 #[cfg(target_os = "macos")]
 type RawMsgHdr = msghdr_x;
 
-/// Chain storage that is a transparent wrapper over mmsghdr/msghdr_x.
+/// Chain storage that wraps mmsghdr/msghdr_x.
 ///
 /// The iovec pointer is stored directly in the header, avoiding allocation
 /// of a separate mmsghdr array for sendmmsg/sendmsg_x/recvmmsg/recvmsg_x.
 ///
-/// Used for both TX and RX operations. For RX, also implements `CompletedBytes`
-/// to read the kernel-filled byte count.
+/// For RX, use `received_len()` to get the kernel-filled byte count.
 ///
 /// # Safety
 /// Uses `mem::forget` to transfer iovec Vec ownership into the header.
 /// The capacity is stored in `Meta` for proper cleanup via `Vec::from_raw_parts()`.
-#[repr(transparent)]
 pub struct MsgHdr(RawMsgHdr);
 
 // Safety: The raw pointer inside points to heap memory that we have exclusive ownership of.
 // Transferring to another thread is safe because we transfer ownership of the entire struct.
 unsafe impl Send for MsgHdr {}
 
-impl ChainStorage for MsgHdr {
+impl ChainsMemoryRepr for MsgHdr {
     /// Stores the Vec capacity for cleanup
     type Meta = usize;
 
@@ -142,16 +139,18 @@ impl MsgHdr {
     }
 }
 
-impl CompletedBytes for MsgHdr {
+impl MsgHdr {
+    /// Get the number of bytes received (filled by kernel after recvmmsg/recvmsg_x).
     #[cfg(target_os = "linux")]
     #[inline]
-    fn completed_bytes(&self) -> usize {
+    pub fn received_len(&self) -> usize {
         self.0.msg_len as usize
     }
 
+    /// Get the number of bytes received (filled by kernel after recvmmsg/recvmsg_x).
     #[cfg(target_os = "macos")]
     #[inline]
-    fn completed_bytes(&self) -> usize {
+    pub fn received_len(&self) -> usize {
         self.0.msg_datalen
     }
 }
@@ -279,7 +278,6 @@ impl NetBackend for Unixgram {
             if skip > 0 {
                 advance_tx_iovecs_vec(&mut iovecs, skip);
             }
-            // IoSlice is repr(transparent) over iovec
             let ptr = iovecs.as_mut_ptr() as *mut iovec;
             let len = iovecs.len();
             let cap = iovecs.capacity();
@@ -315,7 +313,6 @@ impl NetBackend for Unixgram {
                 // Advance iovecs past vnet header so receive goes after it
                 crate::virtio::iovec_utils::advance_iovecs_vec(&mut iovecs, vnet_offset);
             }
-            // Safety: IoSliceMut is repr(transparent) over iovec, so the cast is valid
             let ptr = iovecs.as_mut_ptr() as *mut iovec;
             let len = iovecs.len();
             let cap = iovecs.capacity();
@@ -367,7 +364,7 @@ impl Unixgram {
                 return;
             }
 
-            batch.complete_chains(ret as usize);
+            batch.complete_many(0..ret as usize);
         });
 
         Ok(())
@@ -382,16 +379,21 @@ impl Unixgram {
             }
 
             let len = batch.len();
-            // Safety: No chains have been finished yet, so 0..len is valid.
-            let storage = batch.chains_mut(0..len);
-            let ptr = storage.as_mut_ptr() as *mut mmsghdr;
-
-            let ret = unsafe {
-                libc::recvmmsg(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT, std::ptr::null_mut())
+            let ret = {
+                let storage = batch.chains_mut(0..len);
+                let ptr = storage.as_mut_ptr() as *mut mmsghdr;
+                unsafe {
+                    libc::recvmmsg(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT, std::ptr::null_mut())
+                }
             };
 
             match ret {
-                n if n > 0 => batch.complete(0..n as usize),
+                n if n > 0 => {
+                    for i in 0..n as usize {
+                        let bytes = batch.chain_mut(i).received_len();
+                        batch.complete(i, bytes);
+                    }
+                }
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),
                 _ => {
                     let err = std::io::Error::last_os_error();
@@ -416,7 +418,6 @@ impl Unixgram {
 
             let len = batch.len();
             // Safety: No chains have been completed yet, so 0..len is valid.
-            // MsgHdr is repr(transparent) over msghdr_x.
             let storage = batch.chains(0..len);
             let ptr = storage.as_ptr() as *const super::socket_x::msghdr_x;
 
@@ -440,7 +441,7 @@ impl Unixgram {
                 return;
             }
 
-            batch.complete_chains(ret as usize);
+            batch.complete_many(0..ret as usize);
         });
 
         Ok(())
@@ -457,23 +458,26 @@ impl Unixgram {
             log::trace!("recv_macos: {} chains available", batch.len());
 
             let len = batch.len();
-            // No chains in the batch have been finished yet, so 0..len is valid.
-            let storage = batch.chains_mut(0..len);
-            let ptr = storage.as_mut_ptr() as *mut super::socket_x::msghdr_x;
-
-            let ret = unsafe {
-                super::socket_x::recvmsg_x(
-                    fd,
-                    ptr,
-                    len as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                )
+            let ret = {
+                let storage = batch.chains_mut(0..len);
+                let ptr = storage.as_mut_ptr() as *mut super::socket_x::msghdr_x;
+                unsafe {
+                    super::socket_x::recvmsg_x(
+                        fd,
+                        ptr,
+                        len as libc::c_uint,
+                        libc::MSG_DONTWAIT,
+                    )
+                }
             };
 
             match ret {
                 n if n > 0 => {
                     log::trace!("recv_macos: recvmsg_x returned {} messages", n);
-                    batch.complete(0..n as usize);
+                    for i in 0..n as usize {
+                        let bytes = batch.chain_mut(i).received_len();
+                        batch.complete(i, bytes);
+                    }
                 }
                 0 => log::warn!("recvmsg_x returned 0 (unexpected)"),
                 _ => {

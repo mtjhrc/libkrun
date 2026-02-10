@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
+use crate::virtio::chain_storage::IovecVec;
 use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, iovecs_len, truncate_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
@@ -18,6 +19,11 @@ use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};
 use super::FRAME_HEADER_LEN;
+
+/// Helper to convert IoSlice to IovecVec
+fn to_iovec(iovecs: Vec<IoSlice<'_>>) -> IovecVec {
+    IovecVec(unsafe { std::mem::transmute(iovecs) })
+}
 
 /// Try to read/complete the frame length header.
 /// Returns Some(frame_len) when complete, None if incomplete or EAGAIN.
@@ -165,7 +171,7 @@ impl NetBackend for Unixstream {
             // For now, Box::leak the header bytes to get 'static lifetime.
             let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
             iovecs.insert(0, IoSlice::new(header));
-            (iovecs, ())
+            (to_iovec(iovecs), ())
         });
         log::trace!("Unixstream::send() fed {} frames, pending={}", fed, self.tx_consumer.pending_count());
 
@@ -184,7 +190,7 @@ impl NetBackend for Unixstream {
                 }
 
                 match nix::sys::uio::writev(fd, chain) {
-                    Ok(n) => batch.complete_bytes(n),
+                    Ok(_) => batch.complete(i),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
                         log::error!("writev to unixstream failed: {e:?}");
@@ -232,7 +238,7 @@ impl NetBackend for Unixstream {
 
                 match readv(fd, iovecs) {
                     Ok(n) if n > 0 => {
-                        batch.advance_bytes(i, n);
+                        batch.advance(i, n);
                         if batch.bytes_used(i) >= total_len {
                             batch.finish(i);
                             *expecting = None;
