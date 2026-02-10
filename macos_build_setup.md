@@ -59,6 +59,8 @@ When running commands via SSH, brew and other tools may not be in PATH because t
 ssh user@mac "zsh -l -c 'make'"
 ```
 
+**Security**: The workflow is one-way - Linux can SSH into the Mac, but the Mac should NOT have SSH access back to Linux. Do not add Linux as a git remote on the Mac.
+
 ## Running Tests with gvproxy
 
 gvproxy (from Podman) provides userspace networking for VMs using the vfkit protocol over unixgram sockets.
