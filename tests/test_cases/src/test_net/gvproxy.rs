@@ -90,8 +90,10 @@ fn expose_port(control_socket_path: &std::path::Path, port: u16) -> std::io::Res
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(control_socket_path)?;
+    // local = where gvproxy listens (guest connects to gateway:port)
+    // remote = where to forward TO on the host (localhost:port)
     let body = format!(
-        r#"{{"local":":{port}","remote":"192.168.127.1:{port}"}}"#,
+        r#"{{"local":":{port}","remote":"127.0.0.1:{port}"}}"#,
         port = port
     );
     let request = format!(
