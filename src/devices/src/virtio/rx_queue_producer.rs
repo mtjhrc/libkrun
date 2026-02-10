@@ -16,19 +16,19 @@ use super::InterruptTransport;
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug)]
-struct PendingChain<M: Default> {
+struct ChainMeta<M: Default> {
     head_index: u16,
     max_bytes: usize,
     bytes_used: usize,
     finished: bool,
-    /// User-defined metadata from storage (e.g., Vec capacity for mmsghdr)
+    /// User-defined metadata from representation (e.g., Vec capacity for mmsghdr)
     user_meta: M,
 }
 
 /// RxQueueProducer - owns the RX queue and provides buffers for receiving.
 ///
-/// Generic over storage type S, allowing different backends to use optimized
-/// storage (e.g., mmsghdr for recvmmsg). Default is Vec<iovec>.
+/// Generic over representation type R, allowing different backends to use optimized
+/// representations (e.g., mmsghdr for recvmmsg). Default is IovecVec.
 ///
 /// Pops descriptor chains from the virtio RX queue and provides writable
 /// iovecs for receiving data. Unfinished chains are kept pending for the next
@@ -36,7 +36,7 @@ struct PendingChain<M: Default> {
 ///
 /// The iovecs point into guest memory owned by `mem`. This is safe because
 /// the struct owns the memory reference and outlives any use of the iovecs.
-pub struct RxQueueProducer<S: ChainsMemoryRepr = IovecVec> {
+pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
     /// The virtio RX queue
     queue: Queue,
     /// Guest memory reference
@@ -44,19 +44,19 @@ pub struct RxQueueProducer<S: ChainsMemoryRepr = IovecVec> {
     /// Interrupt for signaling guest
     interrupt: InterruptTransport,
 
-    /// Per-chain storage (type depends on S)
-    chain_storage: Vec<S>,
-    /// Metadata for each chain (parallel to chain_storage)
-    chain_meta: Vec<PendingChain<S::Meta>>,
+    /// Per-chain representation (type depends on R)
+    chain_repr: Vec<R>,
+    /// Metadata for each chain (parallel to chain_repr)
+    chain_meta: Vec<ChainMeta<R::Meta>>,
 }
 
 /// Batch for producing RX chains.
 ///
 /// Provides access to pending chains and methods to mark them as complete.
 /// Panics if you access or finish an already-finished chain.
-pub struct RxProducerBatch<'a, S: ChainsMemoryRepr> {
-    chain_storage: &'a mut [S],
-    chain_meta: &'a mut [PendingChain<S::Meta>],
+pub struct RxProducerBatch<'a, R: ChainsMemoryRepr> {
+    chain_repr: &'a mut [R],
+    chain_meta: &'a mut [ChainMeta<R::Meta>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
     /// Index of first unfinished chain. Chains 0..first_unfinished are finished.
@@ -64,46 +64,46 @@ pub struct RxProducerBatch<'a, S: ChainsMemoryRepr> {
     first_unfinished: usize,
 }
 
-impl<S: ChainsMemoryRepr> RxProducerBatch<'_, S> {
+impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
     /// Number of pending chains.
     #[inline]
     pub fn len(&self) -> usize {
-        self.chain_storage.len()
+        self.chain_repr.len()
     }
 
     /// Returns true if there are no pending chains.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.chain_storage.is_empty()
+        self.chain_repr.is_empty()
     }
 
-    /// Get mutable access to a chain's storage by index.
+    /// Get mutable access to a chain's representation by index.
     ///
-    /// This is useful for backends that need to access storage-specific features
-    /// (e.g., getting mmsghdr from MsgHdrRx storage).
+    /// This is useful for backends that need to access representation-specific features
+    /// (e.g., getting mmsghdr from MsgHdrRx representation).
     ///
     /// # Panics
     ///
     /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn chain_mut(&mut self, index: usize) -> &mut S {
+    pub fn chain_mut(&mut self, index: usize) -> &mut R {
         assert!(
             !self.chain_meta[index].finished,
             "chain_mut: chain at index {} already finished",
             index
         );
-        &mut self.chain_storage[index]
+        &mut self.chain_repr[index]
     }
 
     /// Get mutable access to chains in a range (checked).
     ///
-    /// Returns a mutable slice of chain storage for the given range.
+    /// Returns a mutable slice of chain representation for the given range.
     /// Optimized for sequential finishing: if `range.start >= first_unfinished`,
     /// all chains in range are guaranteed unfinished (O(1) check).
     ///
     /// # Panics
     ///
     /// Panics if any chain in the range has already been finished.
-    pub fn chains_mut(&mut self, range: Range<usize>) -> &mut [S] {
+    pub fn chains_mut(&mut self, range: Range<usize>) -> &mut [R] {
         // Fast path: if range starts at or after first_unfinished, all are unfinished
         if range.start < self.first_unfinished {
             // Slow path: range may include finished chains, check each
@@ -115,18 +115,18 @@ impl<S: ChainsMemoryRepr> RxProducerBatch<'_, S> {
                 );
             }
         }
-        &mut self.chain_storage[range]
+        &mut self.chain_repr[range]
     }
 
     /// Get mutable access to chains in a range (unchecked).
     ///
     /// # Safety
     ///
-    /// This provides unchecked access to storage including already-finished
+    /// This provides unchecked access to representations including already-finished
     /// chains. The caller must ensure they only access valid (non-finished) chains.
     #[inline]
-    pub unsafe fn chains_mut_unchecked(&mut self, range: Range<usize>) -> &mut [S] {
-        self.chain_storage.get_unchecked_mut(range)
+    pub unsafe fn chains_mut_unchecked(&mut self, range: Range<usize>) -> &mut [R] {
+        self.chain_repr.get_unchecked_mut(range)
     }
 
     /// Get bytes already received for chain at index.
@@ -192,8 +192,8 @@ impl<S: ChainsMemoryRepr> RxProducerBatch<'_, S> {
     }
 }
 
-/// Methods for storage types that support advancing (for partial receives).
-impl<S: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, S> {
+/// Methods for representation types that support advancing (for partial receives).
+impl<R: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, R> {
     /// Advance bytes used for chain at index (partial receive).
     ///
     /// Updates bytes_used and advances the iovecs in place.
@@ -216,12 +216,12 @@ impl<S: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, S> {
             meta.bytes_used,
             meta.max_bytes
         );
-        self.chain_storage[index].advance(bytes);
+        self.chain_repr[index].advance(bytes);
     }
 }
 
-/// Methods for storage types that support truncating (limiting receive size).
-impl<S: ChainsMemoryRepr + TruncateBytes> RxProducerBatch<'_, S> {
+/// Methods for representation types that support truncating (limiting receive size).
+impl<R: ChainsMemoryRepr + TruncateBytes> RxProducerBatch<'_, R> {
     /// Truncate chain at index to limit receive to `max_bytes`.
     ///
     /// This is useful when you know the frame size ahead of time and want to
@@ -236,11 +236,11 @@ impl<S: ChainsMemoryRepr + TruncateBytes> RxProducerBatch<'_, S> {
             "truncate: chain at index {} already finished",
             index
         );
-        self.chain_storage[index].truncate_bytes(max_bytes);
+        self.chain_repr[index].truncate_bytes(max_bytes);
     }
 }
 
-/// Specialized methods for the default IovecVec storage type.
+/// Specialized methods for the default IovecVec representation type.
 impl RxProducerBatch<'_, IovecVec> {
     /// Get a chain's iovecs as mutable IoSliceMut references.
     ///
@@ -253,7 +253,7 @@ impl RxProducerBatch<'_, IovecVec> {
             "io_slices_mut: chain at index {} already finished",
             index
         );
-        let slice = &mut self.chain_storage[index].0[..];
+        let slice = &mut self.chain_repr[index].0[..];
         // The lifetime is tied to &mut self, ensuring the iovecs remain valid.
         unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
     }
@@ -300,14 +300,14 @@ impl RxProducerBatch<'_, IovecVec> {
     }
 }
 
-impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
+impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
             queue,
             mem,
             interrupt,
-            chain_storage: Vec::new(),
+            chain_repr: Vec::new(),
             chain_meta: Vec::new(),
         }
     }
@@ -338,7 +338,7 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
     /// point into guest memory owned by this struct - do not store references.
     pub fn feed_with_transform<F>(&mut self, max_frames: usize, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(Vec<IoSliceMut<'a>>) -> (S, S::Meta),
+        F: for<'a> FnMut(Vec<IoSliceMut<'a>>) -> (R, R::Meta),
     {
         let mut added = 0;
 
@@ -351,7 +351,7 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
             // Safety: The 'static lifetime here is a lie - the slices actually point into
             // `self.mem`. This is safe because:
             // 1. `self` owns `mem`, so the memory outlives these iovecs
-            // 2. The iovecs are stored in chain_storage (requires 'static for storage)
+            // 2. The iovecs are stored in chain_repr (requires 'static for representation)
             // 3. All access goes through `produce()` which borrows `&mut self`, preventing
             //    use-after-free (can't drop self while iovecs are in use)
             let mut iovecs: Vec<IoSliceMut<'static>> = Vec::new();
@@ -385,14 +385,14 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
             // Compute original chain length before transformation
             let max_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
 
-            // Apply transformation (callback takes ownership, returns storage)
+            // Apply transformation (callback takes ownership, returns representation)
             let (storage, user_meta) = transform(iovecs);
 
             // Track bytes consumed by transform (header written + advanced)
             let transform_bytes = max_bytes - storage.total_bytes();
 
-            self.chain_storage.push(storage);
-            self.chain_meta.push(PendingChain {
+            self.chain_repr.push(storage);
+            self.chain_meta.push(ChainMeta {
                 head_index,
                 max_bytes,
                 bytes_used: transform_bytes,
@@ -433,7 +433,7 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
     /// and methods to mark them as complete. Returns the number of chains finished.
     pub fn produce<F>(&mut self, f: F) -> usize
     where
-        F: for<'a> FnOnce(&mut RxProducerBatch<'a, S>),
+        F: for<'a> FnOnce(&mut RxProducerBatch<'a, R>),
     {
         if self.chain_meta.is_empty() {
             return 0;
@@ -441,7 +441,7 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
 
         {
             let mut batch = RxProducerBatch {
-                chain_storage: &mut self.chain_storage,
+                chain_repr: &mut self.chain_repr,
                 chain_meta: &mut self.chain_meta,
                 queue: &mut self.queue,
                 mem: &self.mem,
@@ -455,17 +455,17 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
         let mut write = 0;
         for read in 0..self.chain_meta.len() {
             if self.chain_meta[read].finished {
-                self.chain_storage[read].clear(&mut self.chain_meta[read].user_meta);
+                self.chain_repr[read].clear(&mut self.chain_meta[read].user_meta);
                 finished_count += 1;
             } else {
                 if write != read {
-                    self.chain_storage.swap(write, read);
+                    self.chain_repr.swap(write, read);
                     self.chain_meta.swap(write, read);
                 }
                 write += 1;
             }
         }
-        self.chain_storage.truncate(write);
+        self.chain_repr.truncate(write);
         self.chain_meta.truncate(write);
 
         if finished_count > 0 {
@@ -507,7 +507,7 @@ impl<S: ChainsMemoryRepr> RxQueueProducer<S> {
     }
 }
 
-/// Convenience methods for the default storage type (IovecVec).
+/// Convenience methods for the default representation type (IovecVec).
 impl RxQueueProducer<IovecVec> {
     /// Feed descriptor chains from queue without transformation.
     ///
@@ -533,7 +533,7 @@ mod tests {
 
     use super::RxQueueProducer;
 
-    /// Helper type alias for tests using default storage
+    /// Helper type alias for tests using default representation
     type TestRxProducer = RxQueueProducer;
 
     /// Helper to convert IoSliceMut to IovecVec (for test callbacks)

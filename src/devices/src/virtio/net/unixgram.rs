@@ -27,7 +27,7 @@ use super::socket_x::msghdr_x;
 const VFKIT_MAGIC: [u8; 4] = *b"VFKT";
 
 // ============================================================================
-// MsgHdr - Chain storage that IS an mmsghdr/msghdr_x
+// MsgHdr - Chain representation that IS an mmsghdr/msghdr_x
 // ============================================================================
 
 #[cfg(target_os = "linux")]
@@ -36,7 +36,7 @@ type RawMsgHdr = mmsghdr;
 #[cfg(target_os = "macos")]
 type RawMsgHdr = msghdr_x;
 
-/// Chain storage that wraps mmsghdr/msghdr_x.
+/// Chain representation that wraps mmsghdr/msghdr_x.
 ///
 /// The iovec pointer is stored directly in the header, avoiding allocation
 /// of a separate mmsghdr array for sendmmsg/sendmsg_x/recvmmsg/recvmsg_x.

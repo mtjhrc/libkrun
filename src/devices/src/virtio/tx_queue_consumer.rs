@@ -15,7 +15,7 @@ use super::InterruptTransport;
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug, Clone)]
-struct PendingChain<M: Default> {
+struct ChainMeta<M: Default> {
     head_index: u16,
     /// Total bytes in iovecs (for I/O completion tracking)
     max_bytes: usize,
@@ -24,7 +24,7 @@ struct PendingChain<M: Default> {
     /// Bytes sent so far (for partial send tracking)
     bytes_used: usize,
     finished: bool,
-    /// User-defined metadata from storage (e.g., Vec capacity for mmsghdr)
+    /// User-defined metadata from representation (e.g., Vec capacity for mmsghdr)
     user_meta: M,
 }
 
@@ -35,9 +35,9 @@ struct PendingChain<M: Default> {
 /// completion (for backends that track partial progress).
 ///
 /// Panics if you access or complete an already-completed chain.
-pub struct TxConsumerBatch<'a, S: ChainsMemoryRepr> {
-    chain_storage: &'a mut [S],
-    chain_meta: &'a mut [PendingChain<S::Meta>],
+pub struct TxConsumerBatch<'a, R: ChainsMemoryRepr> {
+    chain_repr: &'a mut [R],
+    chain_meta: &'a mut [ChainMeta<R::Meta>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
     /// Index of first uncompleted chain. Chains 0..first_finished are completed.
@@ -45,46 +45,46 @@ pub struct TxConsumerBatch<'a, S: ChainsMemoryRepr> {
     first_finished: usize,
 }
 
-impl<S: ChainsMemoryRepr> TxConsumerBatch<'_, S> {
+impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
     /// Number of pending chains in this batch.
     #[inline]
     pub fn len(&self) -> usize {
-        self.chain_storage.len()
+        self.chain_repr.len()
     }
 
     /// Returns true if there are no pending chains.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.chain_storage.is_empty()
+        self.chain_repr.is_empty()
     }
 
-    /// Get access to a chain's storage by index.
+    /// Get access to a chain's representation by index.
     ///
-    /// This is useful for backends that need to access storage-specific features
-    /// (e.g., getting mmsghdr from MsgHdrTx storage).
+    /// This is useful for backends that need to access representation-specific features
+    /// (e.g., getting mmsghdr from MsgHdrTx representation).
     ///
     /// # Panics
     ///
     /// Panics if index is out of bounds or if the chain has already been completed.
-    pub fn chain(&self, index: usize) -> &S {
+    pub fn chain(&self, index: usize) -> &R {
         assert!(
             !self.chain_meta[index].finished,
             "chain: chain at index {} already completed",
             index
         );
-        &self.chain_storage[index]
+        &self.chain_repr[index]
     }
 
     /// Get access to chains in a range (checked).
     ///
-    /// Returns a slice of chain storage for the given range.
+    /// Returns a slice of chain representations for the given range.
     /// Optimized for sequential completion: if `range.start >= first_finished`,
     /// all chains in range are guaranteed uncompleted (O(1) check).
     ///
     /// # Panics
     ///
     /// Panics if any chain in the range has already been completed.
-    pub fn chains(&self, range: Range<usize>) -> &[S] {
+    pub fn chains(&self, range: Range<usize>) -> &[R] {
         // Fast path: if range starts at or after first_finished, all are uncompleted
         if range.start < self.first_finished {
             // Slow path: range may include completed chains, check each
@@ -96,18 +96,18 @@ impl<S: ChainsMemoryRepr> TxConsumerBatch<'_, S> {
                 );
             }
         }
-        &self.chain_storage[range]
+        &self.chain_repr[range]
     }
 
     /// Get access to chains in a range (unchecked).
     ///
     /// # Safety
     ///
-    /// This provides unchecked access to storage including already-completed
+    /// This provides unchecked access to representations including already-completed
     /// chains. The caller must ensure they only access valid (non-completed) chains.
     #[inline]
-    pub unsafe fn chains_unchecked(&self, range: Range<usize>) -> &[S] {
-        self.chain_storage.get_unchecked(range)
+    pub unsafe fn chains_unchecked(&self, range: Range<usize>) -> &[R] {
+        self.chain_repr.get_unchecked(range)
     }
 
     /// Mark chains in a range as complete.
@@ -220,8 +220,8 @@ impl<S: ChainsMemoryRepr> TxConsumerBatch<'_, S> {
     }
 }
 
-/// Methods for storage types that support advancing (for partial sends).
-impl<S: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, S> {
+/// Methods for representation types that support advancing (for partial sends).
+impl<R: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, R> {
     /// Advance bytes used for chain at index (partial send).
     ///
     /// Updates bytes_used and advances the iovecs in place.
@@ -237,11 +237,11 @@ impl<S: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, S> {
             index
         );
         self.chain_meta[index].bytes_used += bytes;
-        self.chain_storage[index].advance(bytes);
+        self.chain_repr[index].advance(bytes);
     }
 }
 
-/// Specialized methods for the default IovecVec storage type.
+/// Specialized methods for the default IovecVec representation type.
 impl TxConsumerBatch<'_, IovecVec> {
     /// Get a chain's iovecs as IoSlice references.
     ///
@@ -254,7 +254,7 @@ impl TxConsumerBatch<'_, IovecVec> {
             "io_slices: chain at index {} already completed",
             index
         );
-        let slice = &self.chain_storage[index].0[..];
+        let slice = &self.chain_repr[index].0[..];
         // iovec and IoSlice have the same memory layout
         unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
     }
@@ -262,13 +262,13 @@ impl TxConsumerBatch<'_, IovecVec> {
 
 /// TxQueueConsumer - owns the TX queue and manages chain batching.
 ///
-/// Generic over storage type S, allowing different backends to use optimized
-/// storage (e.g., mmsghdr for sendmmsg). Default is Vec<iovec>.
+/// Generic over representation type R, allowing different backends to use optimized
+/// representations (e.g., mmsghdr for sendmmsg). Default is IovecVec.
 ///
-/// The iovecs stored in chain storage point into guest memory owned by `mem`.
+/// The iovecs stored in chain representation point into guest memory owned by `mem`.
 /// This is safe because the struct owns the memory reference and outlives any
 /// use of the iovecs.
-pub struct TxQueueConsumer<S: ChainsMemoryRepr = IovecVec> {
+pub struct TxQueueConsumer<R: ChainsMemoryRepr = IovecVec> {
     /// The virtio TX queue (owned)
     queue: Queue,
     /// Guest memory reference
@@ -276,23 +276,23 @@ pub struct TxQueueConsumer<S: ChainsMemoryRepr = IovecVec> {
     /// Interrupt for signaling guest
     interrupt: InterruptTransport,
 
-    /// Per-chain storage (type depends on S)
-    chain_storage: Vec<S>,
-    /// Metadata for each chain (parallel to chain_storage)
-    chain_meta: Vec<PendingChain<S::Meta>>,
+    /// Per-chain representation (type depends on R)
+    chain_repr: Vec<R>,
+    /// Metadata for each chain (parallel to chain_repr)
+    chain_meta: Vec<ChainMeta<R::Meta>>,
 
     /// Number of chains fully sent
     sent_chains: usize,
 }
 
-impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
+impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Create a new TxQueueConsumer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         Self {
             queue,
             mem,
             interrupt,
-            chain_storage: Vec::new(),
+            chain_repr: Vec::new(),
             chain_meta: Vec::new(),
             sent_chains: 0,
         }
@@ -302,16 +302,16 @@ impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
     ///
     /// The callback receives the iovecs from the descriptor chain and can:
     /// - Transform the iovecs (skip bytes, add headers, etc.)
-    /// - Return the storage and metadata
+    /// - Return the representation and metadata
     ///
     /// Returns the number of chains added to the batch.
     ///
     /// # Arguments
     /// * `max_chains` - Maximum chains to feed (including already pending)
-    /// * `transform_chain` - Callback that takes iovecs and returns (storage, meta)
+    /// * `transform_chain` - Callback that takes iovecs and returns (representation, meta)
     pub fn feed_with_transform<F>(&mut self, max_chains: usize, mut transform_chain: F) -> usize
     where
-        F: for<'a> FnMut(Vec<IoSlice<'a>>) -> (S, S::Meta),
+        F: for<'a> FnMut(Vec<IoSlice<'a>>) -> (R, R::Meta),
     {
         let mut added = 0;
 
@@ -352,14 +352,14 @@ impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
             // Compute original chain length before transformation
             let guest_len: usize = iovecs.iter().map(|s| s.len()).sum();
 
-            // Let callback construct storage (and transform iovecs as needed)
+            // Let callback construct representation (and transform iovecs as needed)
             let (storage, user_meta) = transform_chain(iovecs);
 
             // Compute final length from storage
             let max_bytes = storage.total_bytes();
 
-            self.chain_storage.push(storage);
-            self.chain_meta.push(PendingChain {
+            self.chain_repr.push(storage);
+            self.chain_meta.push(ChainMeta {
                 head_index,
                 max_bytes,
                 guest_len,
@@ -407,7 +407,7 @@ impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
     /// from the pending list and interrupt is signaled if needed.
     pub fn consume<F>(&mut self, f: F) -> usize
     where
-        F: for<'a> FnOnce(&mut TxConsumerBatch<'a, S>),
+        F: for<'a> FnOnce(&mut TxConsumerBatch<'a, R>),
     {
         if !self.has_pending() {
             return 0;
@@ -415,11 +415,11 @@ impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
 
         let completed_count;
         {
-            let pending_storage = &mut self.chain_storage[self.sent_chains..];
+            let pending_storage = &mut self.chain_repr[self.sent_chains..];
             let pending_meta = &mut self.chain_meta[self.sent_chains..];
 
             let mut batch = TxConsumerBatch {
-                chain_storage: pending_storage,
+                chain_repr: pending_storage,
                 chain_meta: pending_meta,
                 queue: &mut self.queue,
                 mem: &self.mem,
@@ -448,11 +448,11 @@ impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
     /// first pending chain (now at index 0 after compact).
     pub fn compact(&mut self) {
         if self.sent_chains > 0 {
-            // Clear storage properly (calls S::clear with meta)
+            // Clear representation properly (calls R::clear with meta)
             for i in 0..self.sent_chains {
-                self.chain_storage[i].clear(&mut self.chain_meta[i].user_meta);
+                self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta);
             }
-            self.chain_storage.drain(..self.sent_chains);
+            self.chain_repr.drain(..self.sent_chains);
             self.chain_meta.drain(..self.sent_chains);
             self.sent_chains = 0;
         }
@@ -485,7 +485,7 @@ impl<S: ChainsMemoryRepr> TxQueueConsumer<S> {
     }
 }
 
-/// Convenience methods for the default storage type (IovecVec).
+/// Convenience methods for the default representation type (IovecVec).
 impl TxQueueConsumer<IovecVec> {
     /// Feed descriptor chains from queue without transformation.
     ///
@@ -510,7 +510,7 @@ mod tests {
 
     use super::TxQueueConsumer;
 
-    /// Helper type alias for tests using default storage
+    /// Helper type alias for tests using default representation
     type TestTxConsumer = TxQueueConsumer;
 
     /// Helper to convert IoSlice to IovecVec (for test callbacks)

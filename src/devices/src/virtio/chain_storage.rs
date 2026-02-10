@@ -1,30 +1,16 @@
 // Copyright 2026 Red Hat, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic chain storage trait for TX/RX queue operations.
+//! Generic chain memory representation trait for TX/RX queue operations.
 //!
-//! This trait abstracts over how iovecs are stored per descriptor chain,
-//! allowing different backends to use optimized storage (e.g., mmsghdr for sendmmsg).
+//! This trait abstracts over how iovecs are represented per descriptor chain,
+//! allowing different backends to use optimized representations (e.g., mmsghdr for sendmmsg).
 
 use libc::iovec;
 
-/// Wrapper around `Vec<iovec>` that implements `Send`.
-///
-/// # Safety
-/// The raw pointers in `iovec` point to guest memory managed by the owning
-/// `TxQueueConsumer`/`RxQueueProducer`. The memory is pinned and the struct
-/// lifetime ensures the pointers remain valid. Transferring to another thread
-/// is safe because we transfer ownership of the entire container.
-#[derive(Debug, Default)]
-#[repr(transparent)]
-pub struct IovecVec(pub Vec<iovec>);
-
-// Safety: See struct-level documentation
-unsafe impl Send for IovecVec {}
-
 /// Base trait for descriptor chain memory representation.
 ///
-/// Construction is not part of the trait - each storage type provides its own
+/// Construction is not part of the trait - each representation type provides its own
 /// constructor.
 pub trait ChainsMemoryRepr: Sized + Send {
     /// User-defined metadata stored alongside each chain (e.g., Vec capacity).
@@ -45,7 +31,7 @@ pub trait ChainsMemoryRepr: Sized + Send {
     fn clear(&mut self, meta: &mut Self::Meta);
 }
 
-/// Trait for storage types that support advancing (consuming bytes from front).
+/// Trait for representation types that support advancing (consuming bytes from front).
 ///
 /// This is used by RX operations where the caller tracks byte counts manually
 /// (e.g., via readv return values) rather than having the kernel fill them in.
@@ -54,7 +40,7 @@ pub trait AdvanceBytes {
     fn advance(&mut self, bytes: usize);
 }
 
-/// Trait for storage types that support truncating (limiting total bytes).
+/// Trait for representation types that support truncating (limiting total bytes).
 ///
 /// This is useful for RX operations where you want to limit how many bytes
 /// can be received into a buffer.
@@ -63,9 +49,22 @@ pub trait TruncateBytes {
     fn truncate_bytes(&mut self, max_bytes: usize);
 }
 
-// ChainsMemoryRepr implemented for IovecVec - the default storage type.
-// Raw iovec has no lifetime, avoiding the need for fake 'static lifetimes.
+/// Wrapper around `Vec<iovec>` that implements `Send`.
+///
+/// # Safety
+/// The raw pointers in `iovec` point to guest memory managed by the owning
+/// `TxQueueConsumer`/`RxQueueProducer`. The memory is pinned and the struct
+/// lifetime ensures the pointers remain valid. Transferring to another thread
+/// is safe because we transfer ownership of the entire container.
+#[derive(Debug, Default)]
+#[repr(transparent)]
+pub struct IovecVec(pub Vec<iovec>);
 
+// Safety: See struct-level documentation
+unsafe impl Send for IovecVec {}
+
+// ChainsMemoryRepr implemented for IovecVec - the default representation type.
+// Raw iovec has no lifetime, avoiding the need for fake 'static lifetimes.
 impl ChainsMemoryRepr for IovecVec {
     type Meta = ();
 
