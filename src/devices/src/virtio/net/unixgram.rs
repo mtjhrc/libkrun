@@ -320,6 +320,7 @@ impl NetBackend for Unixgram {
         } else {
             0
         };
+        log::info!("recv: include_vnet_header={} vnet_offset={}", self.include_vnet_header, vnet_offset);
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
         let rx_fed = self.rx_producer.feed_with_transform(MAX_RX_BATCH, |mut iovecs| {

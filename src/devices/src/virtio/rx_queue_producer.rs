@@ -158,7 +158,7 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
             index
         );
         meta.finished = true;
-        log::trace!(
+        log::info!(
             "RxProducerBatch::finish: index={} head_index={} bytes_used={}",
             index,
             meta.head_index,
@@ -436,8 +436,11 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         F: for<'a> FnOnce(&mut RxProducerBatch<'a, R>),
     {
         if self.chain_meta.is_empty() {
+            log::info!("RxQueueProducer::produce: no chains pending, returning 0");
             return 0;
         }
+
+        log::info!("RxQueueProducer::produce: {} chains pending, calling callback", self.chain_meta.len());
 
         {
             let mut batch = RxProducerBatch {
@@ -468,6 +471,8 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         self.chain_repr.truncate(write);
         self.chain_meta.truncate(write);
 
+        log::info!("RxQueueProducer::produce: finished_count={} remaining={}", finished_count, write);
+
         if finished_count > 0 {
             self.signal_used_if_needed();
         }
@@ -479,11 +484,11 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     fn signal_used_if_needed(&mut self) {
         match self.queue.needs_notification(&self.mem) {
             Ok(true) => {
-                log::trace!("RxQueueProducer: signaling used queue interrupt");
+                log::info!("RxQueueProducer: signaling used queue interrupt");
                 self.interrupt.signal_used_queue();
             }
             Ok(false) => {
-                log::trace!("RxQueueProducer: needs_notification returned false, not signaling");
+                log::info!("RxQueueProducer: needs_notification returned false, not signaling");
             }
             Err(e) => {
                 log::error!("RxQueueProducer: needs_notification error: {e}");
