@@ -190,6 +190,7 @@ impl NetWorker {
     }
 
     fn process_rx(&mut self) {
+        log::info!("process_rx called");
         match self.backend.recv() {
             Ok(()) => {}
             Err(ReadError::ProcessNotRunning) => {
@@ -202,6 +203,7 @@ impl NetWorker {
     }
 
     fn process_tx(&mut self) {
+        log::info!("process_tx called");
         match self.backend.send() {
             Ok(()) => {}
             Err(WriteError::ProcessNotRunning) => {

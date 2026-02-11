@@ -275,16 +275,31 @@ impl NetBackend for Unixgram {
         };
 
         // Feed frames from queue, skipping vnet header
-        self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |mut iovecs| {
+        let fed = self.tx_consumer.feed_with_transform(MAX_TX_BATCH, |mut iovecs| {
+            let orig_len = iovecs.len();
+            let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
             if skip > 0 {
                 advance_tx_iovecs_vec(&mut iovecs, skip);
             }
             let ptr = iovecs.as_mut_ptr() as *mut iovec;
             let len = iovecs.len();
             let cap = iovecs.capacity();
+            let total_bytes: usize = unsafe {
+                std::slice::from_raw_parts(ptr as *const iovec, len)
+                    .iter()
+                    .map(|iov| iov.iov_len)
+                    .sum()
+            };
+            log::info!(
+                "TX feed: orig_iovecs={} orig_bytes={} after_skip: iovecs={} bytes={} cap={}",
+                orig_len, orig_bytes, len, total_bytes, cap
+            );
             std::mem::forget(iovecs);
             (MsgHdr::from_raw(ptr, len), cap)
         });
+        if fed > 0 {
+            log::info!("TX: fed {} chains, pending={}", fed, self.tx_consumer.pending_count());
+        }
 
         if !self.tx_consumer.has_pending() {
             return Ok(());
@@ -307,7 +322,9 @@ impl NetBackend for Unixgram {
         };
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
-        self.rx_producer.feed_with_transform(MAX_RX_BATCH, |mut iovecs| {
+        let rx_fed = self.rx_producer.feed_with_transform(MAX_RX_BATCH, |mut iovecs| {
+            let orig_len = iovecs.len();
+            let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
             if vnet_offset > 0 {
                 // Write default vnet header to beginning of buffer
                 write_to_iovecs(&mut iovecs, &super::DEFAULT_VNET_HDR);
@@ -317,9 +334,16 @@ impl NetBackend for Unixgram {
             let ptr = iovecs.as_mut_ptr() as *mut iovec;
             let len = iovecs.len();
             let cap = iovecs.capacity();
+            log::info!(
+                "RX feed: orig_iovecs={} orig_bytes={} after_vnet: iovecs={} cap={}",
+                orig_len, orig_bytes, len, cap
+            );
             std::mem::forget(iovecs);
             (MsgHdr::from_raw(ptr, len), cap)
         });
+        if rx_fed > 0 {
+            log::info!("RX: fed {} chains, pending={}", rx_fed, self.rx_producer.pending_count());
+        }
 
         #[cfg(target_os = "linux")]
         self.recv_linux();
@@ -422,6 +446,25 @@ impl Unixgram {
             let storage = batch.chains(0..len);
             let ptr = storage.as_ptr() as *const super::socket_x::msghdr_x;
 
+            // Debug: log each msghdr_x before sending
+            for i in 0..len {
+                let hdr = unsafe { &*ptr.add(i) };
+                let total: usize = if !hdr.msg_iov.is_null() && hdr.msg_iovlen > 0 {
+                    unsafe {
+                        std::slice::from_raw_parts(hdr.msg_iov, hdr.msg_iovlen as usize)
+                            .iter()
+                            .map(|iov| iov.iov_len)
+                            .sum()
+                    }
+                } else {
+                    0
+                };
+                log::info!(
+                    "sendmsg_x[{}]: iovlen={} total_bytes={} msg_datalen={} msg_flags={} msg_name={:?} msg_control={:?}",
+                    i, hdr.msg_iovlen, total, hdr.msg_datalen, hdr.msg_flags, hdr.msg_name, hdr.msg_control
+                );
+            }
+
             let ret = unsafe {
                 super::socket_x::sendmsg_x(
                     fd,
@@ -431,8 +474,11 @@ impl Unixgram {
                 )
             };
 
+            log::info!("sendmsg_x(fd={}, cnt={}) = {}", fd, len, ret);
+
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
+                log::info!("sendmsg_x error: {:?} (raw={})", err.kind(), err.raw_os_error().unwrap_or(-1));
                 match err.kind() {
                     std::io::ErrorKind::WouldBlock => {}
                     _ => {
@@ -456,7 +502,7 @@ impl Unixgram {
                 log::trace!("recv_macos: no chains available");
                 return;
             }
-            log::trace!("recv_macos: {} chains available", batch.len());
+            log::info!("recv_macos: {} chains available", batch.len());
 
             let len = batch.len();
             let ret = {
@@ -472,11 +518,13 @@ impl Unixgram {
                 }
             };
 
+            log::info!("recvmsg_x(fd={}, cnt={}) = {}", fd, len, ret);
+
             match ret {
                 n if n > 0 => {
-                    log::trace!("recv_macos: recvmsg_x returned {} messages", n);
                     for i in 0..n as usize {
                         let bytes = batch.chain_mut(i).received_len();
+                        log::info!("recvmsg_x[{}]: received {} bytes", i, bytes);
                         batch.complete(i, bytes);
                     }
                 }
