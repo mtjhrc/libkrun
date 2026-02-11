@@ -1,7 +1,7 @@
 //! Gvproxy backend for virtio-net test (macOS only)
 
 use crate::{ShouldRun, TestSetup};
-use krun_sys::{COMPAT_NET_FEATURES, NET_FLAG_VFKIT};
+use krun_sys::NET_FLAG_VFKIT;
 use nix::libc;
 use std::ffi::CString;
 
@@ -165,7 +165,7 @@ pub fn setup_backend(ctx: u32, test_setup: &TestSetup) -> anyhow::Result<()> {
             c_socket_path.as_ptr(),
             -1,
             mac.as_mut_ptr(),
-            COMPAT_NET_FEATURES,
+            0, // no offload features - gvproxy doesn't support them
             NET_FLAG_VFKIT,
         )
     };
