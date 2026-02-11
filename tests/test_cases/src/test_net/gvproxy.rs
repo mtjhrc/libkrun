@@ -72,38 +72,6 @@ fn start_gvproxy(
         .spawn()
 }
 
-/// Expose a port via gvproxy control socket API.
-/// Tells gvproxy to forward guest connections to gateway:port → host localhost:port.
-fn expose_port(control_socket_path: &std::path::Path, port: u16) -> anyhow::Result<()> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(control_socket_path)?;
-    let body = format!(r#"{{"local":":{port}","remote":"127.0.0.1:{port}"}}"#);
-    let request = format!(
-        "POST /services/forwarder/expose HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         \r\n\
-         {}",
-        body.len(),
-        body
-    );
-    stream.write_all(request.as_bytes())?;
-    stream.shutdown(std::net::Shutdown::Write)?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    anyhow::ensure!(
-        response.contains("200"),
-        "gvproxy expose_port failed: {}",
-        response
-    );
-    eprintln!("gvproxy: exposed port {port}");
-    Ok(())
-}
-
 fn wait_for_socket(path: &std::path::Path, timeout_ms: u64) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
@@ -148,13 +116,6 @@ pub fn setup_backend(ctx: u32, test_setup: &TestSetup) -> anyhow::Result<()> {
         wait_for_socket(&socket_path, 5000),
         "gvproxy failed to create socket"
     );
-
-    // Wait for control socket and expose port so gvproxy forwards guest TCP to host
-    anyhow::ensure!(
-        wait_for_socket(&control_socket_path, 5000),
-        "gvproxy failed to create control socket"
-    );
-    expose_port(&control_socket_path, 8002)?;
 
     let mut mac: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
     let c_socket_path = CString::new(socket_path.to_str().unwrap()).unwrap();
