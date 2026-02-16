@@ -370,8 +370,6 @@ impl VmResources {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "gpu")]
-    use crate::resources::DisplayBackendConfig;
     use crate::resources::{DefaultVirtioConsoleConfig, VmResources};
     use crate::vmm_config::kernel_cmdline::KernelCmdlineConfig;
     use crate::vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
@@ -397,8 +395,10 @@ mod tests {
             external_kernel: None,
             fs: Default::default(),
             vsock: Default::default(),
+            #[cfg(feature = "blk")]
+            block: Default::default(),
             #[cfg(feature = "net")]
-            net_builder: Default::default(),
+            net: Default::default(),
             gpu_virgl_flags: None,
             gpu_shm_size: None,
             #[cfg(feature = "gpu")]
