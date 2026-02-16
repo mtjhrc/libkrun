@@ -1809,7 +1809,7 @@ mod tests {
         let kvm = KvmContext::new().unwrap();
         let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), mem_size)]).unwrap();
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
-        let _kvmioapic = KvmIoapic::new(&vm.fd()).unwrap();
+        let _kvmioapic = KvmIoapic::new(vm.fd()).unwrap();
         assert!(vm.memory_init(&gm, kvm.max_memslots()).is_ok());
 
         let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();

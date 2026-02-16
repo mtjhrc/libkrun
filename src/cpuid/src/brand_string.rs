@@ -303,8 +303,6 @@ impl BrandString {
 
 #[cfg(test)]
 mod tests {
-    use std::iter::repeat;
-
     use super::*;
 
     #[test]
@@ -372,9 +370,7 @@ mod tests {
 
         // Test BrandString::push_bytes()
         //
-        let actual_len = bstr.as_bytes().len();
-        let mut old_bytes: Vec<u8> = repeat(0).take(actual_len).collect();
-        old_bytes.copy_from_slice(bstr.as_bytes());
+        let old_bytes = bstr.as_bytes().to_vec();
         assert_eq!(
             bstr.push_bytes(&_overflow),
             Err(Error::Overflow(

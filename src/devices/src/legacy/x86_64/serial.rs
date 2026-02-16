@@ -399,7 +399,7 @@ mod tests {
         let mut serial = Serial::new_out(intr_evt, Box::new(serial_out.clone()));
 
         // Invalid write of multiple chars at once.
-        serial.write(0, u64::from(DATA), &[b'x', b'y']);
+        serial.write(0, u64::from(DATA), b"xy");
         // Valid one char at a time writes.
         RAW_INPUT_BUF
             .iter()
@@ -501,7 +501,7 @@ mod tests {
         // counter doesn't change (for 0 it blocks)
         assert!(intr_evt.write(1).is_ok());
         serial.write(0, u64::from(IER), &[IER_THR_BIT]);
-        serial.write(0, u64::from(DATA), &[b'a']);
+        serial.write(0, u64::from(DATA), b"a");
 
         assert_eq!(intr_evt.read().unwrap(), 2);
         let mut data = [0u8];
@@ -533,9 +533,9 @@ mod tests {
         let mut serial = Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
 
         serial.write(0, u64::from(MCR), &[MCR_LOOP_BIT]);
-        serial.write(0, u64::from(DATA), &[b'a']);
-        serial.write(0, u64::from(DATA), &[b'b']);
-        serial.write(0, u64::from(DATA), &[b'c']);
+        serial.write(0, u64::from(DATA), b"a");
+        serial.write(0, u64::from(DATA), b"b");
+        serial.write(0, u64::from(DATA), b"c");
 
         let mut data = [0u8];
         serial.read(0, u64::from(MSR), &mut data[..]);
