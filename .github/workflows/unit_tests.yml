@@ -21,6 +21,9 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           sudo usermod -a -G kvm $USER
 
-      - name: Unit tests
+      - name: Unit tests (default)
         run: cargo test
+
+      - name: Unit tests (net+blk+gpu+input)
+        run: cargo test --features net,blk,gpu,input
 
