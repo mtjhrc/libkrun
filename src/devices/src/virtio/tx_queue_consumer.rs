@@ -326,29 +326,17 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
 
         added
     }
-
-    /// Convert a descriptor to an IoSlice pointing into guest memory.
-    ///
-    /// Returns None if the descriptor's memory region cannot be found or mapped.
-    fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'_>> {
-        let len = desc.len as usize;
-        let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        let ptr = slice.ptr_guard_mut().as_ptr();
-
-        // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
-        let byte_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-        Some(IoSlice::new(byte_slice))
-    }
-
-    /// Number of chains pending (not yet sent)
+    
+    /// Number of chains pending
     pub fn pending_count(&self) -> usize {
-        self.chain_meta.len() - self.sent_chains
+        self.chain_meta.len()
     }
 
     /// Check if there are any pending chains
     pub fn has_pending(&self) -> bool {
         self.pending_count() > 0
     }
+
 
     /// Consume pending chains using a callback that performs the actual I/O.
     ///
@@ -399,13 +387,23 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         self.compact();
         finished_count
     }
-
-    /// Clear finished chains from buffers.
+    
+    
+    /// Convert a descriptor to an IoSlice pointing into guest memory.
     ///
-    /// Call this after processing to free memory from finished chains.
-    /// Note: `partial_bytes` is preserved - it tracks bytes consumed from the
-    /// first pending chain (now at index 0 after compact).
-    pub fn compact(&mut self) {
+    /// Returns None if the descriptor's memory region cannot be found or mapped.
+    fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'_>> {
+        let len = desc.len as usize;
+        let slice = self.mem.get_slice(desc.addr, len).ok()?;
+        let ptr = slice.ptr_guard_mut().as_ptr();
+
+        // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
+        let byte_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        Some(IoSlice::new(byte_slice))
+    }
+
+    /// Clears the finished chains from the begining.
+    fn compact(&mut self) {
         if self.sent_chains > 0 {
             // Clear representation properly (calls R::clear with meta)
             for i in 0..self.sent_chains {
@@ -426,21 +424,6 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
                 log::error!("TxQueueConsumer: needs_notification error: {e}");
             }
         }
-    }
-
-    /// Get the raw queue for direct access (e.g., for enable/disable_notification).
-    pub fn queue(&self) -> &Queue {
-        &self.queue
-    }
-
-    /// Get mutable queue reference for notification control.
-    pub fn queue_mut(&mut self) -> &mut Queue {
-        &mut self.queue
-    }
-
-    /// Get memory reference.
-    pub fn mem(&self) -> &GuestMemoryMmap {
-        &self.mem
     }
 }
 

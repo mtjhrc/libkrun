@@ -375,11 +375,6 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         }
     }
 
-    /// Number of chains currently pending (ready for receive).
-    pub fn pending_count(&self) -> usize {
-        self.chain_meta.len()
-    }
-
     /// Feed descriptor chains from queue, applying callback to each.
     ///
     /// The callback receives mutable iovecs from the descriptor chain and can:
@@ -465,16 +460,23 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         }
 
         added
+    }    
+    
+    /// Number of chains pending (not yet sent)
+    pub fn pending_count(&self) -> usize {
+        self.chain_meta.len()
+    }
+    
+    /// Check if there are any pending chains
+    pub fn has_pending(&self) -> bool {
+        self.pending_count() > 0
     }
 
     /// Convert a descriptor to a mutable IoSlice pointing into guest memory.
     ///
     /// Returns None if the descriptor's memory region cannot be found or mapped.
     ///
-    /// # Safety
-    /// The returned IoSliceMut has 'static lifetime but actually points into `self.mem`.
-    /// This is safe because `self` owns `mem` and the IoSliceMut won't outlive `self`.
-    fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'static>> {
+    fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
         let ptr = slice.ptr_guard_mut().as_ptr();
@@ -530,7 +532,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
 
         finished_count
     }
-
+    
     // Remove finished chains in O(n) by swapping unfinished to front, then truncating
     // (for producer we don't care about the order of the descriptor chains)
     fn compact(&mut self) -> usize {
@@ -570,21 +572,6 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
                 log::error!("RxQueueProducer: needs_notification error: {e}");
             }
         }
-    }
-
-    /// Get the raw queue for direct access.
-    pub fn queue(&self) -> &Queue {
-        &self.queue
-    }
-
-    /// Get mutable queue reference for notification control.
-    pub fn queue_mut(&mut self) -> &mut Queue {
-        &mut self.queue
-    }
-
-    /// Get memory reference.
-    pub fn mem(&self) -> &GuestMemoryMmap {
-        &self.mem
     }
 }
 
