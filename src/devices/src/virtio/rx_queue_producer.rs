@@ -64,6 +64,12 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
         self.chain_meta[index].max_bytes
     }
 
+    /// Get reference to the user-defined metadata for chain at index.
+    #[inline]
+    pub fn user_meta(&self, index: usize) -> &R::Meta {
+        &self.chain_meta[index].user_meta
+    }
+
     // Get mutable access to the chain at index.
     ///
     /// # Panics
@@ -592,7 +598,11 @@ impl RxQueueProducer<IovecVec> {
 mod tests {
     use std::io::IoSliceMut;
 
-    use crate::virtio::chain_repr::IovecVec;
+    use std::cell::Cell;
+
+    use libc::iovec;
+
+    use crate::virtio::chain_repr::{ChainsMemoryRepr, IovecVec, ReceivedLen};
     use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
@@ -886,5 +896,165 @@ mod tests {
             (2, ExpectedUsed::Writable(b"pkt2")),
             (0, ExpectedUsed::Writable(b"pkt0")),
         ]);
+    }
+
+    /// Custom representation simulating recvmmsg-style batch receive.
+    /// Each chain stores iovecs + a filled received_len (like mmsghdr.msg_len).
+    struct CustomChainRepr {
+        iovecs: Vec<iovec>,
+        received_len: Cell<usize>,
+    }
+
+    impl CustomChainRepr {
+        /// Simulate kernel writing data into the iovecs (like recvmmsg would).
+        /// Writes `data` across the iovec scatter list and sets received_len.
+        fn simulate_recv(&self, data: &[u8]) {
+            let mut offset = 0;
+            for iov in &self.iovecs {
+                if offset >= data.len() {
+                    break;
+                }
+                let n = (data.len() - offset).min(iov.iov_len);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data[offset..].as_ptr(),
+                        iov.iov_base as *mut u8,
+                        n,
+                    );
+                }
+                offset += n;
+            }
+            self.received_len.set(offset);
+        }
+    }
+
+    impl ChainsMemoryRepr for CustomChainRepr {
+        type Meta = u32; // tag to verify meta round-trips
+
+        fn len(&self) -> usize {
+            self.iovecs.len()
+        }
+
+        fn total_bytes(&self) -> usize {
+            self.iovecs.iter().map(|iov| iov.iov_len).sum()
+        }
+
+        fn clear(&mut self, _meta: &mut u32) {
+            self.iovecs.clear();
+            self.received_len.set(0);
+        }
+    }
+
+    impl ReceivedLen for CustomChainRepr {
+        fn received_len(&self) -> usize {
+            self.received_len.get()
+        }
+    }
+
+    // Safety: iovecs point to guest memory owned by RxQueueProducer
+    unsafe impl Send for CustomChainRepr {}
+
+    #[test]
+    fn test_complete_received_many() {
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
+        driver
+            .writable(&[100])
+            .writable(&[200])
+            .writable(&[300])
+            .writable(&[400]);
+
+        let mut producer: RxQueueProducer<CustomChainRepr> =
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+
+        // Feed with meta tags 10, 20, 30, 40
+        let mut tag = 0u32;
+        let added = producer.feed_with_transform(|iovecs| {
+            tag += 10;
+            let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
+            let repr = CustomChainRepr {
+                iovecs: raw,
+                received_len: Cell::new(0),
+            };
+            (repr, tag)
+        });
+        assert_eq!(added, 4);
+
+        // Simulate recvmmsg: kernel writes data + fills received_len on each repr.
+        let completed = producer.produce(|batch| {
+            assert_eq!(batch.len(), 4);
+
+            // Verify meta tags round-tripped
+            assert_eq!(*batch.user_meta(0), 10);
+            assert_eq!(*batch.user_meta(1), 20);
+            assert_eq!(*batch.user_meta(2), 30);
+            assert_eq!(*batch.user_meta(3), 40);
+
+            // Simulate kernel writing data (like recvmmsg would)
+            batch.chain_mut(0).simulate_recv(b"aaaa");
+            batch.chain_mut(1).simulate_recv(b"bbbbbbbb");
+            // chain 2: no data yet, leave pending
+            batch.chain_mut(3).simulate_recv(b"dddddddddddd");
+
+            // Batch complete first two chains
+            batch.complete_received_many(0..2);
+            assert!(batch.is_finished(0));
+            assert!(batch.is_finished(1));
+            assert_eq!(batch.bytes_used(0), 4);
+            assert_eq!(batch.bytes_used(1), 8);
+
+            // Single complete for chain 3
+            batch.complete_received(3);
+            assert!(batch.is_finished(3));
+            assert_eq!(batch.bytes_used(3), 12);
+
+            // Chain 2 left pending
+            assert!(!batch.is_finished(2));
+        });
+        assert_eq!(completed, 3);
+        assert_eq!(producer.pending_count(), 1);
+
+        driver.assert_used(&[
+            (0, ExpectedUsed::Writable(b"aaaa")),
+            (1, ExpectedUsed::Writable(b"bbbbbbbb")),
+            (3, ExpectedUsed::Writable(b"dddddddddddd")),
+        ]);
+
+        // ── Cycle 2: complete the remaining chain ─────────────────────────
+        let completed = producer.produce(|batch| {
+            assert_eq!(batch.len(), 1);
+            // Verify meta survived compaction (chain 2 had tag 30)
+            assert_eq!(*batch.user_meta(0), 30);
+
+            batch.chain_mut(0).simulate_recv(b"cccccc");
+            batch.complete_received(0);
+            assert_eq!(batch.bytes_used(0), 6);
+        });
+        assert_eq!(completed, 1);
+        assert_eq!(producer.pending_count(), 0);
+
+        driver.assert_used(&[
+            (0, ExpectedUsed::Writable(b"aaaa")),
+            (1, ExpectedUsed::Writable(b"bbbbbbbb")),
+            (3, ExpectedUsed::Writable(b"dddddddddddd")),
+            (2, ExpectedUsed::Writable(b"cccccc")),
+        ]);
+    }
+
+    #[test]
+    #[should_panic(expected = "already finished")]
+    fn test_double_finish_panics() {
+        let setup = TestSetup::new();
+        let (queue, _driver) = setup.create_queue(16);
+        _driver.writable(&[100]);
+
+        let mut producer: TestRxProducer =
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+
+        producer.feed();
+        producer.produce(|batch| {
+            batch.complete(0, 10);
+            batch.complete(0, 10); // panic: already finished
+        });
     }
 }

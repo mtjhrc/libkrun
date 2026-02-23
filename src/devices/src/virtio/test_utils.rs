@@ -431,6 +431,7 @@ impl<'a> VirtQueueDriver<'a> {
     /// - `Writable(bytes)` - verify writable chain content matches
     /// - `Readable(len)` - verify readable chain wasn't modified, check length
     /// - `ReadableAnyLen` - verify readable chain wasn't modified, skip length check
+    #[track_caller]
     pub fn assert_used(&self, expected: &[(usize, ExpectedUsed<'_>)]) {
         let used = self.used_entries();
         let chains = self.chains.borrow();

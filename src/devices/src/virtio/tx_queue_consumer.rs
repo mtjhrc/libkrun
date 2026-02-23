@@ -918,4 +918,21 @@ mod tests {
             (2, ExpectedUsed::ReadableAnyLen),
         ]);
     }
+
+    #[test]
+    #[should_panic(expected = "already finished")]
+    fn test_double_finish_panics() {
+        let setup = TestSetup::new();
+        let (queue, _driver) = setup.create_queue(16);
+        _driver.readable(&[b"data"]);
+
+        let mut consumer: TestTxConsumer =
+            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+
+        consumer.feed();
+        consumer.consume(|batch| {
+            batch.finish(0);
+            batch.finish(0); // panic: already finished
+        });
+    }
 }
