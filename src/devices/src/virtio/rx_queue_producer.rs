@@ -421,15 +421,10 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             let mut iovecs: Vec<IoSliceMut<'_>> = Vec::new();
 
             for desc in head.into_iter().filter(DescriptorChain::is_write_only) {
-                if let Some(iov) = self.desc_to_ioslice_mut(&desc) {
+                if let Some(iov) = unsafe { self.desc_to_ioslice_mut(&desc) } {
                     iovecs.push(iov);
                 } else {
-                    log::error!(
-                        "Invalid descriptor: head_index={} addr={:x} len={}, skipping the chain",
-                        head_index,
-                        desc.addr.raw_value(),
-                        desc.len
-                    );
+                    log::error!("Invalid descriptor: {desc:?}, skipping the chain",);
                     continue 'next_chain;
                 }
             }
@@ -460,13 +455,13 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         }
 
         added
-    }    
-    
+    }
+
     /// Number of chains pending (not yet sent)
     pub fn pending_count(&self) -> usize {
         self.chain_meta.len()
     }
-    
+
     /// Check if there are any pending chains
     pub fn has_pending(&self) -> bool {
         self.pending_count() > 0
@@ -476,7 +471,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     ///
     /// Returns None if the descriptor's memory region cannot be found or mapped.
     ///
-    fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'_>> {
+    unsafe fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
         let ptr = slice.ptr_guard_mut().as_ptr();
@@ -486,7 +481,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         let byte_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
 
         // Transmute to 'static - safe because we own the memory reference
-        let static_slice: &'static mut [u8] = unsafe { std::mem::transmute(byte_slice) };
+        let static_slice: &mut [u8] = unsafe { std::mem::transmute(byte_slice) };
 
         Some(IoSliceMut::new(static_slice))
     }
@@ -532,7 +527,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
 
         finished_count
     }
-    
+
     // Remove finished chains in O(n) by swapping unfinished to front, then truncating
     // (for producer we don't care about the order of the descriptor chains)
     fn compact(&mut self) -> usize {

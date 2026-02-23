@@ -282,15 +282,10 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             let mut iovecs: Vec<IoSlice<'_>> = Vec::new();
 
             for desc in head.into_iter().filter(DescriptorChain::is_read_only) {
-                if let Some(iov) = self.desc_to_ioslice(&desc) {
+                if let Some(iov) = unsafe { self.desc_to_ioslice(&desc) } {
                     iovecs.push(iov);
                 } else {
-                    log::error!(
-                        "Invalid descriptor head_index={} addr={:x} len={}, skipping the chain",
-                        head_index,
-                        desc.addr.raw_value(),
-                        desc.len
-                    );
+                    log::error!("Invalid descriptor: {desc:?}, skipping the chain",);
                     continue 'next_chain;
                 }
             }
@@ -326,7 +321,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
 
         added
     }
-    
+
     /// Number of chains pending
     pub fn pending_count(&self) -> usize {
         self.chain_meta.len()
@@ -336,7 +331,6 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     pub fn has_pending(&self) -> bool {
         self.pending_count() > 0
     }
-
 
     /// Consume pending chains using a callback that performs the actual I/O.
     ///
@@ -387,12 +381,10 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         self.compact();
         finished_count
     }
-    
-    
+
     /// Convert a descriptor to an IoSlice pointing into guest memory.
     ///
-    /// Returns None if the descriptor's memory region cannot be found or mapped.
-    fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'_>> {
+    unsafe fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
         let ptr = slice.ptr_guard_mut().as_ptr();
