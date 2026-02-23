@@ -430,6 +430,8 @@ impl Unixgram {
 
             match ret {
                 n if n > 0 => {
+                    //FIXME: this is wrong! we need to use received_len() to set the recvd count for each buffer!
+                    // we should have a method for that!
                     batch.finish_many(0..n as usize);
                 }
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),

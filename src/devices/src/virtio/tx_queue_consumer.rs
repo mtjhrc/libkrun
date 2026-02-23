@@ -286,7 +286,6 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
 
             let head_index = head.index;
             let mut iovecs: Vec<IoSlice<'_>> = Vec::new();
-            let mut valid = true;
 
             for desc in head.into_iter().filter(DescriptorChain::is_read_only) {
                 if let Some(iov) = self.desc_to_ioslice(&desc) {
@@ -374,7 +373,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             return 0;
         }
 
-        let completed_count;
+        let finished_count;
         {
             let pending_storage = &mut self.chain_repr[self.sent_chains..];
             let pending_meta = &mut self.chain_meta[self.sent_chains..];
@@ -388,13 +387,13 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             };
 
             f(&mut batch);
-            completed_count = batch.first_finished;
+            finished_count = batch.first_finished;
         }
 
-        // Update sent_chains based on what was completed
-        self.sent_chains += completed_count;
+        // Update sent_chains based on what was finished
+        self.sent_chains += finished_count;
 
-        if completed_count > 0 {
+        if finished_count > 0 {
             self.signal_used_if_needed();
         }
 
@@ -405,7 +404,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         );
 
         self.compact();
-        completed_count
+        finished_count
     }
 
     /// Clear completed chains from buffers.

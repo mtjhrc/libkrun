@@ -375,7 +375,6 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
 
             let head_index = head.index;
             let mut iovecs: Vec<IoSliceMut<'_>> = Vec::new();
-            let mut valid = true;
 
             for desc in head.into_iter().filter(DescriptorChain::is_write_only) {
                 if let Some(iov) = self.desc_to_ioslice_mut(&desc) {
