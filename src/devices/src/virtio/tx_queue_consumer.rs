@@ -7,7 +7,7 @@ use std::io::IoSlice;
 use std::ops::Range;
 
 use libc::iovec;
-use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
+use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 use super::chain_repr::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
 use super::queue::{DescriptorChain, Queue};
@@ -220,7 +220,8 @@ pub struct TxQueueConsumer<R: ChainsMemoryRepr = IovecVec> {
     mem: GuestMemoryMmap,
     /// Interrupt for signaling guest
     interrupt: InterruptTransport,
-
+    /// Maximum number of chains to keep pending at once.
+    max_chains: usize,
     /// Per-chain representation (type depends on R)
     chain_repr: Vec<R>,
     /// Metadata for each chain (parallel to chain_repr)
@@ -233,14 +234,21 @@ pub struct TxQueueConsumer<R: ChainsMemoryRepr = IovecVec> {
 impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Create a new TxQueueConsumer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
+        let max_chains = queue.size as usize * 2;
         Self {
             queue,
             mem,
             interrupt,
+            max_chains,
             chain_repr: Vec::new(),
             chain_meta: Vec::new(),
             sent_chains: 0,
         }
+    }
+
+    /// Set the maximum number of chains to keep pending at once.
+    pub fn set_max_chains(&mut self, max: usize) {
+        self.max_chains = max;
     }
 
     /// Feed descriptor chains from queue, applying callback to transform each.
@@ -250,11 +258,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// - Return the representation and metadata
     ///
     /// Returns the number of chains added to the batch.
-    ///
-    /// # Arguments
-    /// * `max_chains` - Maximum chains to feed (including already pending)
-    /// * `transform` - Callback that takes iovecs and returns (representation, meta)
-    pub fn feed_with_transform<F>(&mut self, max_chains: usize, mut transform: F) -> usize
+    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
         F: for<'a> FnMut(Vec<IoSlice<'a>>) -> (R, R::Meta),
     {
@@ -263,7 +267,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         if let Err(e) = self.queue.disable_notification(&self.mem) {
             warn!("Failed to disable queue notifications: {e:?}");
         }
-        'next_chain: while self.pending_count() < max_chains {
+        'next_chain: while self.pending_count() < self.max_chains {
             let Some(head) = self.queue.pop(&self.mem) else {
                 // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
                 // meantime, loops back to pop them; otherwise break and expect the user to wake
@@ -425,8 +429,8 @@ impl TxQueueConsumer<IovecVec> {
     ///
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
-    pub fn feed(&mut self, max_chains: usize) -> usize {
-        self.feed_with_transform(max_chains, |iovecs| {
+    pub fn feed(&mut self) -> usize {
+        self.feed_with_transform(|iovecs| {
             let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
             (IovecVec(raw), ())
         })
@@ -470,9 +474,9 @@ mod tests {
         driver.readable(&[b"Hello, World!"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed(10);
+        let added = consumer.feed();
 
         assert_eq!(added, 1);
         assert_eq!(consumer.pending_count(), 1);
@@ -499,9 +503,9 @@ mod tests {
         driver.readable(&[b"First", b"Second"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed(10);
+        let added = consumer.feed();
 
         assert_eq!(added, 1);
         assert_eq!(consumer.pending_count(), 1);
@@ -528,9 +532,9 @@ mod tests {
             .readable(&[b"Frame3"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed(10);
+        let added = consumer.feed();
 
         assert_eq!(added, 3);
         assert_eq!(consumer.pending_count(), 3);
@@ -549,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn test_feed_respects_max_frames() {
+    fn test_feed_respects_max_chains() {
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -561,14 +565,15 @@ mod tests {
             .readable(&[b"F4"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
+        consumer.set_max_chains(2);
 
-        let added = consumer.feed(2);
+        let added = consumer.feed();
         assert_eq!(added, 2);
         assert_eq!(consumer.pending_count(), 2);
 
         // Already at limit
-        let added2 = consumer.feed(2);
+        let added2 = consumer.feed();
         assert_eq!(added2, 0);
         assert_eq!(consumer.pending_count(), 2);
     }
@@ -581,9 +586,9 @@ mod tests {
         driver.readable(&[b"TestData12345"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |mut iovecs| {
+        let added = consumer.feed_with_transform(|mut iovecs| {
             // Skip 4 bytes (like skipping vnet header)
             if !iovecs.is_empty() && iovecs[0].len() >= 4 {
                 let first = &iovecs[0];
@@ -615,9 +620,9 @@ mod tests {
             .readable(&[b"SecondChain"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        consumer.feed(10);
+        consumer.feed();
         assert_eq!(consumer.pending_count(), 2);
 
         let finished = consumer.consume(|batch| {
@@ -645,9 +650,9 @@ mod tests {
             .readable(&[b"Chain22222"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        consumer.feed(10);
+        consumer.feed();
 
         // Finish only first chain
         let finished = consumer.consume(|batch| {
@@ -672,9 +677,9 @@ mod tests {
             .readable(&[b"test"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        consumer.feed(10);
+        consumer.feed();
         assert_eq!(consumer.pending_count(), 5);
 
         // Finish 3 chains (compact is called internally)
@@ -699,9 +704,9 @@ mod tests {
         // Don't add any descriptors
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed(10);
+        let added = consumer.feed();
 
         assert_eq!(added, 0);
         assert_eq!(consumer.pending_count(), 0);
@@ -718,9 +723,9 @@ mod tests {
         driver.readable(&[b"TestData"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        consumer.feed(10);
+        consumer.feed();
 
         // Callback doesn't finish anything (simulating EAGAIN/WouldBlock)
         let finished = consumer.consume(|_batch| {});
@@ -745,9 +750,9 @@ mod tests {
         driver.readable(&[&data]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |mut iovecs| {
+        let added = consumer.feed_with_transform(|mut iovecs| {
             // Skip 12 bytes from first iovec
             if !iovecs.is_empty() && iovecs[0].len() >= 12 {
                 let first = &iovecs[0];
@@ -787,9 +792,9 @@ mod tests {
         driver.readable(&[&data]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(10, |mut iovecs| {
+        let added = consumer.feed_with_transform(|mut iovecs| {
             if !iovecs.is_empty() && iovecs[0].len() >= 12 {
                 let first = &iovecs[0];
                 let ptr = first.as_ptr();
@@ -833,9 +838,9 @@ mod tests {
         driver.readable(&[&data]).readable(&[&data]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue.clone(), mem.clone(), create_interrupt());
+            TxQueueConsumer::new(queue, mem.clone(), create_interrupt());
 
-        consumer.feed(10);
+        consumer.feed();
         assert_eq!(consumer.pending_count(), 2);
 
         // Finish only first chain, advance partial on second
@@ -851,7 +856,7 @@ mod tests {
         // Guest adds more descriptors (simulating queue refill)
         driver.readable(&[&data]); // chain 2
 
-        consumer.feed(10);
+        consumer.feed();
         assert_eq!(consumer.pending_count(), 2); // chain 1 (partial) + chain 2
 
         // Finish remaining chains

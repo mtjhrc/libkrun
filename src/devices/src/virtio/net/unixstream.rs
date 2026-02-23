@@ -154,9 +154,6 @@ impl Unixstream {
     }
 }
 
-const MAX_TX_BATCH: usize = 64;
-const MAX_RX_BATCH: usize = 64;
-
 impl NetBackend for Unixstream {
     fn send(&mut self) -> Result<(), WriteError> {
         log::trace!("Unixstream::send() called");
@@ -169,7 +166,7 @@ impl NetBackend for Unixstream {
         // Feed frames from queue, prepending frame length header
         let fed = self
             .tx_consumer
-            .feed_with_transform(MAX_TX_BATCH, |mut iovecs| {
+            .feed_with_transform(|mut iovecs| {
                 // Skip vnet header
                 advance_tx_iovecs_vec(&mut iovecs, skip);
 
@@ -224,7 +221,7 @@ impl NetBackend for Unixstream {
             0
         };
 
-        self.rx_producer.feed(MAX_RX_BATCH);
+        self.rx_producer.feed();
 
         let header_buf = &mut self.rx_header_buf;
         let header_pos = &mut self.rx_header_pos;

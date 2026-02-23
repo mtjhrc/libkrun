@@ -25,8 +25,6 @@ ioctl_write_ptr!(tunsetiff, b'T', 202, c_int);
 ioctl_write_int!(tunsetoffload, b'T', 208);
 ioctl_write_ptr!(tunsetvnethdrsz, b'T', 216, c_int);
 
-const MAX_BATCH: usize = 256;
-
 pub struct Tap {
     fd: OwnedFd,
     tx_consumer: TxQueueConsumer,
@@ -110,7 +108,7 @@ impl NetBackend for Tap {
     fn send(&mut self) -> Result<(), WriteError> {
         let fd = self.fd.as_fd();
 
-        self.tx_consumer.feed(MAX_BATCH);
+        self.tx_consumer.feed();
 
         // Each descriptor chain is one packet. TAP's writev combines iovecs into
         // a single packet, so we can use it directly without flattening.
@@ -138,7 +136,7 @@ impl NetBackend for Tap {
     fn recv(&mut self) -> Result<(), ReadError> {
         let fd = self.fd.as_fd();
 
-        self.rx_producer.feed(MAX_BATCH);
+        self.rx_producer.feed();
 
         self.rx_producer.produce(|batch| {
             for i in 0..batch.len() {

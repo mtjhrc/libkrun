@@ -7,7 +7,7 @@ use std::io::IoSliceMut;
 use std::ops::Range;
 
 use libc::iovec;
-use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
+use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 use super::chain_repr::{AdvanceBytes, ChainsMemoryRepr, IovecVec, ReceivedLen, TruncateBytes};
 use super::iovec_utils::write_to_iovecs;
@@ -356,7 +356,8 @@ pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
     mem: GuestMemoryMmap,
     /// Interrupt for signaling guest
     interrupt: InterruptTransport,
-
+    /// Maximum number of chains to keep pending at once.
+    max_chains: usize,
     /// Per-chain representation (type depends on R)
     chain_repr: Vec<R>,
     /// Metadata for each chain (parallel to chain_repr)
@@ -366,13 +367,20 @@ pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
 impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
+        let max_chains = queue.size as usize * 2;
         Self {
             queue,
             mem,
             interrupt,
+            max_chains,
             chain_repr: Vec::new(),
             chain_meta: Vec::new(),
         }
+    }
+
+    /// Set the maximum number of chains to keep pending at once.
+    pub fn set_max_chains(&mut self, max: usize) {
+        self.max_chains = max;
     }
 
     /// Feed descriptor chains from queue, applying callback to each.
@@ -386,14 +394,10 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     ///
     /// Returns the number of frames added.
     ///
-    /// # Arguments
-    /// * `max_chains` - Maximum frames to feed (including already pending)
-    /// * `transform` - Callback to transform each descriptor chain's iovecs
-    ///
     /// # Lifetime Note
     /// The callback uses HRTB to hide the internal 'static lifetime. The iovecs
     /// point into guest memory owned by this struct - do not store references.
-    pub fn feed_with_transform<F>(&mut self, max_chains: usize, mut transform: F) -> usize
+    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
         F: for<'a> FnMut(Vec<IoSliceMut<'a>>) -> (R, R::Meta),
     {
@@ -402,7 +406,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         if let Err(e) = self.queue.disable_notification(&self.mem) {
             warn!("Failed to disable queue notifications: {e:?}");
         }
-        'next_chain: while self.pending_count() < max_chains {
+        'next_chain: while self.pending_count() < self.max_chains {
             let Some(head) = self.queue.pop(&self.mem) else {
                 // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
                 // meantime, loops back to pop them; otherwise break and expect the user to wake
@@ -576,8 +580,8 @@ impl RxQueueProducer<IovecVec> {
     ///
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
-    pub fn feed(&mut self, max_frames: usize) -> usize {
-        self.feed_with_transform(max_frames, |iovecs| {
+    pub fn feed(&mut self) -> usize {
+        self.feed_with_transform(|iovecs| {
             let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
             (IovecVec(raw), ())
         })
@@ -610,7 +614,7 @@ mod tests {
         let queue = create_test_queue();
         let _driver = VirtQueueDriver::new(&queue, &mem);
         let producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
         assert_eq!(producer.pending_count(), 0);
     }
@@ -623,9 +627,9 @@ mod tests {
         driver.writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        let added = producer.feed(10);
+        let added = producer.feed();
 
         assert_eq!(added, 1);
         assert_eq!(producer.pending_count(), 1);
@@ -640,9 +644,9 @@ mod tests {
         driver.writable(&[512, 1024]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        let added = producer.feed(10);
+        let added = producer.feed();
 
         assert_eq!(added, 1);
         assert_eq!(producer.pending_count(), 1);
@@ -667,9 +671,9 @@ mod tests {
         driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        let added = producer.feed(10);
+        let added = producer.feed();
 
         assert_eq!(added, 3);
         assert_eq!(producer.pending_count(), 3);
@@ -688,9 +692,10 @@ mod tests {
             .writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+        producer.set_max_chains(2);
 
-        let added = producer.feed(2);
+        let added = producer.feed();
 
         assert_eq!(added, 2);
         assert_eq!(producer.pending_count(), 2);
@@ -704,9 +709,9 @@ mod tests {
         driver.writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        producer.feed(10);
+        producer.feed();
         assert_eq!(producer.pending_count(), 2);
 
         let completed = producer.produce(|batch| {
@@ -733,9 +738,9 @@ mod tests {
         driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        producer.feed(10);
+        producer.feed();
 
         let completed = producer.produce(|batch| {
             batch.write_complete(0, b"0123456789").unwrap();
@@ -760,9 +765,9 @@ mod tests {
         driver.writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        producer.feed(10);
+        producer.feed();
 
         // First produce: no data received (EAGAIN-like)
         let completed = producer.produce(|_batch| {
@@ -789,9 +794,9 @@ mod tests {
         let _driver = VirtQueueDriver::new(&queue, &mem);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        assert_eq!(producer.feed(10), 0);
+        assert_eq!(producer.feed(), 0);
         assert_eq!(producer.pending_count(), 0);
         assert_eq!(producer.produce(|_batch| {}), 0);
     }
@@ -805,9 +810,9 @@ mod tests {
         driver.readable_then_writable(&[b"ignored"], &[1400]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        producer.feed(10);
+        producer.feed();
 
         // Verify buffer structure via produce
         producer.produce(|batch| {
@@ -827,9 +832,9 @@ mod tests {
         driver.writable(&[100, 200, 300]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        producer.feed(10);
+        producer.feed();
         assert_eq!(producer.pending_count(), 1);
 
         let completed = producer.produce(|batch| {
@@ -864,10 +869,11 @@ mod tests {
             .writable(&[6, 12, 6]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+        producer.set_max_chains(2);
 
         // First feed: get 2 buffers, skip 2-byte header from each
-        let added = producer.feed_with_transform(2, |mut iovecs| {
+        let added = producer.feed_with_transform(|mut iovecs| {
             // Write 2-byte header, then advance past it
             write_to_iovecs(&mut iovecs, b"HD");
             advance_iovecs_vec(&mut iovecs, 2);
@@ -888,13 +894,13 @@ mod tests {
             let written = write_to_iovecs(batch.io_slices_mut(1), b"XXXX");
             assert_eq!(written, 4);
             batch.advance(1, 4);
-            // Don't complete - leave pending
+            // Don't finish - leave pending
         });
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 1);
 
         // Second feed: get 1 more (1 pending + 1 new = 2)
-        let added = producer.feed_with_transform(2, |mut iovecs| {
+        let added = producer.feed_with_transform(|mut iovecs| {
             write_to_iovecs(&mut iovecs, b"HD");
             advance_iovecs_vec(&mut iovecs, 2);
             (to_iovec(iovecs), ())
@@ -939,9 +945,9 @@ mod tests {
         driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue.clone(), mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
 
-        producer.feed(10);
+        producer.feed();
         assert_eq!(producer.pending_count(), 3);
 
         // Complete only buffer 0, leave 1 and 2 pending

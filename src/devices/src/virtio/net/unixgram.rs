@@ -261,9 +261,6 @@ impl Unixgram {
     }
 }
 
-const MAX_TX_BATCH: usize = 64;
-const MAX_RX_BATCH: usize = 64;
-
 impl NetBackend for Unixgram {
     fn send(&mut self) -> Result<(), WriteError> {
         let skip = if !self.include_vnet_header {
@@ -275,7 +272,7 @@ impl NetBackend for Unixgram {
         // Feed frames from queue, skipping vnet header
         let fed =
             self.tx_consumer
-                .feed_with_transform(MAX_TX_BATCH, |mut iovecs| {
+                .feed_with_transform(|mut iovecs| {
                     let orig_len = iovecs.len();
                     let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
                     if skip > 0 {
@@ -333,7 +330,7 @@ impl NetBackend for Unixgram {
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
         let rx_fed = self
             .rx_producer
-            .feed_with_transform(MAX_RX_BATCH, |mut iovecs| {
+            .feed_with_transform(|mut iovecs| {
                 let orig_len = iovecs.len();
                 let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
                 if vnet_offset > 0 {
