@@ -906,30 +906,22 @@ mod tests {
     }
 
     impl CustomChainRepr {
-        /// Simulate kernel writing data into the iovecs (like recvmmsg would).
         /// Writes `data` across the iovec scatter list and sets received_len.
-        fn simulate_recv(&self, data: &[u8]) {
-            let mut offset = 0;
-            for iov in &self.iovecs {
-                if offset >= data.len() {
-                    break;
-                }
-                let n = (data.len() - offset).min(iov.iov_len);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data[offset..].as_ptr(),
-                        iov.iov_base as *mut u8,
-                        n,
-                    );
-                }
-                offset += n;
-            }
-            self.received_len.set(offset);
+        fn simulate_recv(&mut self, data: &[u8]) {
+            // Safety: IoSliceMut is #[repr(transparent)] over iovec.
+            let slices: &mut [IoSliceMut] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.iovecs.as_mut_ptr() as *mut IoSliceMut,
+                    self.iovecs.len(),
+                )
+            };
+            let written = write_to_iovecs(slices, data);
+            self.received_len.set(written);
         }
     }
 
-    impl ChainsMemoryRepr for CustomChainRepr {
-        type Meta = u32; // tag to verify meta round-trips
+    unsafe impl ChainsMemoryRepr for CustomChainRepr {
+        type Meta = u32; // tag to verify metadata works
 
         fn len(&self) -> usize {
             self.iovecs.len()
@@ -951,7 +943,6 @@ mod tests {
         }
     }
 
-    // Safety: iovecs point to guest memory owned by RxQueueProducer
     unsafe impl Send for CustomChainRepr {}
 
     #[test]
@@ -960,9 +951,9 @@ mod tests {
         let (queue, driver) = setup.create_queue(16);
         driver
             .writable(&[100])
-            .writable(&[200])
-            .writable(&[300])
-            .writable(&[400]);
+            .writable(&[100])
+            .writable(&[100])
+            .writable(&[100]);
 
         let mut producer: RxQueueProducer<CustomChainRepr> =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());

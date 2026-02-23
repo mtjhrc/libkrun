@@ -53,7 +53,7 @@ pub struct MsgHdr(RawMsgHdr);
 // Transferring to another thread is safe because we transfer ownership of the entire struct.
 unsafe impl Send for MsgHdr {}
 
-impl ChainsMemoryRepr for MsgHdr {
+unsafe impl ChainsMemoryRepr for MsgHdr {
     /// Stores the Vec capacity for cleanup
     type Meta = usize;
 
