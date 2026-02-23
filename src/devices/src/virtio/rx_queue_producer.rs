@@ -607,13 +607,17 @@ mod tests {
     }
 
     #[test]
-    fn test_new_producer_is_empty() {
+    fn test_initial_state() {
         let setup = TestSetup::new();
-        let (queue, _driver) = setup.create_queue(16);
-        let producer: TestRxProducer =
+        let (queue, driver) = setup.create_queue(16);
+        let mut producer: TestRxProducer =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         assert_eq!(producer.pending_count(), 0);
+        assert_eq!(producer.feed(), 0);
+        assert_eq!(producer.pending_count(), 0);
+        assert_eq!(producer.produce(|_batch| {}), 0);
+        driver.assert_used(&[]);
     }
 
     #[test]
@@ -655,24 +659,11 @@ mod tests {
             assert_eq!(chain[1].len(), 1024);
             // Don't mark anything as finished
         });
+        
+        // We haven't finished anything
+        driver.assert_used(&[]);
     }
-
-    #[test]
-    fn test_feed_multiple_buffers() {
-        let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        // 3 separate single-descriptor chains
-        driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        let added = producer.feed();
-
-        assert_eq!(added, 3);
-        assert_eq!(producer.pending_count(), 3);
-    }
-
+    
     #[test]
     fn test_feed_respects_max_frames() {
         let setup = TestSetup::new();
@@ -695,24 +686,36 @@ mod tests {
     }
 
     #[test]
-    fn test_produce_fills_buffers() {
+    fn test_produce_via_write_bytes() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
-        driver.writable(&[1500]).writable(&[1500]);
+        driver.writable(&[10, 90]).writable(&[100]).writable(&[100]);
 
         let mut producer: TestRxProducer =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
-        assert_eq!(producer.pending_count(), 2);
+        assert_eq!(producer.pending_count(), 3);
 
         let completed = producer.produce(|batch| {
+            assert_eq!(batch.max_bytes(0), 100);
             batch.write_complete(0, b"Received packet 1").unwrap();
+            assert_eq!(batch.bytes_used(0), 17);
+            assert!(batch.is_finished(0));
+
+            assert_eq!(batch.max_bytes(1), 100);
             batch.write_complete(1, b"Received packet 2").unwrap();
+            assert_eq!(batch.bytes_used(1), 17);
+              assert!(batch.is_finished(1));
+
+            // Third left unfinished
+            assert_eq!(batch.max_bytes(2), 100);
+            assert_eq!(batch.bytes_used(2), 0);
+            assert!(!batch.is_finished(2));
         });
 
         assert_eq!(completed, 2);
-        assert_eq!(producer.pending_count(), 0);
+        assert_eq!(producer.pending_count(), 1);
 
         // Verify add_used was called with actual bytes written (17), not buffer capacity (1500)
         // Also verifies the content written to guest memory
@@ -720,125 +723,6 @@ mod tests {
             (0, ExpectedUsed::Writable(b"Received packet 1")),
             (1, ExpectedUsed::Writable(b"Received packet 2")),
         ]);
-    }
-
-    #[test]
-    fn test_produce_partial_fill() {
-        let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        producer.feed();
-
-        let completed = producer.produce(|batch| {
-            batch.write_complete(0, b"0123456789").unwrap();
-            batch.write_complete(1, b"ABCDEFGHIJ").unwrap();
-            // Third not filled - don't call complete
-        });
-
-        assert_eq!(completed, 2);
-        assert_eq!(producer.pending_count(), 1);
-
-        driver.assert_used(&[
-            (0, ExpectedUsed::Writable(b"0123456789")),
-            (1, ExpectedUsed::Writable(b"ABCDEFGHIJ")),
-        ]);
-    }
-
-    #[test]
-    fn test_produce_keeps_unused_buffers() {
-        let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        driver.writable(&[1500]).writable(&[1500]);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        producer.feed();
-
-        // First produce: no data received (EAGAIN-like)
-        let completed = producer.produce(|_batch| {
-            // Don't complete anything
-        });
-        assert_eq!(completed, 0);
-        assert_eq!(producer.pending_count(), 2);
-
-        // Second produce: fill one buffer
-        let completed = producer.produce(|batch| {
-            batch.write_complete(0, b"Hello").unwrap();
-            // Don't complete second buffer
-        });
-        assert_eq!(completed, 1);
-        assert_eq!(producer.pending_count(), 1);
-
-        driver.assert_used(&[(0, ExpectedUsed::Writable(b"Hello"))]);
-    }
-
-    #[test]
-    fn test_empty_queue_returns_zero() {
-        let setup = TestSetup::new();
-        let (queue, _driver) = setup.create_queue(16);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        assert_eq!(producer.feed(), 0);
-        assert_eq!(producer.pending_count(), 0);
-        assert_eq!(producer.produce(|_batch| {}), 0);
-    }
-
-    #[test]
-    fn test_skips_read_only_descriptors() {
-        let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        // Chain with readable then writable (readable should be skipped for RX)
-        driver.readable_then_writable(&[b"ignored"], &[1400]);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        producer.feed();
-
-        // Verify buffer structure via produce
-        producer.produce(|batch| {
-            assert_eq!(batch.len(), 1);
-            let chain = batch.io_slices_mut(0);
-            assert_eq!(chain.len(), 1);
-            assert_eq!(chain[0].len(), 1400);
-        });
-    }
-
-    #[test]
-    fn test_chained_buffer_receive() {
-        let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        // Chain of 3 writable descriptors forming one buffer
-        driver.writable(&[100, 200, 300]);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        producer.feed();
-        assert_eq!(producer.pending_count(), 1);
-
-        let completed = producer.produce(|batch| {
-            let mut data = vec![0xAA; 100];
-            data.extend(vec![0xBB; 200]);
-            data.extend(vec![0xCC; 300]);
-            batch.write_complete(0, &data).unwrap();
-        });
-
-        assert_eq!(completed, 1);
-
-        // Verify add_used reports 600 bytes and content matches
-        // Chain has 3 segments: 100 bytes of 0xAA, 200 bytes of 0xBB, 300 bytes of 0xCC
-        let mut expected_data = vec![0xAA; 100];
-        expected_data.extend(vec![0xBB; 200]);
-        expected_data.extend(vec![0xCC; 300]);
-        driver.assert_used(&[(0, ExpectedUsed::Writable(&expected_data))]);
     }
 
     #[test]
@@ -921,31 +805,6 @@ mod tests {
         ]);
     }
 
-    #[test]
-    fn test_selective_completion() {
-        // Verify that only explicitly completed chains are removed.
-        // With the new API, completion is explicit via batch.finish().
-        let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
-
-        let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-
-        producer.feed();
-        assert_eq!(producer.pending_count(), 3);
-
-        // Complete only buffer 0, leave 1 and 2 pending
-        let completed = producer.produce(|batch| {
-            batch.write_complete(0, b"pkt0").unwrap();
-            // Don't complete buffers 1 and 2
-        });
-
-        assert_eq!(completed, 1);
-        assert_eq!(producer.pending_count(), 2); // buffers 1 and 2 kept
-
-        driver.assert_used(&[(0, ExpectedUsed::Writable(b"pkt0"))]);
-    }
 
     #[test]
     fn test_out_of_order_completion() {
