@@ -18,7 +18,7 @@ pub mod bindings;
 #[cfg(feature = "blk")]
 pub mod block;
 #[cfg(feature = "net")]
-pub mod chain_storage;
+pub mod chain_repr;
 pub mod console;
 pub mod descriptor_utils;
 pub mod device;

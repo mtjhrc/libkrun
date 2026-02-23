@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::chain_storage::IovecVec;
+use crate::virtio::chain_repr::IovecVec;
 use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, iovecs_len, truncate_iovecs};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
@@ -203,7 +203,7 @@ impl NetBackend for Unixstream {
                 }
 
                 match nix::sys::uio::writev(fd, chain) {
-                    Ok(_) => batch.complete(i),
+                    Ok(_) => batch.finish(i),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
                         log::error!("writev to unixstream failed: {e:?}");

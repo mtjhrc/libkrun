@@ -9,7 +9,7 @@ use std::ops::Range;
 use libc::iovec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
-use super::chain_storage::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
+use super::chain_repr::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
 
@@ -17,7 +17,7 @@ use super::InterruptTransport;
 #[derive(Debug, Clone)]
 struct ChainMeta<M: Default> {
     head_index: u16,
-    /// Total bytes in iovecs (for I/O completion tracking)
+    /// Total bytes in iovecs
     max_bytes: usize,
     /// Bytes from guest descriptors (for add_used reporting)
     guest_len: usize,
@@ -30,18 +30,16 @@ struct ChainMeta<M: Default> {
 
 /// Batch for consuming TX chains.
 ///
-/// Provides access to pending chains and methods to mark them as complete.
-/// Supports both chain-based completion (whole messages) and byte-based
-/// completion (for backends that track partial progress).
+/// Provides access to pending chains and methods to mark them as finished.
 ///
-/// Panics if you access or complete an already-completed chain.
+/// Panics if you access or finish an already-finished chain.
 pub struct TxConsumerBatch<'a, R: ChainsMemoryRepr> {
     chain_repr: &'a mut [R],
     chain_meta: &'a mut [ChainMeta<R::Meta>],
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
-    /// Index of first uncompleted chain. Chains 0..first_finished are completed.
-    /// For sequential completion, this equals the number of completed chains.
+    /// Index of first unfinished chain. Chains 0..first_finished are finished.
+    /// For sequential finishing, this equals the number of finished chains.
     first_finished: usize,
 }
 
@@ -74,7 +72,7 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
     ///
     /// # Panics
     ///
-    /// Panics if index is out of bounds or if the chain has already been completed.
+    /// Panics if index is out of bounds or if the chain has already been finished.
     pub fn chain(&self, index: usize) -> &R {
         self.assert_not_finished(index);
         &self.chain_repr[index]
@@ -88,11 +86,11 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
     ///
     /// # Panics
     ///
-    /// Panics if any chain in the range has already been completed.
+    /// Panics if any chain in the range has already been finished.
     pub fn chains(&self, range: Range<usize>) -> &[R] {
-        // Fast path: if range starts at or after first_finished, all are uncompleted
+        // Fast path: if range starts at or after first_finished, all are unfinished
         if range.start < self.first_finished {
-            // Slow path: range may include completed chains, check each
+            // Slow path: range may include finished chains, check each
             for i in range.clone() {
                 self.assert_not_finished(i);
             }
@@ -100,29 +98,7 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
         &self.chain_repr[range]
     }
 
-    /// Mark chain at index as complete.
-    ///
-    /// Calls add_used immediately. Chain will be removed after consume() returns.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been completed.
-    pub fn complete(&mut self, index: usize) {
-        self.finish(index);
-    }
-
-    /// Mark range of chains as complete.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any chain in the range has already been completed.
-    pub fn complete_many(&mut self, range: Range<usize>) {
-        for i in range {
-            self.complete(i);
-        }
-    }
-
-    /// Get total bytes across all pending (non-completed) chains.
+    /// Get total bytes across all pending (non-finished) chains.
     pub fn total_bytes(&self) -> usize {
         self.chain_meta
             .iter()
@@ -159,13 +135,24 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
             log::error!("TxConsumerBatch: failed to add_used: {e}");
         }
 
-        // Update first_finished for sequential completion optimization
+        // Update first_finished for sequential finishing optimization
         if index == self.first_finished {
             while self.first_finished < self.chain_meta.len()
                 && self.chain_meta[self.first_finished].finished
             {
                 self.first_finished += 1;
             }
+        }
+    }
+
+    /// Mark a range of chains as finished.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any chain in the range has already been finished.
+    pub fn finish_many(&mut self, range: Range<usize>) {
+        for i in range {
+            self.finish(i);
         }
     }
 
@@ -209,7 +196,7 @@ impl TxConsumerBatch<'_, IovecVec> {
     pub fn io_slices(&self, index: usize) -> &[IoSlice<'_>] {
         assert!(
             !self.chain_meta[index].finished,
-            "io_slices: chain at index {} already completed",
+            "io_slices: chain at index {} already finished",
             index
         );
         let slice = &self.chain_repr[index].0[..];
@@ -359,11 +346,10 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Consume pending chains using a callback that performs the actual I/O.
     ///
     /// The callback receives a `TxConsumerBatch` which provides:
-    /// - `chain(i)` - access to chain iovecs by index (panics if already completed)
-    /// - `complete_chains(n)` - mark first N chains as complete
-    /// - `complete_bytes(n)` - mark chains complete based on byte count
+    /// - `chain(i)` - access to chain iovecs by index (panics if already finished)
+    /// - `finish(i)` / `finish_many(range)` - mark chains as finished
     ///
-    /// Returns the number of chains completed. Completed chains are removed
+    /// Returns the number of chains finished. Finished chains are removed
     /// from the pending list and interrupt is signaled if needed.
     pub fn consume<F>(&mut self, f: F) -> usize
     where
@@ -407,9 +393,9 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         finished_count
     }
 
-    /// Clear completed chains from buffers.
+    /// Clear finished chains from buffers.
     ///
-    /// Call this after processing to free memory from completed chains.
+    /// Call this after processing to free memory from finished chains.
     /// Note: `partial_bytes` is preserved - it tracks bytes consumed from the
     /// first pending chain (now at index 0 after compact).
     pub fn compact(&mut self) {
@@ -469,7 +455,7 @@ impl TxQueueConsumer<IovecVec> {
 mod tests {
     use std::io::IoSlice;
 
-    use crate::virtio::chain_storage::IovecVec;
+    use crate::virtio::chain_repr::IovecVec;
     use crate::virtio::test_utils::{
         create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
     };
@@ -511,14 +497,14 @@ mod tests {
         assert!(consumer.has_pending());
 
         // Verify chain content via consume callback
-        let completed = consumer.consume(|batch| {
+        let finished = consumer.consume(|batch| {
             assert_eq!(batch.len(), 1);
             assert_eq!(batch.io_slices(0).len(), 1);
             assert_eq!(&*batch.io_slices(0)[0], b"Hello, World!");
-            batch.complete(0);
+            batch.finish(0);
         });
 
-        assert_eq!(completed, 1);
+        assert_eq!(finished, 1);
         driver.assert_used(&[(0, ExpectedUsed::Readable(13))]);
     }
 
@@ -538,14 +524,14 @@ mod tests {
         assert_eq!(added, 1);
         assert_eq!(consumer.pending_count(), 1);
 
-        let completed = consumer.consume(|batch| {
+        let finished = consumer.consume(|batch| {
             assert_eq!(batch.io_slices(0).len(), 2);
             assert_eq!(&*batch.io_slices(0)[0], b"First");
             assert_eq!(&*batch.io_slices(0)[1], b"Second");
-            batch.complete(0);
+            batch.finish(0);
         });
 
-        assert_eq!(completed, 1);
+        assert_eq!(finished, 1);
         driver.assert_used(&[(0, ExpectedUsed::Readable(11))]);
     }
 
@@ -567,12 +553,12 @@ mod tests {
         assert_eq!(added, 3);
         assert_eq!(consumer.pending_count(), 3);
 
-        let completed = consumer.consume(|batch| {
+        let finished = consumer.consume(|batch| {
             assert_eq!(batch.len(), 3);
-            batch.complete_many(0..3);
+            batch.finish_many(0..3);
         });
 
-        assert_eq!(completed, 3);
+        assert_eq!(finished, 3);
         driver.assert_used(&[
             (0, ExpectedUsed::Readable(6)),
             (1, ExpectedUsed::Readable(6)),
@@ -630,7 +616,7 @@ mod tests {
         assert_eq!(added, 1);
 
         consumer.consume(|batch| {
-            batch.complete(0);
+            batch.finish(0);
         });
 
         // Original guest length is 13, not 9
@@ -638,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_consume_and_complete_bytes() {
+    fn test_consume_and_finish_all() {
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -652,12 +638,12 @@ mod tests {
         consumer.feed(10);
         assert_eq!(consumer.pending_count(), 2);
 
-        let completed = consumer.consume(|batch| {
+        let finished = consumer.consume(|batch| {
             assert_eq!(batch.total_bytes(), 21);
-            batch.complete_many(0..batch.len());
+            batch.finish_many(0..batch.len());
         });
 
-        assert_eq!(completed, 2);
+        assert_eq!(finished, 2);
         assert_eq!(consumer.pending_count(), 0);
 
         driver.assert_used(&[
@@ -681,12 +667,12 @@ mod tests {
 
         consumer.feed(10);
 
-        // Complete only first chain
-        let completed = consumer.consume(|batch| {
-            batch.complete(0);
+        // Finish only first chain
+        let finished = consumer.consume(|batch| {
+            batch.finish(0);
         });
 
-        assert_eq!(completed, 1);
+        assert_eq!(finished, 1);
         assert_eq!(consumer.pending_count(), 2);
         driver.assert_used(&[(0, ExpectedUsed::Readable(10))]);
     }
@@ -709,11 +695,11 @@ mod tests {
         consumer.feed(10);
         assert_eq!(consumer.pending_count(), 5);
 
-        // Complete 3 chains (compact is called internally)
-        let completed = consumer.consume(|batch| {
-            batch.complete_many(0..3);
+        // Finish 3 chains (compact is called internally)
+        let finished = consumer.consume(|batch| {
+            batch.finish_many(0..3);
         });
-        assert_eq!(completed, 3);
+        assert_eq!(finished, 3);
         assert_eq!(consumer.pending_count(), 2);
 
         driver.assert_used(&[
@@ -738,12 +724,12 @@ mod tests {
         assert_eq!(added, 0);
         assert_eq!(consumer.pending_count(), 0);
         // consume returns 0 when no pending chains
-        let completed = consumer.consume(|_batch| {});
-        assert_eq!(completed, 0);
+        let finished = consumer.consume(|_batch| {});
+        assert_eq!(finished, 0);
     }
 
     #[test]
-    fn test_no_completion_preserves_pending() {
+    fn test_no_finish_preserves_pending() {
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -754,11 +740,9 @@ mod tests {
 
         consumer.feed(10);
 
-        // Callback doesn't complete anything (simulating EAGAIN/WouldBlock)
-        let completed = consumer.consume(|_batch| {
-            // Don't call complete_bytes or complete_chains
-        });
-        assert_eq!(completed, 0);
+        // Callback doesn't finish anything (simulating EAGAIN/WouldBlock)
+        let finished = consumer.consume(|_batch| {});
+        assert_eq!(finished, 0);
         assert_eq!(consumer.pending_count(), 1);
 
         // Nothing should be in used ring yet
@@ -769,7 +753,7 @@ mod tests {
     fn test_remove_header_byte_tracking() {
         // Guest provides [header (12) | payload (100)].
         // Transform skips header. byte_count = 100 (payload only).
-        // I/O returns 100 → chain complete.
+        // I/O returns 100 → chain finished.
         let mem = create_memory();
         let queue = create_test_queue();
         let driver = VirtQueueDriver::new(&queue, &mem);
@@ -794,14 +778,14 @@ mod tests {
         });
         assert_eq!(added, 1);
 
-        let completed = consumer.consume(|batch| {
+        let finished = consumer.consume(|batch| {
             // Sum bytes in chain 0 (should be 100, not 112)
             let total: usize = batch.io_slices(0).iter().map(|iov| iov.len()).sum();
             assert_eq!(total, 100); // payload only
-            batch.complete(0);
+            batch.finish(0);
         });
 
-        assert_eq!(completed, 1);
+        assert_eq!(finished, 1);
         assert_eq!(consumer.pending_count(), 0);
 
         // add_used reports ORIGINAL guest length (112), not transformed (100)
@@ -843,7 +827,7 @@ mod tests {
         consumer.consume(|batch| batch.advance(0, 50));
         assert_eq!(consumer.pending_count(), 1);
 
-        // Cycle 3: remaining 48 bytes - now complete
+        // Cycle 3: remaining 48 bytes - now finished
         consumer.consume(|batch| {
             batch.advance(0, 48);
             batch.finish(0);
@@ -872,14 +856,14 @@ mod tests {
         consumer.feed(10);
         assert_eq!(consumer.pending_count(), 2);
 
-        // Complete only first chain, advance partial on second
+        // Finish only first chain, advance partial on second
         consumer.consume(|batch| {
-            batch.complete(0);
+            batch.finish(0);
             batch.advance(1, 15); // partial send on chain 1 (now index 0 after compact)
         });
         assert_eq!(consumer.pending_count(), 1);
 
-        // Compact removes completed chain 0
+        // Compact removes finished chain 0
         // (compact is called automatically in consume, but let's verify state)
 
         // Guest adds more descriptors (simulating queue refill)
@@ -888,9 +872,9 @@ mod tests {
         consumer.feed(10);
         assert_eq!(consumer.pending_count(), 2); // chain 1 (partial) + chain 2
 
-        // Complete remaining chains
+        // Finish remaining chains
         consumer.consume(|batch| {
-            batch.complete_many(0..2);
+            batch.finish_many(0..2);
         });
         assert_eq!(consumer.pending_count(), 0);
     }

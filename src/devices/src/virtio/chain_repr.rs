@@ -40,6 +40,14 @@ pub trait AdvanceBytes {
     fn advance(&mut self, bytes: usize);
 }
 
+/// Trait for representation types that know how many bytes were received.
+///
+/// Used by batch receive operations to report per-chain byte counts.
+pub trait ReceivedLen {
+    /// Number of bytes received into this chain.
+    fn received_len(&self) -> usize;
+}
+
 /// Trait for representation types that support truncating (limiting total bytes).
 ///
 /// This is useful for RX operations where you want to limit how many bytes

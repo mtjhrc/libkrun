@@ -122,7 +122,7 @@ impl NetBackend for Tap {
                     continue;
                 }
                 match writev(fd, chain) {
-                    Ok(_) => batch.complete(i),
+                    Ok(_) => batch.finish(i),
                     Err(nix::errno::Errno::EAGAIN) => break,
                     Err(e) => {
                         log::error!("writev to tap failed: {e:?}");

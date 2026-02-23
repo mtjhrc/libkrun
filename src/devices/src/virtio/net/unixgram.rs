@@ -14,7 +14,7 @@ use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::chain_storage::ChainsMemoryRepr;
+use crate::virtio::chain_repr::{ChainsMemoryRepr, ReceivedLen};
 use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, write_to_iovecs};
 use crate::virtio::queue::Queue;
 use crate::virtio::rx_queue_producer::RxQueueProducer;
@@ -140,18 +140,16 @@ impl MsgHdr {
     }
 }
 
-impl MsgHdr {
-    /// Get the number of bytes received (filled by kernel after recvmmsg/recvmsg_x).
+impl ReceivedLen for MsgHdr {
     #[cfg(target_os = "linux")]
     #[inline]
-    pub fn received_len(&self) -> usize {
+    fn received_len(&self) -> usize {
         self.0.msg_len as usize
     }
 
-    /// Get the number of bytes received (filled by kernel after recvmmsg/recvmsg_x).
     #[cfg(target_os = "macos")]
     #[inline]
-    pub fn received_len(&self) -> usize {
+    fn received_len(&self) -> usize {
         self.0.msg_datalen
     }
 }
@@ -386,9 +384,8 @@ impl Unixgram {
 
         self.tx_consumer.consume(|batch| {
             let len = batch.len();
-            // Safety: No chains have been completed yet, so 0..len is valid.
-            let storage = batch.chains(0..len);
-            let ptr = storage.as_ptr() as *mut mmsghdr;
+            let chains = batch.chains(0..len);
+            let ptr = chains.as_ptr() as *mut mmsghdr;
 
             let ret = unsafe { libc::sendmmsg(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT) };
 
@@ -403,7 +400,7 @@ impl Unixgram {
                 return;
             }
 
-            batch.complete_many(0..ret as usize);
+            batch.finish_many(0..ret as usize);
         });
 
         Ok(())
@@ -430,9 +427,7 @@ impl Unixgram {
 
             match ret {
                 n if n > 0 => {
-                    //FIXME: this is wrong! we need to use received_len() to set the recvd count for each buffer!
-                    // we should have a method for that!
-                    batch.finish_many(0..n as usize);
+                    batch.complete_received_many(0..n as usize);
                 }
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),
                 _ => {
@@ -499,7 +494,7 @@ impl Unixgram {
                 return;
             }
 
-            batch.complete_many(0..ret as usize);
+            batch.finish_many(0..ret as usize);
         });
 
         Ok(())
@@ -524,7 +519,7 @@ impl Unixgram {
 
             match ret {
                 n if n > 0 => {
-                    batch.finish_many(0..n as usize);
+                    batch.complete_received_many(0..n as usize);
                 }
                 0 => log::warn!("recvmsg_x returned 0 (unexpected)"),
                 _ => {

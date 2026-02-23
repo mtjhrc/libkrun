@@ -9,7 +9,7 @@ use std::ops::Range;
 use libc::iovec;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
 
-use super::chain_storage::{AdvanceBytes, ChainsMemoryRepr, IovecVec, TruncateBytes};
+use super::chain_repr::{AdvanceBytes, ChainsMemoryRepr, IovecVec, ReceivedLen, TruncateBytes};
 use super::iovec_utils::write_to_iovecs;
 use super::queue::{DescriptorChain, Queue};
 use super::InterruptTransport;
@@ -86,10 +86,14 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
         &mut self.chain_repr[range]
     }
 
-    /// Mark range of chains as finished.
+    /// Finish a range of chains, reporting them to the guest.
     ///
-    /// Calls add_used immediately. Chains can be finsihed out-of-order,
-    /// but sequential finishing (0, 1, 2...) is preferable, as it simplifies tracking of completed ranges.
+    /// The received byte count should already have been set via
+    /// [`advance`](Self::advance). To set the byte count and finish in one
+    /// step, use [`complete`](Self::complete) or [`complete_many`](Self::complete_many).
+    ///
+    /// Chains can be finished out-of-order, but sequential finishing
+    /// (0, 1, 2...) is preferable.
     ///
     /// O(1) if chains are being finished sequentially, O(n) otherwise.
     ///
@@ -138,10 +142,11 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
         }
     }
 
-    /// Mark chain at index as finished.
+    /// Finish a chain, reporting it to the guest.
     ///
-    /// Calls add_used immediately. Chains can be finished out-of-order,
-    /// but sequential finishing (0, 1, 2...) is preferable.
+    /// The received byte count should already have been set via
+    /// [`advance`](Self::advance). To set the byte count and finish in one
+    /// step, use [`complete`](Self::complete).
     ///
     /// # Panics
     ///
@@ -162,6 +167,30 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
         }
     }
 
+    /// Set the received byte count and finish the chain, reporting it to the guest.
+    ///
+    /// This is the primary way to hand a received buffer back to the guest.
+    /// If the byte count was already set via [`advance`](Self::advance), use
+    /// [`finish`](Self::finish) instead.
+    ///
+    /// See also [`complete_received`](Self::complete_received) when the chain
+    /// representation knows its own received length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn complete(&mut self, index: usize, bytes: usize) {
+        let meta = &mut self.chain_meta[index];
+        meta.bytes_used += bytes;
+        debug_assert!(
+            meta.bytes_used <= meta.max_bytes,
+            "complete: bytes_used {} exceeds max_bytes {}",
+            meta.bytes_used,
+            meta.max_bytes
+        );
+        self.finish(index);
+    }
+
     #[track_caller]
     #[inline]
     fn assert_not_finished(&self, index: usize) {
@@ -174,20 +203,6 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
 
 /// Methods for representation types that support advancing (for partial receives).
 impl<R: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, R> {
-    /// Complete a chain with the given byte count.
-    ///
-    ///
-    /// Updates bytes_used and marks the chain as finished.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn complete(&mut self, index: usize, bytes: usize) {
-        // self.chain_repr[index].advance(bytes);
-        self.chain_meta[index].bytes_used += bytes;
-        self.finish(index);
-    }
-
     /// Advance bytes used for chain at index (partial receive).
     ///
     /// Updates bytes_used and advances the iovecs in place.
@@ -211,6 +226,33 @@ impl<R: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, R> {
             meta.max_bytes
         );
         self.chain_repr[index].advance(bytes);
+    }
+}
+
+/// Methods for representation types that report their own received byte count.
+impl<R: ChainsMemoryRepr + ReceivedLen> RxProducerBatch<'_, R> {
+    /// Complete a chain, reading the received byte count from the chain's
+    /// [`ReceivedLen`] implementation and reporting it to the guest.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn complete_received(&mut self, index: usize) {
+        self.complete_received_many(index..index + 1);
+    }
+
+    /// Complete a range of chains, reading the received byte count from each
+    /// chain's [`ReceivedLen`] implementation and reporting them to the guest.
+    ///
+    ///
+    /// # Panics
+    ///
+    /// Panics if any chain in the range has already been finished.
+    pub fn complete_received_many(&mut self, range: Range<usize>) {
+        for i in range.clone() {
+            self.chain_meta[i].bytes_used += self.chain_repr[i].received_len();
+        }
+        self.finish_many(range);
     }
 }
 
@@ -557,7 +599,7 @@ impl RxQueueProducer<IovecVec> {
 mod tests {
     use std::io::IoSliceMut;
 
-    use crate::virtio::chain_storage::IovecVec;
+    use crate::virtio::chain_repr::IovecVec;
     use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
     use crate::virtio::test_utils::{
         create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
