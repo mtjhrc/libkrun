@@ -832,9 +832,12 @@ mod tests {
         // Finish only first chain, advance partial on second
         consumer.consume(|batch| {
             batch.finish(0);
-            batch.advance(1, 15); // partial send on chain 1 (now index 0 after compact)
+            batch.advance(1, 15);
         });
         assert_eq!(consumer.pending_count(), 1);
+
+        // Only chain 0 in used ring so far
+        driver.assert_used(&[(0, ExpectedUsed::Readable(30))]);
 
         // Guest adds more descriptors (simulating queue refill)
         driver.readable(&[&data]); // chain 2
@@ -847,6 +850,13 @@ mod tests {
             batch.finish_many(0..2);
         });
         assert_eq!(consumer.pending_count(), 0);
+
+        // All 3 chains, including the one that crossed a compact boundary
+        driver.assert_used(&[
+            (0, ExpectedUsed::Readable(30)),
+            (1, ExpectedUsed::Readable(30)),
+            (2, ExpectedUsed::Readable(30)),
+        ]);
     }
 
     #[test]
