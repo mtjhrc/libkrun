@@ -270,30 +270,32 @@ impl NetBackend for Unixgram {
         };
 
         // Feed frames from queue, skipping vnet header
-        let fed =
-            self.tx_consumer
-                .feed_with_transform(|mut iovecs| {
-                    let orig_len = iovecs.len();
-                    let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
-                    if skip > 0 {
-                        advance_tx_iovecs_vec(&mut iovecs, skip);
-                    }
-                    let ptr = iovecs.as_mut_ptr() as *mut iovec;
-                    let len = iovecs.len();
-                    let cap = iovecs.capacity();
-                    let total_bytes: usize = unsafe {
-                        std::slice::from_raw_parts(ptr as *const iovec, len)
-                            .iter()
-                            .map(|iov| iov.iov_len)
-                            .sum()
-                    };
-                    log::info!(
+        let fed = self.tx_consumer.feed_with_transform(|mut iovecs| {
+            let orig_len = iovecs.len();
+            let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
+            if skip > 0 {
+                advance_tx_iovecs_vec(&mut iovecs, skip);
+            }
+            let ptr = iovecs.as_mut_ptr() as *mut iovec;
+            let len = iovecs.len();
+            let cap = iovecs.capacity();
+            let total_bytes: usize = unsafe {
+                std::slice::from_raw_parts(ptr as *const iovec, len)
+                    .iter()
+                    .map(|iov| iov.iov_len)
+                    .sum()
+            };
+            log::info!(
                 "TX feed: orig_iovecs={} orig_bytes={} after_skip: iovecs={} bytes={} cap={}",
-                orig_len, orig_bytes, len, total_bytes, cap
+                orig_len,
+                orig_bytes,
+                len,
+                total_bytes,
+                cap
             );
-                    std::mem::forget(iovecs);
-                    (MsgHdr::from_raw(ptr, len), cap)
-                });
+            std::mem::forget(iovecs);
+            (MsgHdr::from_raw(ptr, len), cap)
+        });
         if fed > 0 {
             log::info!(
                 "TX: fed {} chains, pending={}",
@@ -328,30 +330,28 @@ impl NetBackend for Unixgram {
         );
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
-        let rx_fed = self
-            .rx_producer
-            .feed_with_transform(|mut iovecs| {
-                let orig_len = iovecs.len();
-                let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
-                if vnet_offset > 0 {
-                    // Write default vnet header to beginning of buffer
-                    write_to_iovecs(&mut iovecs, &super::DEFAULT_VNET_HDR);
-                    // Advance iovecs past vnet header so receive goes after it
-                    crate::virtio::iovec_utils::advance_iovecs_vec(&mut iovecs, vnet_offset);
-                }
-                let ptr = iovecs.as_mut_ptr() as *mut iovec;
-                let len = iovecs.len();
-                let cap = iovecs.capacity();
-                log::info!(
-                    "RX feed: orig_iovecs={} orig_bytes={} after_vnet: iovecs={} cap={}",
-                    orig_len,
-                    orig_bytes,
-                    len,
-                    cap
-                );
-                std::mem::forget(iovecs);
-                (MsgHdr::from_raw(ptr, len), cap)
-            });
+        let rx_fed = self.rx_producer.feed_with_transform(|mut iovecs| {
+            let orig_len = iovecs.len();
+            let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
+            if vnet_offset > 0 {
+                // Write default vnet header to beginning of buffer
+                write_to_iovecs(&mut iovecs, &super::DEFAULT_VNET_HDR);
+                // Advance iovecs past vnet header so receive goes after it
+                crate::virtio::iovec_utils::advance_iovecs_vec(&mut iovecs, vnet_offset);
+            }
+            let ptr = iovecs.as_mut_ptr() as *mut iovec;
+            let len = iovecs.len();
+            let cap = iovecs.capacity();
+            log::info!(
+                "RX feed: orig_iovecs={} orig_bytes={} after_vnet: iovecs={} cap={}",
+                orig_len,
+                orig_bytes,
+                len,
+                cap
+            );
+            std::mem::forget(iovecs);
+            (MsgHdr::from_raw(ptr, len), cap)
+        });
         if rx_fed > 0 {
             log::info!(
                 "RX: fed {} chains, pending={}",

@@ -4,49 +4,86 @@
 //! Shared test utilities for TxQueueConsumer and RxQueueProducer tests.
 
 use std::cell::{Cell, RefCell};
+use std::mem::size_of;
 
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
 
 use crate::legacy::DummyIrqChip;
 use crate::virtio::queue::tests::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
-use crate::virtio::queue::{Descriptor, Queue};
+use crate::virtio::queue::{Descriptor, Queue, VirtqUsedElem};
 use crate::virtio::InterruptTransport;
 
-// Memory layout constants
-pub const QUEUE_SIZE: u16 = 16;
-// Queue structure addresses (must be properly aligned)
-pub const DESC_TABLE_ADDR: u64 = 0x0; // 16 bytes per descriptor * 16 = 256 bytes
-pub const AVAIL_RING_ADDR: u64 = 0x100; // 2-byte aligned
-pub const USED_RING_ADDR: u64 = 0x200; // 4-byte aligned
-pub const DATA_ADDR: u64 = 0x1000; // Data area starts after queue structures
-pub const MEM_SIZE: u64 = 0x100000;
+const MEM_SIZE: u64 = 0x100000;
+/// Per-queue data region size (64 KB).
+const DATA_REGION_SIZE: u64 = 0x10000;
+/// Data regions start after queue structures.
+const DATA_BASE: u64 = 0x10000;
 
-/// Create a GuestMemoryMmap for testing
-pub fn create_memory() -> GuestMemoryMmap {
-    GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap()
+/// Test setup that owns guest memory and allocates non-overlapping queues.
+pub struct TestSetup {
+    mem: GuestMemoryMmap,
+    /// Bump allocator for queue structures (low addresses).
+    next_struct_addr: Cell<u64>,
+    /// Number of queues created (used to partition data regions).
+    queue_count: Cell<usize>,
 }
 
-/// Create a properly configured Queue for testing
-pub fn create_test_queue() -> Queue {
-    let mut queue = Queue::new(QUEUE_SIZE);
-    queue.size = QUEUE_SIZE;
-    queue.ready = true;
-    queue.desc_table = GuestAddress(DESC_TABLE_ADDR);
-    queue.avail_ring = GuestAddress(AVAIL_RING_ADDR);
-    queue.used_ring = GuestAddress(USED_RING_ADDR);
-    queue
+impl TestSetup {
+    pub fn new() -> Self {
+        Self {
+            mem: GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap(),
+            next_struct_addr: Cell::new(0),
+            queue_count: Cell::new(0),
+        }
+    }
+
+    pub fn mem(&self) -> &GuestMemoryMmap {
+        &self.mem
+    }
+
+    /// Allocate `size` bytes at the next `align`-byte boundary.
+    fn alloc(&self, size: u64, align: u64) -> u64 {
+        let addr = self.next_struct_addr.get();
+        let aligned = (addr + align - 1) & !(align - 1);
+        self.next_struct_addr.set(aligned + size);
+        assert!(
+            self.next_struct_addr.get() <= DATA_BASE,
+            "queue structures overflow into data area"
+        );
+        aligned
+    }
+
+    /// Create a queue with the given size and its corresponding driver.
+    pub fn create_queue(&self, size: u16) -> (Queue, VirtQueueDriver<'_>) {
+        let n = size as u64;
+        let ring_overhead = 3 * size_of::<u16>() as u64; // flags + idx + event
+        let desc_table = self.alloc(size_of::<Descriptor>() as u64 * n, 16);
+        let avail_ring = self.alloc(ring_overhead + size_of::<u16>() as u64 * n, 2);
+        let used_ring = self.alloc(ring_overhead + size_of::<VirtqUsedElem>() as u64 * n, 4);
+
+        let mut queue = Queue::new(size);
+        queue.size = size;
+        queue.ready = true;
+        queue.desc_table = GuestAddress(desc_table);
+        queue.avail_ring = GuestAddress(avail_ring);
+        queue.used_ring = GuestAddress(used_ring);
+
+        let idx = self.queue_count.get();
+        self.queue_count.set(idx + 1);
+        let data_addr = DATA_BASE + idx as u64 * DATA_REGION_SIZE;
+        assert!(
+            data_addr + DATA_REGION_SIZE <= MEM_SIZE,
+            "out of data regions"
+        );
+
+        let driver = VirtQueueDriver::new(&queue, &self.mem, data_addr);
+        (queue, driver)
+    }
 }
 
 /// Create an InterruptTransport for testing
 pub fn create_interrupt() -> InterruptTransport {
     InterruptTransport::new(DummyIrqChip::new().into(), "test".to_string()).unwrap()
-}
-
-/// Helper to read data from guest memory
-pub fn read_data(mem: &GuestMemoryMmap, addr: GuestAddress, len: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; len];
-    mem.read(&mut buf, addr).unwrap();
-    buf
 }
 
 /// A segment within a descriptor chain (address + size + optional expected data)
@@ -127,7 +164,7 @@ impl<'a> VirtQueueDriver<'a> {
     ///
     /// The Queue reference is only used to get addresses - it is NOT stored.
     /// All communication happens through guest memory.
-    pub fn new(queue: &Queue, mem: &'a GuestMemoryMmap) -> Self {
+    pub fn new(queue: &Queue, mem: &'a GuestMemoryMmap, data_addr: u64) -> Self {
         // Extract addresses from queue (not stored)
         let desc_table = queue.desc_table;
         let avail_ring = queue.avail_ring;
@@ -146,7 +183,7 @@ impl<'a> VirtQueueDriver<'a> {
             used_ring,
             desc_idx: Cell::new(current_avail_idx as usize), // Start after existing descriptors
             avail_idx: Cell::new(current_avail_idx),
-            next_addr: Cell::new(DATA_ADDR),
+            next_addr: Cell::new(data_addr),
             chains: RefCell::new(Vec::new()),
         }
     }
@@ -429,8 +466,8 @@ impl<'a> VirtQueueDriver<'a> {
                         actual_len
                     );
                     // Verify content
-                    let actual_data =
-                        self.read_chain_bytes_internal(&chains, *chain_idx, expected_bytes.len());
+                    let full = self.read_chain(chain);
+                    let actual_data = &full[..expected_bytes.len().min(full.len())];
                     assert_eq!(
                         actual_data, *expected_bytes,
                         "used[{}] content mismatch for chain {}: expected {:?}, got {:?}",
@@ -460,7 +497,8 @@ impl<'a> VirtQueueDriver<'a> {
         let chain = &chains[chain_idx];
         for (seg_idx, seg) in chain.segments.iter().enumerate() {
             if let Some(expected) = &seg.expected_data {
-                let actual = read_data(self.mem, GuestAddress(seg.addr), seg.len as usize);
+                let mut actual = vec![0u8; seg.len as usize];
+                self.mem.read(&mut actual, GuestAddress(seg.addr)).unwrap();
                 assert_eq!(
                     &actual, expected,
                     "chain {} segment {} at addr {:x} was modified: expected {:?}, got {:?}",
@@ -470,52 +508,14 @@ impl<'a> VirtQueueDriver<'a> {
         }
     }
 
-    /// Get the slice for a writable chain's segment in guest memory.
-    pub fn writable_slice(&self, chain_idx: usize, segment_idx: usize) -> &[u8] {
-        let chains = self.chains.borrow();
-        let chain = &chains[chain_idx];
-        let seg = &chain.segments[segment_idx];
-        assert!(
-            seg.expected_data.is_none(),
-            "writable_slice called on readable segment"
-        );
-        let slice = self
-            .mem
-            .get_slice(GuestAddress(seg.addr), seg.len as usize)
-            .expect("failed to get slice from guest memory");
-        // Safety: guest memory is pinned and we have a reference to mem
-        unsafe { std::slice::from_raw_parts(slice.ptr_guard_mut().as_ptr(), seg.len as usize) }
-    }
-
     /// Read data from all segments of a chain into a contiguous Vec.
-    pub fn read_chain(&self, chain_idx: usize) -> Vec<u8> {
-        let chains = self.chains.borrow();
-        self.read_chain_internal(&chains, chain_idx)
-    }
-
-    fn read_chain_internal(&self, chains: &[BuiltChain], chain_idx: usize) -> Vec<u8> {
-        let chain = &chains[chain_idx];
+    fn read_chain(&self, chain: &BuiltChain) -> Vec<u8> {
         let mut data = Vec::new();
         for seg in &chain.segments {
-            let seg_data = read_data(self.mem, GuestAddress(seg.addr), seg.len as usize);
-            data.extend(seg_data);
+            let mut buf = vec![0u8; seg.len as usize];
+            self.mem.read(&mut buf, GuestAddress(seg.addr)).unwrap();
+            data.extend(buf);
         }
         data
-    }
-
-    /// Read up to `len` bytes from a chain.
-    pub fn read_chain_bytes(&self, chain_idx: usize, len: usize) -> Vec<u8> {
-        let chains = self.chains.borrow();
-        self.read_chain_bytes_internal(&chains, chain_idx, len)
-    }
-
-    fn read_chain_bytes_internal(
-        &self,
-        chains: &[BuiltChain],
-        chain_idx: usize,
-        len: usize,
-    ) -> Vec<u8> {
-        let full = self.read_chain_internal(chains, chain_idx);
-        full[..len.min(full.len())].to_vec()
     }
 }

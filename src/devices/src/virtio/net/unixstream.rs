@@ -164,21 +164,19 @@ impl NetBackend for Unixstream {
         };
 
         // Feed frames from queue, prepending frame length header
-        let fed = self
-            .tx_consumer
-            .feed_with_transform(|mut iovecs| {
-                // Skip vnet header
-                advance_tx_iovecs_vec(&mut iovecs, skip);
+        let fed = self.tx_consumer.feed_with_transform(|mut iovecs| {
+            // Skip vnet header
+            advance_tx_iovecs_vec(&mut iovecs, skip);
 
-                // Calculate payload length (after vnet skip)
-                let payload_len = iovecs_len(&iovecs);
+            // Calculate payload length (after vnet skip)
+            let payload_len = iovecs_len(&iovecs);
 
-                // FIXME: This leaks memory! Need proper header storage in TxQueueConsumer.
-                // For now, Box::leak the header bytes to get 'static lifetime.
-                let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
-                iovecs.insert(0, IoSlice::new(header));
-                (to_iovec(iovecs), ())
-            });
+            // FIXME: This leaks memory! Need proper header storage in TxQueueConsumer.
+            // For now, Box::leak the header bytes to get 'static lifetime.
+            let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
+            iovecs.insert(0, IoSlice::new(header));
+            (to_iovec(iovecs), ())
+        });
         log::trace!(
             "Unixstream::send() fed {} frames, pending={}",
             fed,

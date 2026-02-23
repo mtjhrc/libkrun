@@ -594,9 +594,7 @@ mod tests {
 
     use crate::virtio::chain_repr::IovecVec;
     use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
-    use crate::virtio::test_utils::{
-        create_interrupt, create_memory, create_test_queue, ExpectedUsed, VirtQueueDriver,
-    };
+    use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
     use super::RxQueueProducer;
 
@@ -610,24 +608,22 @@ mod tests {
 
     #[test]
     fn test_new_producer_is_empty() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let _driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, _driver) = setup.create_queue(16);
         let producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         assert_eq!(producer.pending_count(), 0);
     }
 
     #[test]
     fn test_feed_single_writable_descriptor() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         driver.writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         let added = producer.feed();
 
@@ -637,14 +633,13 @@ mod tests {
 
     #[test]
     fn test_feed_chained_writable_descriptors() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         // Chain of 2 writable descriptors
         driver.writable(&[512, 1024]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         let added = producer.feed();
 
@@ -664,14 +659,13 @@ mod tests {
 
     #[test]
     fn test_feed_multiple_buffers() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         // 3 separate single-descriptor chains
         driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         let added = producer.feed();
 
@@ -681,9 +675,8 @@ mod tests {
 
     #[test]
     fn test_feed_respects_max_frames() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         driver
             .writable(&[1500])
             .writable(&[1500])
@@ -692,7 +685,7 @@ mod tests {
             .writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
         producer.set_max_chains(2);
 
         let added = producer.feed();
@@ -703,13 +696,12 @@ mod tests {
 
     #[test]
     fn test_produce_fills_buffers() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         driver.writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
         assert_eq!(producer.pending_count(), 2);
@@ -732,13 +724,12 @@ mod tests {
 
     #[test]
     fn test_produce_partial_fill() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
 
@@ -759,13 +750,12 @@ mod tests {
 
     #[test]
     fn test_produce_keeps_unused_buffers() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         driver.writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
 
@@ -789,12 +779,11 @@ mod tests {
 
     #[test]
     fn test_empty_queue_returns_zero() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let _driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, _driver) = setup.create_queue(16);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         assert_eq!(producer.feed(), 0);
         assert_eq!(producer.pending_count(), 0);
@@ -803,14 +792,13 @@ mod tests {
 
     #[test]
     fn test_skips_read_only_descriptors() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         // Chain with readable then writable (readable should be skipped for RX)
         driver.readable_then_writable(&[b"ignored"], &[1400]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
 
@@ -825,14 +813,13 @@ mod tests {
 
     #[test]
     fn test_chained_buffer_receive() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         // Chain of 3 writable descriptors forming one buffer
         driver.writable(&[100, 200, 300]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
         assert_eq!(producer.pending_count(), 1);
@@ -856,9 +843,8 @@ mod tests {
 
     #[test]
     fn test_multiple_produce_cycles() {
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
 
         // Create 4 chains, each with 3 descriptors: [6, 12, 6] = 24 bytes total
         // After 2-byte header skip: [4, 12, 6] = 22 bytes usable
@@ -869,7 +855,7 @@ mod tests {
             .writable(&[6, 12, 6]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
         producer.set_max_chains(2);
 
         // First feed: get 2 buffers, skip 2-byte header from each
@@ -939,13 +925,12 @@ mod tests {
     fn test_selective_completion() {
         // Verify that only explicitly completed chains are removed.
         // With the new API, completion is explicit via batch.finish().
-        let mem = create_memory();
-        let queue = create_test_queue();
-        let driver = VirtQueueDriver::new(&queue, &mem);
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
         driver.writable(&[1500]).writable(&[1500]).writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, mem.clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
         assert_eq!(producer.pending_count(), 3);
@@ -960,5 +945,54 @@ mod tests {
         assert_eq!(producer.pending_count(), 2); // buffers 1 and 2 kept
 
         driver.assert_used(&[(0, ExpectedUsed::Writable(b"pkt0"))]);
+    }
+
+    #[test]
+    fn test_out_of_order_completion() {
+        let setup = TestSetup::new();
+        let (queue, driver) = setup.create_queue(16);
+        driver
+            .writable(&[2, 2])
+            .writable(&[2, 2])
+            .writable(&[2, 2])
+            .writable(&[2, 2]);
+
+        let mut producer: TestRxProducer =
+            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+
+        producer.feed();
+        assert_eq!(producer.pending_count(), 4);
+
+        // Complete chains 3 and 1 (out of order), leave 0 and 2 pending
+        let completed = producer.produce(|batch| {
+            batch.write_complete(3, b"pkt3").unwrap();
+            batch.write_complete(1, b"pkt1").unwrap();
+        });
+
+        assert_eq!(completed, 2);
+        assert_eq!(producer.pending_count(), 2);
+
+        // Used ring reflects completion order (3 then 1)
+        driver.assert_used(&[
+            (3, ExpectedUsed::Writable(b"pkt3")),
+            (1, ExpectedUsed::Writable(b"pkt1")),
+        ]);
+
+        // Complete remaining chains, also out of order
+        let completed = producer.produce(|batch| {
+            batch.write_complete(1, b"pkt2").unwrap();
+            batch.write_complete(0, b"pkt0").unwrap();
+        });
+
+        assert_eq!(completed, 2);
+        assert_eq!(producer.pending_count(), 0);
+
+        // All 4 chains in used ring in the order they were completed
+        driver.assert_used(&[
+            (3, ExpectedUsed::Writable(b"pkt3")),
+            (1, ExpectedUsed::Writable(b"pkt1")),
+            (2, ExpectedUsed::Writable(b"pkt2")),
+            (0, ExpectedUsed::Writable(b"pkt0")),
+        ]);
     }
 }
