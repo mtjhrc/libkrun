@@ -1,16 +1,27 @@
 // Copyright 2026 Red Hat, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic chain memory representation trait for TX/RX queue operations.
+//! Batched virtio queue producer/consumer infrastructure.
 //!
-//! This trait abstracts over how iovecs are represented per descriptor chain,
-//! allowing different backends to use optimized representations (e.g., mmsghdr for sendmmsg).
+//! Provides generic queue handling suited for vectored I/O on virtio queues
+//! (e.g. sending a whole descriptor chain in a single `writev`, supporting
+//! partial writes, partial reads, etc.).
+//!
+//! The representation trait [`ChainsMemoryRepr`] allows backends to plug in
+//! optimised layouts (e.g. `mmsghdr` for `sendmmsg`/`recvmmsg`).
 
 use std::io::IoSliceMut;
 
 use libc::iovec;
 
-use super::iovec_utils::{advance_iovecs_vec, truncate_iovecs};
+use iovec_utils::{advance_raw_iovecs, truncate_iovecs};
+
+pub mod iovec_utils;
+mod rx_queue_producer;
+mod tx_queue_consumer;
+
+pub use rx_queue_producer::{RxProducerBatch, RxQueueProducer};
+pub use tx_queue_consumer::{TxConsumerBatch, TxQueueConsumer};
 
 /// Base trait for descriptor chain memory representation.
 ///
@@ -107,11 +118,7 @@ unsafe impl ChainsMemoryRepr for IovecVec {
 
 unsafe impl AdvanceBytes for IovecVec {
     fn advance(&mut self, bytes: usize) {
-        // Safety: IoSliceMut is #[repr(transparent)] over iovec, so
-        // &mut Vec<iovec> and &mut Vec<IoSliceMut> have the same layout.
-        let slices: &mut Vec<IoSliceMut> =
-            unsafe { std::mem::transmute(&mut self.0) };
-        advance_iovecs_vec(slices, bytes);
+        advance_raw_iovecs(&mut self.0, bytes);
     }
 }
 

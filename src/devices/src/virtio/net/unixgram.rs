@@ -14,11 +14,11 @@ use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::chain_repr::{ChainsMemoryRepr, ReceivedLen};
-use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, write_to_iovecs};
+use crate::virtio::batch_queue::iovec_utils::{advance_tx_iovecs_vec, write_to_iovecs};
+use crate::virtio::batch_queue::{
+    ChainsMemoryRepr, ReceivedLen, RxQueueProducer, TxQueueConsumer,
+};
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 #[cfg(target_os = "macos")]
@@ -337,7 +337,10 @@ impl NetBackend for Unixgram {
                 // Write default vnet header to beginning of buffer
                 write_to_iovecs(&mut iovecs, &super::DEFAULT_VNET_HDR);
                 // Advance iovecs past vnet header so receive goes after it
-                crate::virtio::iovec_utils::advance_iovecs_vec(&mut iovecs, vnet_offset);
+                crate::virtio::batch_queue::iovec_utils::advance_iovecs_vec(
+                    &mut iovecs,
+                    vnet_offset,
+                );
             }
             let ptr = iovecs.as_mut_ptr() as *mut iovec;
             let len = iovecs.len();

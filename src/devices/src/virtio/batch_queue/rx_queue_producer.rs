@@ -9,10 +9,10 @@ use std::ops::Range;
 use libc::iovec;
 use vm_memory::{GuestMemory, GuestMemoryMmap};
 
-use super::chain_repr::{AdvanceBytes, ChainsMemoryRepr, IovecVec, ReceivedLen, TruncateBytes};
+use super::super::queue::{DescriptorChain, Queue};
+use super::super::InterruptTransport;
 use super::iovec_utils::write_to_iovecs;
-use super::queue::{DescriptorChain, Queue};
-use super::InterruptTransport;
+use super::{AdvanceBytes, ChainsMemoryRepr, IovecVec, ReceivedLen, TruncateBytes};
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug)]
@@ -23,6 +23,252 @@ struct ChainMeta<M: Default> {
     finished: bool,
     /// User-defined metadata
     user_meta: M,
+}
+
+/// RxQueueProducer - owns the RX queue and provides buffers for receiving.
+///
+/// Generic over representation type R, allowing different backends to use optimized
+/// representations (e.g., mmsghdr for recvmmsg). Default is IovecVec.
+///
+/// Pops descriptor chains from the virtio RX queue and provides writable
+/// iovecs for receiving data. Unfinished chains are kept pending for the next
+/// produce() call; finished chains get add_used() with their byte counts.
+///
+/// The iovecs point into guest memory owned by `mem`. This is safe because
+/// the struct owns the memory reference and outlives any use of the iovecs.
+pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
+    /// The virtio RX queue
+    queue: Queue,
+    /// Guest memory reference
+    mem: GuestMemoryMmap,
+    /// Interrupt for signaling guest
+    interrupt: InterruptTransport,
+    /// Maximum number of chains to keep pending at once.
+    max_chains: usize,
+    /// Per-chain representation (type depends on R)
+    chain_repr: Vec<R>,
+    /// Metadata for each chain (parallel to chain_repr)
+    chain_meta: Vec<ChainMeta<R::Meta>>,
+}
+
+impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
+    /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
+    pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
+        let max_chains = queue.size as usize * 8;
+        Self {
+            queue,
+            mem,
+            interrupt,
+            max_chains,
+            chain_repr: Vec::new(),
+            chain_meta: Vec::new(),
+        }
+    }
+
+    /// Set the maximum number of chains to keep pending at once.
+    pub fn set_max_chains(&mut self, max: usize) {
+        self.max_chains = max;
+    }
+
+    /// Feed descriptor chains from the queue, converting each into the
+    /// representation type `R` via a user-supplied callback.
+    ///
+    /// The callback receives the chain's writable iovecs and returns an `(R, Meta)`
+    /// pair. It may mutate the iovecs before building `R` — for example, writing
+    /// a header and advancing past it so that subsequent I/O starts after the
+    /// header. Any bytes consumed by the callback are automatically tracked.
+    ///
+    /// Returns the number of chains added.
+    ///
+    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
+    where
+        F: for<'a> FnMut(Vec<IoSliceMut<'a>>) -> (R, R::Meta),
+    {
+        let mut added = 0;
+
+        if let Err(e) = self.queue.disable_notification(&self.mem) {
+            warn!("Failed to disable queue notifications: {e:?}");
+        }
+        'next_chain: while self.pending_count() < self.max_chains {
+            let Some(head) = self.queue.pop(&self.mem) else {
+                // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
+                // meantime, loops back to pop them; otherwise break and expect the user to wake
+                // us up on the next kick.
+                match self.queue.enable_notification(&self.mem) {
+                    Ok(true) => continue 'next_chain,
+                    Ok(false) => break 'next_chain,
+                    Err(e) => {
+                        error!("Failed to re-enable queue notifications: {e:?}");
+                        break 'next_chain;
+                    }
+                }
+            };
+
+            let head_index = head.index;
+            let mut iovecs: Vec<IoSliceMut<'_>> = Vec::new();
+
+            for desc in head.into_iter().filter(DescriptorChain::is_write_only) {
+                if let Some(iov) = unsafe { self.desc_to_ioslice_mut(&desc) } {
+                    iovecs.push(iov);
+                } else {
+                    log::error!("Invalid descriptor: {desc:?}, skipping the chain",);
+                    continue 'next_chain;
+                }
+            }
+
+            if iovecs.is_empty() {
+                log::warn!("Found empty chain, ignoring it");
+                continue 'next_chain;
+            }
+
+            // Compute original chain length before transformation
+            let max_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
+
+            // Apply transformation (callback takes ownership, returns representation)
+            let (repr, user_meta) = transform(iovecs);
+
+            // Track bytes already consumed by transform
+            let bytes_used = max_bytes - repr.total_bytes();
+
+            self.chain_repr.push(repr);
+            self.chain_meta.push(ChainMeta {
+                head_index,
+                max_bytes,
+                bytes_used,
+                finished: false,
+                user_meta,
+            });
+            added += 1;
+        }
+
+        added
+    }
+
+    /// Number of chains pending (not yet sent)
+    pub fn pending_count(&self) -> usize {
+        self.chain_meta.len()
+    }
+
+    /// Check if there are any pending chains
+    pub fn has_pending(&self) -> bool {
+        self.pending_count() > 0
+    }
+
+    /// Convert a descriptor to a mutable IoSlice pointing into guest memory.
+    ///
+    /// Returns None if the descriptor's memory region cannot be found or mapped.
+    ///
+    unsafe fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'_>> {
+        let len = desc.len as usize;
+        let slice = self.mem.get_slice(desc.addr, len).ok()?;
+        let ptr = slice.ptr_guard_mut().as_ptr();
+
+        // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
+        // The slice points into pinned guest memory that won't move.
+        let byte_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+
+        // Transmute to 'static - safe because we own the memory reference
+        let static_slice: &mut [u8] = unsafe { std::mem::transmute(byte_slice) };
+
+        Some(IoSliceMut::new(static_slice))
+    }
+
+    /// Produce frames by calling the callback with a batch.
+    ///
+    /// The callback receives an `RxProducerBatch` which provides access to chains
+    /// and methods to mark them as complete. Returns the number of chains finished.
+    pub fn produce<F>(&mut self, f: F) -> usize
+    where
+        F: for<'a> FnOnce(&mut RxProducerBatch<'a, R>),
+    {
+        if self.chain_meta.is_empty() {
+            log::info!("produce: no chains pending, returning 0");
+            return 0;
+        }
+
+        log::info!(
+            "produce: {} chains pending, calling callback",
+            self.chain_meta.len()
+        );
+
+        let mut batch = RxProducerBatch {
+            chain_repr: &mut self.chain_repr,
+            chain_meta: &mut self.chain_meta,
+            queue: &mut self.queue,
+            mem: &self.mem,
+            first_unfinished: 0,
+        };
+
+        f(&mut batch);
+        let finished_count = self.compact();
+
+        if finished_count > 0 {
+            self.signal_used_if_needed();
+        }
+
+        log::trace!(
+            "produce: finished_count={} remaining={}",
+            finished_count,
+            self.chain_meta.len()
+        );
+
+        finished_count
+    }
+
+    // Remove finished chains in O(n) by swapping unfinished to front, then truncating
+    // (for producer we don't care about the order of the descriptor chains)
+    fn compact(&mut self) -> usize {
+        let mut finished_count = 0;
+        let mut write = 0;
+
+        for read in 0..self.chain_meta.len() {
+            if self.chain_meta[read].finished {
+                self.chain_repr[read].clear(&mut self.chain_meta[read].user_meta);
+                finished_count += 1;
+            } else {
+                if write != read {
+                    self.chain_repr.swap(write, read);
+                    self.chain_meta.swap(write, read);
+                }
+                write += 1;
+            }
+        }
+
+        self.chain_repr.truncate(write);
+        self.chain_meta.truncate(write);
+
+        finished_count
+    }
+
+    /// Signal used queue interrupt if needed.
+    fn signal_used_if_needed(&mut self) {
+        match self.queue.needs_notification(&self.mem) {
+            Ok(true) => {
+                log::info!("RxQueueProducer: signaling used queue interrupt");
+                self.interrupt.signal_used_queue();
+            }
+            Ok(false) => {
+                log::info!("RxQueueProducer: needs_notification returned false, not signaling");
+            }
+            Err(e) => {
+                log::error!("RxQueueProducer: needs_notification error: {e}");
+            }
+        }
+    }
+}
+
+/// Convenience methods for the default representation type (IovecVec).
+impl RxQueueProducer<IovecVec> {
+    /// Feed descriptor chains from queue without transformation.
+    ///
+    /// This is a convenience method for the common case where no header
+    /// transformation is needed.
+    pub fn feed(&mut self) -> usize {
+        self.feed_with_transform(|iovecs| {
+            let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
+            (IovecVec(raw), ())
+        })
+    }
 }
 
 /// Batch for producing RX chains.
@@ -44,6 +290,12 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
     #[inline]
     pub fn len(&self) -> usize {
         self.chain_repr.len()
+    }
+
+    /// Check if the batch is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.chain_repr.is_empty()
     }
 
     /// Check if chain is already finished.
@@ -344,256 +596,6 @@ impl RxProducerBatch<'_, IovecVec> {
     }
 }
 
-/// RxQueueProducer - owns the RX queue and provides buffers for receiving.
-///
-/// Generic over representation type R, allowing different backends to use optimized
-/// representations (e.g., mmsghdr for recvmmsg). Default is IovecVec.
-///
-/// Pops descriptor chains from the virtio RX queue and provides writable
-/// iovecs for receiving data. Unfinished chains are kept pending for the next
-/// produce() call; finished chains get add_used() with their byte counts.
-///
-/// The iovecs point into guest memory owned by `mem`. This is safe because
-/// the struct owns the memory reference and outlives any use of the iovecs.
-pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
-    /// The virtio RX queue
-    queue: Queue,
-    /// Guest memory reference
-    mem: GuestMemoryMmap,
-    /// Interrupt for signaling guest
-    interrupt: InterruptTransport,
-    /// Maximum number of chains to keep pending at once.
-    max_chains: usize,
-    /// Per-chain representation (type depends on R)
-    chain_repr: Vec<R>,
-    /// Metadata for each chain (parallel to chain_repr)
-    chain_meta: Vec<ChainMeta<R::Meta>>,
-}
-
-impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
-    /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
-    pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
-        let max_chains = queue.size as usize * 8;
-        Self {
-            queue,
-            mem,
-            interrupt,
-            max_chains,
-            chain_repr: Vec::new(),
-            chain_meta: Vec::new(),
-        }
-    }
-
-    /// Set the maximum number of chains to keep pending at once.
-    pub fn set_max_chains(&mut self, max: usize) {
-        self.max_chains = max;
-    }
-
-    /// Feed descriptor chains from queue, applying callback to each.
-    ///
-    /// The callback receives mutable iovecs from the descriptor chain and can:
-    /// - Write header data (e.g., vnet header for RX)
-    /// - Skip bytes by advancing iovecs in place
-    ///
-    /// This is useful for prepending headers that the guest expects but the
-    /// network backend doesn't provide.
-    ///
-    /// Returns the number of frames added.
-    ///
-    /// # Lifetime Note
-    /// The callback uses HRTB to hide the internal 'static lifetime. The iovecs
-    /// point into guest memory owned by this struct - do not store references.
-    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
-    where
-        F: for<'a> FnMut(Vec<IoSliceMut<'a>>) -> (R, R::Meta),
-    {
-        let mut added = 0;
-
-        if let Err(e) = self.queue.disable_notification(&self.mem) {
-            warn!("Failed to disable queue notifications: {e:?}");
-        }
-        'next_chain: while self.pending_count() < self.max_chains {
-            let Some(head) = self.queue.pop(&self.mem) else {
-                // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
-                // meantime, loops back to pop them; otherwise break and expect the user to wake
-                // us up on the next kick.
-                match self.queue.enable_notification(&self.mem) {
-                    Ok(true) => continue 'next_chain,
-                    Ok(false) => break 'next_chain,
-                    Err(e) => {
-                        error!("Failed to re-enable queue notifications: {e:?}");
-                        break 'next_chain;
-                    }
-                }
-            };
-
-            let head_index = head.index;
-            let mut iovecs: Vec<IoSliceMut<'_>> = Vec::new();
-
-            for desc in head.into_iter().filter(DescriptorChain::is_write_only) {
-                if let Some(iov) = unsafe { self.desc_to_ioslice_mut(&desc) } {
-                    iovecs.push(iov);
-                } else {
-                    log::error!("Invalid descriptor: {desc:?}, skipping the chain",);
-                    continue 'next_chain;
-                }
-            }
-
-            if iovecs.is_empty() {
-                log::warn!("Found empty chain, ignoring it");
-                continue 'next_chain;
-            }
-
-            // Compute original chain length before transformation
-            let max_bytes: usize = iovecs.iter().map(|iov| iov.len()).sum();
-
-            // Apply transformation (callback takes ownership, returns representation)
-            let (repr, user_meta) = transform(iovecs);
-
-            // Track bytes already consumed by transform
-            let bytes_used = max_bytes - repr.total_bytes();
-
-            self.chain_repr.push(repr);
-            self.chain_meta.push(ChainMeta {
-                head_index,
-                max_bytes,
-                bytes_used,
-                finished: false,
-                user_meta,
-            });
-            added += 1;
-        }
-
-        added
-    }
-
-    /// Number of chains pending (not yet sent)
-    pub fn pending_count(&self) -> usize {
-        self.chain_meta.len()
-    }
-
-    /// Check if there are any pending chains
-    pub fn has_pending(&self) -> bool {
-        self.pending_count() > 0
-    }
-
-    /// Convert a descriptor to a mutable IoSlice pointing into guest memory.
-    ///
-    /// Returns None if the descriptor's memory region cannot be found or mapped.
-    ///
-    unsafe fn desc_to_ioslice_mut(&self, desc: &DescriptorChain) -> Option<IoSliceMut<'_>> {
-        let len = desc.len as usize;
-        let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        let ptr = slice.ptr_guard_mut().as_ptr();
-
-        // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
-        // The slice points into pinned guest memory that won't move.
-        let byte_slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-
-        // Transmute to 'static - safe because we own the memory reference
-        let static_slice: &mut [u8] = unsafe { std::mem::transmute(byte_slice) };
-
-        Some(IoSliceMut::new(static_slice))
-    }
-
-    /// Produce frames by calling the callback with a batch.
-    ///
-    /// The callback receives an `RxProducerBatch` which provides access to chains
-    /// and methods to mark them as complete. Returns the number of chains finished.
-    pub fn produce<F>(&mut self, f: F) -> usize
-    where
-        F: for<'a> FnOnce(&mut RxProducerBatch<'a, R>),
-    {
-        if self.chain_meta.is_empty() {
-            log::info!("produce: no chains pending, returning 0");
-            return 0;
-        }
-
-        log::info!(
-            "produce: {} chains pending, calling callback",
-            self.chain_meta.len()
-        );
-
-        let mut batch = RxProducerBatch {
-            chain_repr: &mut self.chain_repr,
-            chain_meta: &mut self.chain_meta,
-            queue: &mut self.queue,
-            mem: &self.mem,
-            first_unfinished: 0,
-        };
-
-        f(&mut batch);
-        let finished_count = self.compact();
-
-        if finished_count > 0 {
-            self.signal_used_if_needed();
-        }
-
-        log::trace!(
-            "produce: finished_count={} remaining={}",
-            finished_count,
-            self.chain_meta.len()
-        );
-
-        finished_count
-    }
-
-    // Remove finished chains in O(n) by swapping unfinished to front, then truncating
-    // (for producer we don't care about the order of the descriptor chains)
-    fn compact(&mut self) -> usize {
-        let mut finished_count = 0;
-        let mut write = 0;
-
-        for read in 0..self.chain_meta.len() {
-            if self.chain_meta[read].finished {
-                self.chain_repr[read].clear(&mut self.chain_meta[read].user_meta);
-                finished_count += 1;
-            } else {
-                if write != read {
-                    self.chain_repr.swap(write, read);
-                    self.chain_meta.swap(write, read);
-                }
-                write += 1;
-            }
-        }
-
-        self.chain_repr.truncate(write);
-        self.chain_meta.truncate(write);
-
-        finished_count
-    }
-
-    /// Signal used queue interrupt if needed.
-    fn signal_used_if_needed(&mut self) {
-        match self.queue.needs_notification(&self.mem) {
-            Ok(true) => {
-                log::info!("RxQueueProducer: signaling used queue interrupt");
-                self.interrupt.signal_used_queue();
-            }
-            Ok(false) => {
-                log::info!("RxQueueProducer: needs_notification returned false, not signaling");
-            }
-            Err(e) => {
-                log::error!("RxQueueProducer: needs_notification error: {e}");
-            }
-        }
-    }
-}
-
-/// Convenience methods for the default representation type (IovecVec).
-impl RxQueueProducer<IovecVec> {
-    /// Feed descriptor chains from queue without transformation.
-    ///
-    /// This is a convenience method for the common case where no header
-    /// transformation is needed.
-    pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs| {
-            let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
-            (IovecVec(raw), ())
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::IoSliceMut;
@@ -602,8 +604,8 @@ mod tests {
 
     use libc::iovec;
 
-    use crate::virtio::chain_repr::{ChainsMemoryRepr, IovecVec, ReceivedLen};
-    use crate::virtio::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
+    use crate::virtio::batch_queue::iovec_utils::{advance_iovecs_vec, write_to_iovecs};
+    use crate::virtio::batch_queue::{ChainsMemoryRepr, IovecVec, ReceivedLen};
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
     use super::RxQueueProducer;

@@ -9,12 +9,10 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::chain_repr::IovecVec;
-use crate::virtio::iovec_utils::{advance_tx_iovecs_vec, iovecs_len, truncate_iovecs};
+use crate::virtio::batch_queue::iovec_utils::{advance_tx_iovecs_vec, iovecs_len, truncate_iovecs};
+use crate::virtio::batch_queue::{IovecVec, RxQueueProducer, TxQueueConsumer};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};

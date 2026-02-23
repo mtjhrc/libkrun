@@ -16,9 +16,8 @@ use virtio_bindings::virtio_net::{
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
+use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::queue::Queue;
-use crate::virtio::rx_queue_producer::RxQueueProducer;
-use crate::virtio::tx_queue_consumer::TxQueueConsumer;
 use crate::virtio::InterruptTransport;
 
 ioctl_write_ptr!(tunsetiff, b'T', 202, c_int);

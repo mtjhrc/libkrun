@@ -3,6 +3,7 @@
 
 //! Utilities for working with iovec slices.
 
+use libc::iovec;
 use smallvec::SmallVec;
 use std::io::IoSliceMut;
 
@@ -88,6 +89,26 @@ pub fn advance_tx_iovecs_vec(iovecs: &mut Vec<std::io::IoSlice<'_>>, bytes: usiz
             // Safety: advancing pointer within same allocation
             let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(remaining), new_len) };
             iovecs[0] = std::io::IoSlice::new(new_slice);
+            remaining = 0;
+        }
+    }
+}
+
+/// Advance raw iovecs in place by `bytes`, removing fully consumed buffers.
+///
+/// Works directly on `Vec<iovec>` without going through `IoSliceMut`, avoiding
+/// provenance issues when the iovecs originate from read-only memory (e.g., TX).
+pub fn advance_raw_iovecs(iovecs: &mut Vec<iovec>, bytes: usize) {
+    let mut remaining = bytes;
+    while remaining > 0 && !iovecs.is_empty() {
+        let first_len = iovecs[0].iov_len;
+        if first_len <= remaining {
+            iovecs.remove(0);
+            remaining -= first_len;
+        } else {
+            // Safety: advancing pointer within same allocation
+            iovecs[0].iov_base = unsafe { (iovecs[0].iov_base as *mut u8).add(remaining) as _ };
+            iovecs[0].iov_len = first_len - remaining;
             remaining = 0;
         }
     }

@@ -9,9 +9,9 @@ use std::ops::Range;
 use libc::iovec;
 use vm_memory::{GuestMemory, GuestMemoryMmap};
 
-use super::chain_repr::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
-use super::queue::{DescriptorChain, Queue};
-use super::InterruptTransport;
+use super::super::queue::{DescriptorChain, Queue};
+use super::super::InterruptTransport;
+use super::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug, Clone)]
@@ -26,183 +26,6 @@ struct ChainMeta<M: Default> {
     finished: bool,
     /// User-defined metadata
     user_meta: M,
-}
-
-/// Batch for consuming TX chains.
-///
-/// Provides access to pending chains and methods to mark them as finished.
-///
-/// Panics if you access or finish an already-finished chain.
-pub struct TxConsumerBatch<'a, R: ChainsMemoryRepr> {
-    chain_repr: &'a mut [R],
-    chain_meta: &'a mut [ChainMeta<R::Meta>],
-    queue: &'a mut Queue,
-    mem: &'a GuestMemoryMmap,
-    /// Index of first unfinished chain. Chains 0..first_finished are finished.
-    /// For sequential finishing, this equals the number of finished chains.
-    first_finished: usize,
-}
-
-impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
-    /// Number of pending chains in this batch.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.chain_repr.len()
-    }
-
-    /// Check if chain is already finished.
-    #[inline]
-    pub fn is_finished(&self, index: usize) -> bool {
-        self.chain_meta[index].finished
-    }
-
-    /// Get bytes already consumed for chain at index.
-    #[inline]
-    pub fn bytes_used(&self, index: usize) -> usize {
-        self.chain_meta[index].bytes_used
-    }
-
-    /// Get maximum bytes the chain can hold.
-    #[inline]
-    pub fn max_bytes(&self, index: usize) -> usize {
-        self.chain_meta[index].max_bytes
-    }
-
-    /// Get access to a chain at index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn chain(&self, index: usize) -> &R {
-        self.assert_not_finished(index);
-        &self.chain_repr[index]
-    }
-
-    /// Get access to chains in a range (checked).
-    ///
-    /// Returns a slice of chain representations for the given range.
-    ///
-    /// O(1) if chains are being finished sequentially, O(n) otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any chain in the range has already been finished.
-    pub fn chains(&self, range: Range<usize>) -> &[R] {
-        // Fast path: if range starts at or after first_finished, all are unfinished
-        if range.start < self.first_finished {
-            // Slow path: range may include finished chains, check each
-            for i in range.clone() {
-                self.assert_not_finished(i);
-            }
-        }
-        &self.chain_repr[range]
-    }
-
-    /// Get total bytes across all pending (non-finished) chains.
-    pub fn total_bytes(&self) -> usize {
-        self.chain_meta
-            .iter()
-            .filter(|m| !m.finished)
-            .map(|m| m.max_bytes)
-            .sum()
-    }
-
-    /// Mark chain at index as finished.
-    ///
-    /// Calls add_used immediately. Chain will be removed after consume() returns.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn finish(&mut self, index: usize) {
-        let meta = &mut self.chain_meta[index];
-        assert!(
-            !meta.finished,
-            "finish: chain at index {} already finished",
-            index
-        );
-        meta.finished = true;
-        log::trace!(
-            "finish: index={} head_index={} guest_len={}",
-            index,
-            meta.head_index,
-            meta.guest_len
-        );
-        if let Err(e) = self
-            .queue
-            .add_used(self.mem, meta.head_index, meta.guest_len as u32)
-        {
-            log::error!("TxConsumerBatch: failed to add_used: {e}");
-        }
-
-        // Update first_finished for sequential finishing optimization
-        if index == self.first_finished {
-            while self.first_finished < self.chain_meta.len()
-                && self.chain_meta[self.first_finished].finished
-            {
-                self.first_finished += 1;
-            }
-        }
-    }
-
-    /// Mark a range of chains as finished.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any chain in the range has already been finished.
-    pub fn finish_many(&mut self, range: Range<usize>) {
-        for i in range {
-            self.finish(i);
-        }
-    }
-
-    #[track_caller]
-    fn assert_not_finished(&self, index: usize) {
-        assert!(
-            !self.is_finished(index),
-            "chain at index {index} already finished",
-        );
-    }
-}
-
-/// Methods for representation types that support advancing (for partial sends).
-impl<R: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, R> {
-    /// Advance bytes used for chain at index (partial send).
-    ///
-    /// Updates bytes_used and advances the iovecs in place.
-    /// Chain remains pending for next consume() call.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn advance(&mut self, index: usize, bytes: usize) {
-        assert!(
-            !self.chain_meta[index].finished,
-            "advance: chain at index {} already finished",
-            index
-        );
-        self.chain_meta[index].bytes_used += bytes;
-        self.chain_repr[index].advance(bytes);
-    }
-}
-
-/// Specialized methods for the default IovecVec representation type.
-impl TxConsumerBatch<'_, IovecVec> {
-    /// Get a chain's iovecs as IoSlice references.
-    ///
-    /// # Panics
-    ///
-    /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn io_slices(&self, index: usize) -> &[IoSlice<'_>] {
-        assert!(
-            !self.chain_meta[index].finished,
-            "io_slices: chain at index {} already finished",
-            index
-        );
-        let slice = &self.chain_repr[index].0[..];
-        // iovec and IoSlice have the same memory layout
-        unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
-    }
 }
 
 /// TxQueueConsumer - owns the TX queue and manages chain batching.
@@ -251,13 +74,15 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         self.max_chains = max;
     }
 
-    /// Feed descriptor chains from queue, applying callback to transform each.
+    /// Feed descriptor chains from the queue, converting each into the
+    /// representation type `R` via a user-supplied callback.
     ///
-    /// The callback receives the iovecs from the descriptor chain and can:
-    /// - Transform the iovecs (skip bytes, add headers, etc.)
-    /// - Return the representation and metadata
+    /// The callback receives the chain's readable iovecs and returns an `(R, Meta)`
+    /// pair. It may mutate the iovecs before building `R` — for example, skipping
+    /// a header so that subsequent I/O starts after it. Any bytes consumed by
+    /// the callback are automatically tracked.
     ///
-    /// Returns the number of chains added to the batch.
+    /// Returns the number of chains added.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
         F: for<'a> FnMut(Vec<IoSlice<'a>>) -> (R, R::Meta),
@@ -423,8 +248,20 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     }
 }
 
-/// Convenience methods for the default representation type (IovecVec).
-impl TxQueueConsumer<IovecVec> {
+/// Specialized methods for the default IovecVec representation type.
+impl TxConsumerBatch<'_, IovecVec> {
+    /// Get a chain's iovecs as IoSlice references.
+    ///
+    /// # Panics
+    ///
+    /// Panics if index is out of bounds or if the chain has already been finished.
+    pub fn io_slices(&self, index: usize) -> &[IoSlice<'_>] {
+        self.assert_not_finished(index);
+        let slice = &self.chain_repr[index].0[..];
+        // iovec and IoSlice have the same memory layout
+        unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
+    }
+
     /// Feed descriptor chains from queue without transformation.
     ///
     /// This is a convenience method for the common case where no header
@@ -437,11 +274,175 @@ impl TxQueueConsumer<IovecVec> {
     }
 }
 
+/// Batch for consuming TX chains.
+///
+/// Provides access to pending chains and methods to mark them as finished.
+///
+/// Panics if you access or finish an already-finished chain.
+pub struct TxConsumerBatch<'a, R: ChainsMemoryRepr> {
+    chain_repr: &'a mut [R],
+    chain_meta: &'a mut [ChainMeta<R::Meta>],
+    queue: &'a mut Queue,
+    mem: &'a GuestMemoryMmap,
+    /// Index of first unfinished chain. Chains 0..first_finished are finished.
+    /// For sequential finishing, this equals the number of finished chains.
+    first_finished: usize,
+}
+
+impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
+    /// Number of pending chains in this batch.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.chain_repr.len()
+    }
+
+    /// Check if the batch is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.chain_repr.is_empty()
+    }
+
+    /// Check if chain is already finished.
+    #[inline]
+    pub fn is_finished(&self, index: usize) -> bool {
+        self.chain_meta[index].finished
+    }
+
+    /// Get bytes already consumed for chain at index.
+    #[inline]
+    pub fn bytes_used(&self, index: usize) -> usize {
+        self.chain_meta[index].bytes_used
+    }
+
+    /// Get maximum bytes the chain can hold.
+    #[inline]
+    pub fn max_bytes(&self, index: usize) -> usize {
+        self.chain_meta[index].max_bytes
+    }
+
+    /// Get access to a chain at index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if index is out of bounds or if the chain has already been finished.
+    pub fn chain(&self, index: usize) -> &R {
+        self.assert_not_finished(index);
+        &self.chain_repr[index]
+    }
+
+    /// Get access to chains in a range (checked).
+    ///
+    /// Returns a slice of chain representations for the given range.
+    ///
+    /// O(1) if chains are being finished sequentially, O(n) otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any chain in the range has already been finished.
+    pub fn chains(&self, range: Range<usize>) -> &[R] {
+        // Fast path: if range starts at or after first_finished, all are unfinished
+        if range.start < self.first_finished {
+            // Slow path: range may include finished chains, check each
+            for i in range.clone() {
+                self.assert_not_finished(i);
+            }
+        }
+        &self.chain_repr[range]
+    }
+
+    /// Get total bytes across all pending (non-finished) chains.
+    pub fn total_bytes(&self) -> usize {
+        self.chain_meta
+            .iter()
+            .filter(|m| !m.finished)
+            .map(|m| m.max_bytes)
+            .sum()
+    }
+
+    /// Mark chain at index as finished.
+    ///
+    /// Calls add_used immediately. Chain will be removed after consume() returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn finish(&mut self, index: usize) {
+        let meta = &mut self.chain_meta[index];
+        assert!(
+            !meta.finished,
+            "finish: chain at index {} already finished",
+            index
+        );
+        meta.finished = true;
+        log::trace!(
+            "finish: index={} head_index={} guest_len={}",
+            index,
+            meta.head_index,
+            meta.guest_len
+        );
+        if let Err(e) = self
+            .queue
+            .add_used(self.mem, meta.head_index, meta.guest_len as u32)
+        {
+            log::error!("TxConsumerBatch: failed to add_used: {e}");
+        }
+
+        // Update first_finished for sequential finishing optimization
+        if index == self.first_finished {
+            while self.first_finished < self.chain_meta.len()
+                && self.chain_meta[self.first_finished].finished
+            {
+                self.first_finished += 1;
+            }
+        }
+    }
+
+    /// Mark a range of chains as finished.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any chain in the range has already been finished.
+    pub fn finish_many(&mut self, range: Range<usize>) {
+        for i in range {
+            self.finish(i);
+        }
+    }
+
+    #[track_caller]
+    fn assert_not_finished(&self, index: usize) {
+        assert!(
+            !self.is_finished(index),
+            "chain at index {index} already finished",
+        );
+    }
+}
+
+/// Methods for representation types that support advancing (for partial sends).
+impl<R: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, R> {
+    /// Advance bytes used for chain at index (partial send).
+    ///
+    /// Updates bytes_used and advances the iovecs in place.
+    /// Chain remains pending for next consume() call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain at `index` has already been finished.
+    pub fn advance(&mut self, index: usize, bytes: usize) {
+        assert!(
+            !self.chain_meta[index].finished,
+            "advance: chain at index {} already finished",
+            index
+        );
+        self.chain_meta[index].bytes_used += bytes;
+        self.chain_repr[index].advance(bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::IoSlice;
 
-    use crate::virtio::chain_repr::IovecVec;
+    use crate::virtio::batch_queue::IovecVec;
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
     use super::TxQueueConsumer;
