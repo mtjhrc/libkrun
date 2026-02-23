@@ -404,6 +404,9 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     {
         let mut added = 0;
 
+        if let Err(e) = self.queue.disable_notification(&self.mem) {
+            warn!("Failed to disable queue notifications: {e:?}");
+        }
         'next_chain: while self.pending_count() < max_chains {
             let Some(head) = self.queue.pop(&self.mem) else {
                 // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
@@ -411,7 +414,11 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
                 // us up on the next kick.
                 match self.queue.enable_notification(&self.mem) {
                     Ok(true) => continue 'next_chain,
-                    _ => break 'next_chain,
+                    Ok(false) => break 'next_chain,
+                    Err(e) => {
+                        error!("Failed to re-enable queue notifications: {e:?}");
+                        break 'next_chain;
+                    }
                 }
             };
 
@@ -422,7 +429,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
                 if let Some(iov) = self.desc_to_ioslice_mut(&desc) {
                     iovecs.push(iov);
                 } else {
-                    log::warn!(
+                    log::error!(
                         "Invalid descriptor: head_index={} addr={:x} len={}, skipping the chain",
                         head_index,
                         desc.addr.raw_value(),
