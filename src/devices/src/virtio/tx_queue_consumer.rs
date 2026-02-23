@@ -234,7 +234,7 @@ pub struct TxQueueConsumer<R: ChainsMemoryRepr = IovecVec> {
 impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Create a new TxQueueConsumer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
-        let max_chains = queue.size as usize * 2;
+        let max_chains = queue.size as usize * 8;
         Self {
             queue,
             mem,
@@ -835,9 +835,6 @@ mod tests {
             batch.advance(1, 15); // partial send on chain 1 (now index 0 after compact)
         });
         assert_eq!(consumer.pending_count(), 1);
-
-        // Compact removes finished chain 0
-        // (compact is called automatically in consume, but let's verify state)
 
         // Guest adds more descriptors (simulating queue refill)
         driver.readable(&[&data]); // chain 2

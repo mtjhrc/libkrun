@@ -367,7 +367,7 @@ pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
 impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
-        let max_chains = queue.size as usize * 2;
+        let max_chains = queue.size as usize * 8;
         Self {
             queue,
             mem,
@@ -659,11 +659,11 @@ mod tests {
             assert_eq!(chain[1].len(), 1024);
             // Don't mark anything as finished
         });
-        
+
         // We haven't finished anything
         driver.assert_used(&[]);
     }
-    
+
     #[test]
     fn test_feed_respects_max_frames() {
         let setup = TestSetup::new();
@@ -706,7 +706,7 @@ mod tests {
             assert_eq!(batch.max_bytes(1), 100);
             batch.write_complete(1, b"Received packet 2").unwrap();
             assert_eq!(batch.bytes_used(1), 17);
-              assert!(batch.is_finished(1));
+            assert!(batch.is_finished(1));
 
             // Third left unfinished
             assert_eq!(batch.max_bytes(2), 100);
@@ -727,84 +727,117 @@ mod tests {
 
     #[test]
     fn test_multiple_produce_cycles() {
+        // Each chain: 3 descriptors [6, 12, 6] = 24 bytes raw.
+        // Transform writes "HD" (2 bytes) header then advances past it.
+        // Usable iovecs after transform: [4, 12, 6] = 22 bytes.
+        //
+        // Leftover state per cycle:
+        //   cycle 1 → 2 leftover  (1 partial, 1 untouched)
+        //   cycle 2 → 3 leftover  (complete the partial, 3 untouched)
+        //   cycle 3 → 1 leftover  (complete 2 of 3)
+        //   cycle 4 → 0 leftover  (drain everything)
         let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
+        let (queue, driver) = setup.create_queue(32);
 
-        // Create 4 chains, each with 3 descriptors: [6, 12, 6] = 24 bytes total
-        // After 2-byte header skip: [4, 12, 6] = 22 bytes usable
         driver
-            .writable(&[6, 12, 6])
             .writable(&[6, 12, 6])
             .writable(&[6, 12, 6])
             .writable(&[6, 12, 6]);
 
         let mut producer: TestRxProducer =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-        producer.set_max_chains(2);
 
-        // First feed: get 2 buffers, skip 2-byte header from each
-        let added = producer.feed_with_transform(|mut iovecs| {
-            // Write 2-byte header, then advance past it
-            write_to_iovecs(&mut iovecs, b"HD");
-            advance_iovecs_vec(&mut iovecs, 2);
-            (to_iovec(iovecs), ())
-        });
-        assert_eq!(added, 2);
-        assert_eq!(producer.pending_count(), 2);
+        let feed_with_hdr = |p: &mut TestRxProducer| {
+            p.feed_with_transform(|mut iovecs| {
+                write_to_iovecs(&mut iovecs, b"HD");
+                advance_iovecs_vec(&mut iovecs, 2);
+                (to_iovec(iovecs), ())
+            })
+        };
 
-        // First produce:
-        // - Chain 0: write "AAAABBBBBBBBBBBBCC" (18 bytes) spanning all 3 iovecs, complete
-        // - Chain 1: write "XXXX" (4 bytes), partial advance, don't complete
-        // Note: header bytes are automatically tracked by feed_with_transform
+        // ── Cycle 1: feed 3, complete 1, partial 1, leave 1 untouched ───
+        assert_eq!(feed_with_hdr(&mut producer), 3);
+        assert_eq!(producer.pending_count(), 3);
+
         let completed = producer.produce(|batch| {
-            // Chain 0: spans [4, 12, 2] of the available [4, 12, 6]
-            batch.write_complete(0, b"AAAABBBBBBBBBBBBCC").unwrap();
+            // Chain 0: 18-byte write spanning all 3 iovecs, complete
+            batch.write_complete(0, b"aaaaaaaaaaaaaaaaaa").unwrap();
 
-            // Chain 1: partial write, just 4 bytes into first iovec
-            let written = write_to_iovecs(batch.io_slices_mut(1), b"XXXX");
+            // Chain 1: partial write (4 bytes into first iovec)
+            let written = write_to_iovecs(batch.io_slices_mut(1), b"bbbb");
             assert_eq!(written, 4);
             batch.advance(1, 4);
-            // Don't finish - leave pending
+
+            // Chain 2: untouched
         });
         assert_eq!(completed, 1);
-        assert_eq!(producer.pending_count(), 1);
-
-        // Second feed: get 1 more (1 pending + 1 new = 2)
-        let added = producer.feed_with_transform(|mut iovecs| {
-            write_to_iovecs(&mut iovecs, b"HD");
-            advance_iovecs_vec(&mut iovecs, 2);
-            (to_iovec(iovecs), ())
-        });
-        assert_eq!(added, 1);
         assert_eq!(producer.pending_count(), 2);
 
-        // Second produce:
-        // - Chain 0 (was chain 1): iovecs already advanced, write "YYYYYYYY" (8 more), complete
-        // - Chain 1 (chain 2): fresh chain, write spanning iovecs, complete
-        let completed = producer.produce(|batch| {
-            // Chain 0: continue after previous 4 bytes, write 8 more
-            // Use write_to_iovecs + complete since we already have partial bytes_used
-            let written = write_to_iovecs(batch.io_slices_mut(0), b"YYYYYYYY");
-            assert_eq!(written, 8);
-            batch.complete(0, 8); // adds to existing bytes_used
+        driver.assert_used(&[(0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa"))]);
 
-            // Chain 1: fresh chain, write spanning first 2 iovecs
-            batch.write_complete(1, b"ZZZZZZZZZZZZ").unwrap(); // 12 bytes: fills [4] + 8 of [12]
+        // ── Cycle 2: guest adds 2 buffers, complete the partial ─────────
+        driver
+            .writable(&[1, 1, 3, 3, 12, 6]) // 6 descriptors, HD consumes first two → [3, 3, 12, 6] usable
+            .writable(&[6, 12, 6]);
+        assert_eq!(feed_with_hdr(&mut producer), 2);
+        assert_eq!(producer.pending_count(), 4);
+
+        let completed = producer.produce(|batch| {
+            // Batch[0] (chain 1): continue partial, write 8 more b's
+            let written = write_to_iovecs(batch.io_slices_mut(0), b"bbbbbbbb");
+            assert_eq!(written, 8);
+            batch.complete(0, 8);
+
+            // Batch[1..3]: untouched (simulating no more packets this cycle)
+        });
+        assert_eq!(completed, 1);
+        assert_eq!(producer.pending_count(), 3);
+
+        driver.assert_used(&[
+            (0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa")),
+            (1, ExpectedUsed::Writable(b"HDbbbbbbbbbbbb")),
+        ]);
+
+        // ── Cycle 3: no new buffers, complete 2 of 3, leave 1 ──────────
+        let completed = producer.produce(|batch| {
+            assert_eq!(batch.len(), 3);
+            batch.write_complete(0, b"cccccccccccc").unwrap();
+            batch.write_complete(1, b"dddddd").unwrap(); // spans [3, 3] boundary
+                                                         // Batch[2]: untouched
+        });
+        assert_eq!(completed, 2);
+        assert_eq!(producer.pending_count(), 1);
+
+        driver.assert_used(&[
+            (0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa")),
+            (1, ExpectedUsed::Writable(b"HDbbbbbbbbbbbb")),
+            (2, ExpectedUsed::Writable(b"HDcccccccccccc")),
+            (3, ExpectedUsed::Writable(b"HDdddddd")),
+        ]);
+
+        // ── Cycle 4: guest adds 1 buffer, complete both remaining ───────
+        driver.writable(&[6, 12, 6]);
+        assert_eq!(feed_with_hdr(&mut producer), 1);
+        assert_eq!(producer.pending_count(), 2);
+
+        let completed = producer.produce(|batch| {
+            assert_eq!(batch.len(), 2);
+            batch.write_complete(0, b"eeee").unwrap();
+            batch.write_complete(1, b"ffff").unwrap();
         });
         assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 0);
 
-        // Verify used ring:
-        // Chain 0: "HD" (header) + "AAAABBBBBBBBBBBBCC" (18 bytes) = 20 bytes total
-        // Chain 1: "HD" (header) + "XXXXYYYYYYYY" (12 bytes) = 14 bytes total
-        // Chain 2: "HD" (header) + "ZZZZZZZZZZZZ" (12 bytes) = 14 bytes total
+        // Letter = chain index: a=0, b=1, c=2, d=3, e=4, f=5
         driver.assert_used(&[
-            (0, ExpectedUsed::Writable(b"HDAAAABBBBBBBBBBBBCC")),
-            (1, ExpectedUsed::Writable(b"HDXXXXYYYYYYYY")),
-            (2, ExpectedUsed::Writable(b"HDZZZZZZZZZZZZ")),
+            (0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa")),
+            (1, ExpectedUsed::Writable(b"HDbbbbbbbbbbbb")),
+            (2, ExpectedUsed::Writable(b"HDcccccccccccc")),
+            (3, ExpectedUsed::Writable(b"HDdddddd")),
+            (4, ExpectedUsed::Writable(b"HDeeee")),
+            (5, ExpectedUsed::Writable(b"HDffff")),
         ]);
     }
-
 
     #[test]
     fn test_out_of_order_completion() {
