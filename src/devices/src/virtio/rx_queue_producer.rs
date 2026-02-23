@@ -365,7 +365,8 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
         'next_chain: while self.pending_count() < max_chains {
             let Some(head) = self.queue.pop(&self.mem) else {
                 // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
-                // meantime, loops back to pop them; otherwise break and wait for the next kick.
+                // meantime, loops back to pop them; otherwise break and expect the user to wake
+                // us up on the next kick.
                 match self.queue.enable_notification(&self.mem) {
                     Ok(true) => continue 'next_chain,
                     _ => break 'next_chain,
@@ -401,7 +402,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             // Apply transformation (callback takes ownership, returns representation)
             let (repr, user_meta) = transform(iovecs);
 
-            // Track bytes consumed by transform (header written + advanced)
+            // Track bytes already consumed by transform
             let bytes_used = max_bytes - repr.total_bytes();
 
             self.chain_repr.push(repr);
@@ -458,20 +459,26 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             self.chain_meta.len()
         );
 
-        f(&mut RxProducerBatch {
+        let mut batch = RxProducerBatch {
             chain_repr: &mut self.chain_repr,
             chain_meta: &mut self.chain_meta,
             queue: &mut self.queue,
             mem: &self.mem,
             first_unfinished: 0,
-        });
+        };
+
+        f(&mut batch);
         let finished_count = self.compact();
 
         if finished_count > 0 {
             self.signal_used_if_needed();
         }
 
-        log::info!("produce: finished_count={} remaining={}", finished_count, self.chain_meta.len());
+        log::trace!(
+            "produce: finished_count={} remaining={}",
+            finished_count,
+            self.chain_meta.len()
+        );
 
         finished_count
     }

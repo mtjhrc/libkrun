@@ -51,7 +51,7 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
     pub fn len(&self) -> usize {
         self.chain_repr.len()
     }
-    
+
     /// Check if chain is already finished.
     #[inline]
     pub fn is_finished(&self, index: usize) -> bool {
@@ -168,7 +168,7 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
             }
         }
     }
-    
+
     #[track_caller]
     fn assert_not_finished(&self, index: usize) {
         assert!(
@@ -276,14 +276,15 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         'next_chain: while self.pending_count() < max_chains {
             let Some(head) = self.queue.pop(&self.mem) else {
                 // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
-                // meantime, loops back to pop them; otherwise break and wait for the next kick.
+                // meantime, loops back to pop them; otherwise break and expect the user to wake
+                // us up on the next kick.
                 match self.queue.enable_notification(&self.mem) {
                     Ok(true) => continue 'next_chain,
                     _ => break 'next_chain,
                 }
             };
-            let head_index = head.index;
 
+            let head_index = head.index;
             let mut iovecs: Vec<IoSlice<'_>> = Vec::new();
             let mut valid = true;
 
@@ -312,10 +313,10 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             // Apply transformation (callback takes ownership, returns representation)
             let (repr, user_meta) = transform(iovecs);
 
-            // Compute final length from storage
+            // Compute final length
             let max_bytes = repr.total_bytes();
-            
-            // Track bytes consumed by transform (header written + advanced)
+
+            // Track bytes already consumed by transform
             let bytes_used = max_bytes - repr.total_bytes();
 
             self.chain_repr.push(repr);
@@ -396,6 +397,12 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
         if completed_count > 0 {
             self.signal_used_if_needed();
         }
+
+        log::trace!(
+            "consume: finished_count={} remaining={}",
+            finished_count,
+            self.chain_meta.len()
+        );
 
         self.compact();
         completed_count
