@@ -120,10 +120,6 @@ impl VhostUserDevice {
 
         // Determine actual queue count - may require protocol feature negotiation
         if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
-            frontend
-                .set_features(backend_features)
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
-
             let protocol_features = frontend
                 .get_protocol_features()
                 .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
