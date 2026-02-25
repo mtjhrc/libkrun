@@ -1,4 +1,4 @@
-/*
+//*
  * This is an example implementing chroot-like functionality with libkrun.
  *
  * It executes the requested command (relative to NEWROOT) inside a fresh
@@ -40,6 +40,8 @@ static void print_help(char *const name)
         "              --net=NET_MODE        Set network mode\n"
         "              --passt-socket=PATH   Instead of starting passt, connect to passt socket at PATH\n"
         "              --vhost-user-rng=PATH Use vhost-user RNG backend at socket PATH\n"
+        "              --vhost-user-net=PATH Use vhost-user net backend (e.g. passt --vhost-user) at socket PATH\n"
+        "                                   Disables implicit vsock/TSI; alternative to the in-process net device\n"
         "NET_MODE can be either TSI (default) or PASST\n"
         "\n"
         "NEWROOT:      the root directory of the vm\n"
@@ -56,6 +58,7 @@ static const struct option long_options[] = {
     { "net_mode", required_argument, NULL, 'N' },
     { "passt-socket", required_argument, NULL, 'P' },
     { "vhost-user-rng", required_argument, NULL, 'V' },
+    { "vhost-user-net", required_argument, NULL, 'W' },
     { NULL, 0, NULL, 0 }
 };
 
@@ -66,6 +69,7 @@ struct cmdline {
     enum net_mode net_mode;
     char const *passt_socket_path;
     char const *vhost_user_rng_socket;
+    char const *vhost_user_net_socket;
     char const *new_root;
     char *const *guest_argv;
 };
@@ -93,6 +97,7 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
         .net_mode = NET_MODE_TSI,
         .passt_socket_path = NULL,
         .vhost_user_rng_socket = NULL,
+        .vhost_user_net_socket = NULL,
         .new_root = NULL,
         .guest_argv = NULL,
         .log_target = KRUN_LOG_TARGET_DEFAULT,
@@ -130,6 +135,9 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
             break;
         case 'V':
             cmdline->vhost_user_rng_socket = optarg;
+            break;
+        case 'W':
+            cmdline->vhost_user_net_socket = optarg;
             break;
         case '?':
             return false;
@@ -270,6 +278,27 @@ int main(int argc, char *const argv[])
         printf("Using vhost-user RNG backend at %s (custom queue size: 512)\n", cmdline.vhost_user_rng_socket);
     }
 
+    // Configure vhost-user net (e.g. passt --vhost-user) if requested.
+    if (cmdline.vhost_user_net_socket != NULL) {
+        // Disable implicit vsock so TSI networking doesn't interfere
+        if (err = krun_disable_implicit_vsock(ctx_id)) {
+            errno = -err;
+            perror("Error disabling implicit vsock");
+            return -1;
+        }
+
+        // passt vhost-user-net uses 2 queues: rx + tx
+        uint16_t net_queue_sizes[] = {256, 256, 0};
+        if (err = krun_add_vhost_user_device(ctx_id, /* VIRTIO_ID_NET */ 1,
+                                              cmdline.vhost_user_net_socket,
+                                              "vhost-user-net", 2, net_queue_sizes)) {
+            errno = -err;
+            perror("Error adding vhost-user net device");
+            return -1;
+        }
+        printf("Using vhost-user net backend at %s\n", cmdline.vhost_user_net_socket);
+    }
+
     // Raise RLIMIT_NOFILE to the maximum allowed to create some room for virtio-fs
     getrlimit(RLIMIT_NOFILE, &rlim);
     rlim.rlim_cur = rlim.rlim_max;
@@ -289,8 +318,11 @@ int main(int argc, char *const argv[])
         return -1;
     }
 
-    // Map port 18000 in the host to 8000 in the guest (if networking uses TSI)
-    if (cmdline.net_mode == NET_MODE_TSI) {
+    // Skip built-in networking entirely when using vhost-user-net
+    if (cmdline.vhost_user_net_socket != NULL) {
+        // Networking is handled by the vhost-user backend (e.g. passt)
+    } else if (cmdline.net_mode == NET_MODE_TSI) {
+        // Map guest TCP ports to TCP ports on the host
         if (err = krun_set_port_map(ctx_id, &port_map[0])) {
             errno = -err;
             perror("Error configuring port map");
