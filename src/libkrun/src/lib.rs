@@ -1793,11 +1793,6 @@ pub unsafe extern "C" fn krun_add_vhost_user_device(
     const VIRTIO_ID_SND: u32 = 25;
     const VIRTIO_ID_CAN: u32 = 36;
 
-    if device_type != VIRTIO_ID_RNG && device_type != VIRTIO_ID_SND && device_type != VIRTIO_ID_CAN
-    {
-        return -libc::EINVAL;
-    }
-
     let socket_path_str = match CStr::from_ptr(socket_path).to_str() {
         Ok(s) => s,
         Err(_) => return -libc::EINVAL,
