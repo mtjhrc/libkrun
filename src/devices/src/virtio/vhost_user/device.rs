@@ -96,7 +96,11 @@ impl VhostUserDevice {
 
         // Connect to the vhost-user backend
         let stream = UnixStream::connect(socket_path)?;
-        let mut frontend = Frontend::from_stream(stream, 1);
+
+        // NOTE: `num_queues` could be 0 here, but this is actually fine 
+        // because if `VhostUserProtocolFeatures::MQ` is supported the negotioted
+        // value will be used automatically by Frontend
+        let mut frontend = Frontend::from_stream(stream, num_queues as u64);
 
         // Get available features from backend
         let avail_features = frontend
