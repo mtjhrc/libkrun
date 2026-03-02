@@ -10,13 +10,11 @@
 //! The representation trait [`ChainsMemoryRepr`] allows backends to plug in
 //! optimised layouts (e.g. `mmsghdr` for `sendmmsg`/`recvmmsg`).
 
-use std::io::IoSliceMut;
+use aliased_ioslice::RawAliasedIoSlice;
+use ioslice_container_utils::{SliceOfIoSlicesExt, VecOfIoSlicesExt};
 
-use libc::iovec;
-
-use iovec_utils::{advance_raw_iovecs, truncate_iovecs};
-
-pub mod iovec_utils;
+pub mod aliased_ioslice;
+pub mod ioslice_container_utils;
 mod rx_queue_producer;
 mod tx_queue_consumer;
 
@@ -84,22 +82,19 @@ pub unsafe trait TruncateBytes: ChainsMemoryRepr {
     fn truncate_bytes(&mut self, max_bytes: usize);
 }
 
-/// Wrapper around `Vec<iovec>` that implements `Send`.
+/// Wrapper around `Vec<RawAliasedIoSlice>` that implements `Send`.
 ///
 /// # Safety
-/// The raw pointers in `iovec` point to guest memory managed by the owning
+/// The raw pointers inside point to guest memory managed by the owning
 /// `TxQueueConsumer`/`RxQueueProducer`. The memory is pinned and the struct
 /// lifetime ensures the pointers remain valid. Transferring to another thread
 /// is safe because we transfer ownership of the entire container.
-#[derive(Debug, Default)]
-#[repr(transparent)]
-pub struct IovecVec(pub Vec<iovec>);
+#[derive(Default)]
+pub struct IovecVec(pub Vec<RawAliasedIoSlice>);
 
 // Safety: See struct-level documentation
 unsafe impl Send for IovecVec {}
 
-// ChainsMemoryRepr implemented for IovecVec - the default representation type.
-// Raw iovec has no lifetime, avoiding the need for fake 'static lifetimes.
 unsafe impl ChainsMemoryRepr for IovecVec {
     type Meta = ();
 
@@ -108,7 +103,7 @@ unsafe impl ChainsMemoryRepr for IovecVec {
     }
 
     fn total_bytes(&self) -> usize {
-        self.0.iter().map(|s| s.iov_len).sum()
+        self.0.total_len()
     }
 
     fn clear(&mut self, _meta: &mut ()) {
@@ -118,17 +113,12 @@ unsafe impl ChainsMemoryRepr for IovecVec {
 
 unsafe impl AdvanceBytes for IovecVec {
     fn advance(&mut self, bytes: usize) {
-        advance_raw_iovecs(&mut self.0, bytes);
+        self.0.advance(bytes);
     }
 }
 
 unsafe impl TruncateBytes for IovecVec {
     fn truncate_bytes(&mut self, max_bytes: usize) {
-        // Safety: IoSliceMut is #[repr(transparent)] over iovec.
-        let slices: &mut [IoSliceMut] = unsafe {
-            std::slice::from_raw_parts_mut(self.0.as_mut_ptr() as *mut IoSliceMut, self.0.len())
-        };
-        let keep = truncate_iovecs(slices, max_bytes).len();
-        self.0.truncate(keep);
+        self.0.truncate_bytes(max_bytes);
     }
 }

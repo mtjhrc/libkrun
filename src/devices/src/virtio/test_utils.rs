@@ -106,23 +106,6 @@ pub struct BuiltChain {
     pub segments: Vec<DescSegment>,
 }
 
-impl BuiltChain {
-    /// Total length of all segments in this chain
-    pub fn total_len(&self) -> u32 {
-        self.segments.iter().map(|s| s.len).sum()
-    }
-
-    /// Check if this chain is readable (TX - has expected data)
-    pub fn is_readable(&self) -> bool {
-        self.segments.iter().any(|s| s.expected_data.is_some())
-    }
-
-    /// Check if this chain is writable (RX - no expected data)
-    pub fn is_writable(&self) -> bool {
-        self.segments.iter().all(|s| s.expected_data.is_none())
-    }
-}
-
 /// Expected state for a chain in the used ring.
 #[derive(Debug, Clone)]
 pub enum ExpectedUsed<'a> {
@@ -192,7 +175,7 @@ impl<'a> VirtQueueDriver<'a> {
     // Chain building methods
     // ========================================================================
 
-    /// Add a readable chain (for TX). Each slice in `segments` becomes a descriptor.
+    /// Add a readable chain. Each slice in `segments` becomes a descriptor.
     ///
     /// Simple case (1 descriptor): `driver.readable(&[b"data"])`
     /// Chained case: `driver.readable(&[b"header", b"payload"])`
@@ -234,80 +217,6 @@ impl<'a> VirtQueueDriver<'a> {
         self.add_to_avail_ring(head_idx);
 
         // Track chain
-        self.chains.borrow_mut().push(BuiltChain {
-            head_index: head_idx,
-            segments: chain_segments,
-        });
-
-        self
-    }
-
-    /// Add a chain with readable prefix and writable suffix.
-    ///
-    /// This is used to test that RX handlers correctly skip readable descriptors.
-    /// Example: `driver.readable_then_writable(&[b"header"], &[1500])`
-    pub fn readable_then_writable(&self, readable: &[&[u8]], writable: &[u32]) -> &Self {
-        assert!(
-            !readable.is_empty() || !writable.is_empty(),
-            "chain must have at least one segment"
-        );
-        let head_idx = self.desc_idx.get() as u16;
-        let mut chain_segments = Vec::new();
-        let total_segments = readable.len() + writable.len();
-        let mut segment_counter = 0;
-
-        // Add readable descriptors
-        for data in readable.iter() {
-            let addr = self.next_addr.get();
-            self.next_addr.set(addr + data.len() as u64);
-            assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
-
-            self.mem.write(data, GuestAddress(addr)).unwrap();
-
-            let idx = self.desc_idx.get();
-            assert!(idx < self.queue_size as usize, "descriptor table full");
-
-            segment_counter += 1;
-            let is_last = segment_counter == total_segments;
-            let flags = if is_last { 0 } else { VIRTQ_DESC_F_NEXT };
-            let next = if is_last { 0 } else { (idx + 1) as u16 };
-
-            self.write_descriptor(idx, addr, data.len() as u32, flags, next);
-            self.desc_idx.set(idx + 1);
-
-            chain_segments.push(DescSegment {
-                addr,
-                len: data.len() as u32,
-                expected_data: Some(data.to_vec()),
-            });
-        }
-
-        // Add writable descriptors
-        for &len in writable.iter() {
-            let addr = self.next_addr.get();
-            self.next_addr.set(addr + len as u64);
-            assert!(self.next_addr.get() <= MEM_SIZE, "out of memory");
-
-            let idx = self.desc_idx.get();
-            assert!(idx < self.queue_size as usize, "descriptor table full");
-
-            segment_counter += 1;
-            let is_last = segment_counter == total_segments;
-            let flags = VIRTQ_DESC_F_WRITE | if is_last { 0 } else { VIRTQ_DESC_F_NEXT };
-            let next = if is_last { 0 } else { (idx + 1) as u16 };
-
-            self.write_descriptor(idx, addr, len, flags, next);
-            self.desc_idx.set(idx + 1);
-
-            chain_segments.push(DescSegment {
-                addr,
-                len,
-                expected_data: None,
-            });
-        }
-
-        self.add_to_avail_ring(head_idx);
-
         self.chains.borrow_mut().push(BuiltChain {
             head_index: head_idx,
             segments: chain_segments,
@@ -409,18 +318,7 @@ impl<'a> VirtQueueDriver<'a> {
         }
         entries
     }
-
-    /// Get the number of used ring entries.
-    pub fn used_count(&self) -> u16 {
-        let used_idx_addr = self.used_ring.unchecked_add(2);
-        self.mem.read_obj(used_idx_addr).unwrap()
-    }
-
-    /// Get the number of chains tracked.
-    pub fn chain_count(&self) -> usize {
-        self.chains.borrow().len()
-    }
-
+    
     // ========================================================================
     // Verification methods
     // ========================================================================
@@ -435,7 +333,7 @@ impl<'a> VirtQueueDriver<'a> {
     pub fn assert_used(&self, expected: &[(usize, ExpectedUsed<'_>)]) {
         let used = self.used_entries();
         let chains = self.chains.borrow();
-
+        
         assert_eq!(
             used.len(),
             expected.len(),

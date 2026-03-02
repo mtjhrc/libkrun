@@ -3,28 +3,24 @@
 
 //! TX queue consumer for batched virtio transmit operations.
 
-use std::io::IoSlice;
 use std::ops::Range;
 
-use libc::iovec;
 use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 use super::super::queue::{DescriptorChain, Queue};
 use super::super::InterruptTransport;
+use super::aliased_ioslice::{AliasedIoSlice, RawAliasedIoSlice};
+use super::ioslice_container_utils::SliceOfIoSlicesExt;
 use super::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug, Clone)]
 struct ChainMeta<M: Default> {
     head_index: u16,
-    /// Total bytes in iovecs
     max_bytes: usize,
-    /// Bytes from guest descriptors (for add_used reporting)
     guest_len: usize,
-    /// Bytes sent so far (for partial send tracking)
     bytes_used: usize,
     finished: bool,
-    /// User-defined metadata
     user_meta: M,
 }
 
@@ -49,9 +45,6 @@ pub struct TxQueueConsumer<R: ChainsMemoryRepr = IovecVec> {
     chain_repr: Vec<R>,
     /// Metadata for each chain (parallel to chain_repr)
     chain_meta: Vec<ChainMeta<R::Meta>>,
-
-    /// Number of chains fully sent
-    sent_chains: usize,
 }
 
 impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
@@ -65,7 +58,6 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             max_chains,
             chain_repr: Vec::new(),
             chain_meta: Vec::new(),
-            sent_chains: 0,
         }
     }
 
@@ -85,7 +77,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Returns the number of chains added.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(Vec<IoSlice<'a>>) -> (R, R::Meta),
+        F: for<'a> FnMut(Vec<AliasedIoSlice<'a>>) -> (R, R::Meta),
     {
         let mut added = 0;
 
@@ -108,10 +100,10 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             };
 
             let head_index = head.index;
-            let mut iovecs: Vec<IoSlice<'_>> = Vec::new();
+            let mut iovecs: Vec<AliasedIoSlice<'_>> = Vec::new();
 
             for desc in head.into_iter().filter(DescriptorChain::is_read_only) {
-                if let Some(iov) = unsafe { self.desc_to_ioslice(&desc) } {
+                if let Some(iov) = unsafe { self.desc_to_volatile_ioslice(&desc) } {
                     iovecs.push(iov);
                 } else {
                     log::error!("Invalid descriptor: {desc:?}, skipping the chain",);
@@ -125,7 +117,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             }
 
             // Compute original chain length before transformation
-            let guest_len: usize = iovecs.iter().map(|s| s.len()).sum();
+            let guest_len = iovecs.total_len();
 
             // Apply transformation (callback takes ownership, returns representation)
             let (repr, user_meta) = transform(iovecs);
@@ -177,25 +169,22 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             return 0;
         }
 
+        let compact_count;
         let finished_count;
         {
-            let pending_storage = &mut self.chain_repr[self.sent_chains..];
-            let pending_meta = &mut self.chain_meta[self.sent_chains..];
-
             let mut batch = TxConsumerBatch {
-                chain_repr: pending_storage,
-                chain_meta: pending_meta,
+                chain_repr: &mut self.chain_repr,
+                chain_meta: &mut self.chain_meta,
                 queue: &mut self.queue,
                 mem: &self.mem,
                 first_finished: 0,
+                finished_count: 0,
             };
 
             f(&mut batch);
-            finished_count = batch.first_finished;
+            compact_count = batch.first_finished;
+            finished_count = batch.finished_count;
         }
-
-        // Update sent_chains based on what was finished
-        self.sent_chains += finished_count;
 
         if finished_count > 0 {
             self.signal_used_if_needed();
@@ -207,33 +196,25 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             self.chain_meta.len()
         );
 
-        self.compact();
+        self.compact(compact_count);
         finished_count
     }
 
-    /// Convert a descriptor to an IoSlice pointing into guest memory.
-    ///
-    unsafe fn desc_to_ioslice(&self, desc: &DescriptorChain) -> Option<IoSlice<'_>> {
+    /// Convert a descriptor to an AliasedIoSlice pointing into guest memory.
+    unsafe fn desc_to_volatile_ioslice(&self, desc: &DescriptorChain) -> Option<AliasedIoSlice<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        let ptr = slice.ptr_guard_mut().as_ptr();
-
         // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
-        let byte_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-        Some(IoSlice::new(byte_slice))
+        Some(unsafe { AliasedIoSlice::from_volatile(&slice) })
     }
 
-    /// Clears the finished chains from the begining.
-    fn compact(&mut self) {
-        if self.sent_chains > 0 {
-            // Clear representation properly (calls R::clear with meta)
-            for i in 0..self.sent_chains {
-                self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta);
-            }
-            self.chain_repr.drain(..self.sent_chains);
-            self.chain_meta.drain(..self.sent_chains);
-            self.sent_chains = 0;
+    /// Remove consecutive finished chains from the front.
+    fn compact(&mut self, count: usize) {
+        for i in 0..count {
+            self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta);
         }
+        self.chain_repr.drain(..count);
+        self.chain_meta.drain(..count);
     }
 
     /// Signal used queue interrupt if needed.
@@ -255,7 +236,8 @@ impl TxQueueConsumer<IovecVec> {
     /// transformation is needed.
     pub fn feed(&mut self) -> usize {
         self.feed_with_transform(|iovecs| {
-            let raw: Vec<iovec> = unsafe { std::mem::transmute(iovecs) };
+            // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
+            let raw = iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect();
             (IovecVec(raw), ())
         })
     }
@@ -263,19 +245,20 @@ impl TxQueueConsumer<IovecVec> {
 
 /// Specialized methods for the default IovecVec representation type.
 impl TxConsumerBatch<'_, IovecVec> {
-    /// Get a chain's iovecs as IoSlice references.
+    /// Get a chain's iovecs as `AliasedIoSlice` references.
     ///
     /// # Panics
     ///
     /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn io_slices(&self, index: usize) -> &[IoSlice<'_>] {
+    pub fn io_slices(&self, index: usize) -> &[AliasedIoSlice<'_>] {
         assert!(
             !self.chain_meta[index].finished,
             "io_slices: chain at index {} already finished",
             index
         );
         let slice = &self.chain_repr[index].0[..];
-        // iovec and IoSlice have the same memory layout
+        // Safety: AliasedIoSlice and RawAliasedIoSlice are both
+        // #[repr(transparent)] over iovec.
         unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), slice.len()) }
     }
 }
@@ -293,6 +276,8 @@ pub struct TxConsumerBatch<'a, R: ChainsMemoryRepr> {
     /// Index of first unfinished chain. Chains 0..first_finished are finished.
     /// For sequential finishing, this equals the number of finished chains.
     first_finished: usize,
+    /// Total number of chains finished in this batch (including out-of-order).
+    finished_count: usize,
 }
 
 impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
@@ -380,6 +365,7 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
             index
         );
         meta.finished = true;
+        self.finished_count += 1;
         log::trace!(
             "finish: index={} head_index={} guest_len={}",
             index,
@@ -393,7 +379,7 @@ impl<R: ChainsMemoryRepr> TxConsumerBatch<'_, R> {
             log::error!("TxConsumerBatch: failed to add_used: {e}");
         }
 
-        // Update first_finished for sequential finishing optimization
+        // Update first_finished
         if index == self.first_finished {
             while self.first_finished < self.chain_meta.len()
                 && self.chain_meta[self.first_finished].finished
@@ -446,8 +432,9 @@ impl<R: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, R> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::IoSlice;
-
+    use crate::virtio::batch_queue::aliased_ioslice::{
+        AliasedIoSlice, AnyIoSlice, RawAliasedIoSlice,
+    };
     use crate::virtio::batch_queue::IovecVec;
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
@@ -456,9 +443,11 @@ mod tests {
     /// Helper type alias for tests using default representation
     type TestTxConsumer = TxQueueConsumer;
 
-    /// Helper to convert IoSlice to IovecVec (for test callbacks)
-    fn to_iovec(iovecs: Vec<IoSlice<'_>>) -> IovecVec {
-        IovecVec(unsafe { std::mem::transmute(iovecs) })
+    /// Read the content of an AliasedIoSlice into a Vec for test assertions.
+    fn read_iov(iov: &AliasedIoSlice<'_>) -> Vec<u8> {
+        let mut buf = vec![0u8; iov.len()];
+        iov.read(&mut buf);
+        buf
     }
 
     #[test]
@@ -491,7 +480,7 @@ mod tests {
         let finished = consumer.consume(|batch| {
             assert_eq!(batch.len(), 1);
             assert_eq!(batch.io_slices(0).len(), 1);
-            assert_eq!(&*batch.io_slices(0)[0], b"Hello, World!");
+            assert_eq!(read_iov(&batch.io_slices(0)[0]), b"Hello, World!");
             batch.finish(0);
         });
 
@@ -516,8 +505,8 @@ mod tests {
 
         let finished = consumer.consume(|batch| {
             assert_eq!(batch.io_slices(0).len(), 2);
-            assert_eq!(&*batch.io_slices(0)[0], b"First");
-            assert_eq!(&*batch.io_slices(0)[1], b"Second");
+            assert_eq!(read_iov(&batch.io_slices(0)[0]), b"First");
+            assert_eq!(read_iov(&batch.io_slices(0)[1]), b"Second");
             batch.finish(0);
         });
 
@@ -592,13 +581,9 @@ mod tests {
         let added = consumer.feed_with_transform(|mut iovecs| {
             // Skip 4 bytes (like skipping vnet header)
             if !iovecs.is_empty() && iovecs[0].len() >= 4 {
-                let first = &iovecs[0];
-                let ptr = first.as_ptr();
-                let new_len = first.len() - 4;
-                let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(4), new_len) };
-                iovecs[0] = IoSlice::new(new_slice);
+                iovecs[0].advance(4);
             }
-            (to_iovec(iovecs), ())
+            (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
         });
 
         assert_eq!(added, 1);
@@ -729,7 +714,7 @@ mod tests {
         assert_eq!(consumer.pending_count(), 1);
 
         // Nothing should be in used ring yet
-        assert_eq!(driver.used_count(), 0);
+        driver.assert_used(&[]);
     }
 
     #[test]
@@ -750,13 +735,9 @@ mod tests {
         let added = consumer.feed_with_transform(|mut iovecs| {
             // Skip 12 bytes from first iovec
             if !iovecs.is_empty() && iovecs[0].len() >= 12 {
-                let first = &iovecs[0];
-                let ptr = first.as_ptr();
-                let new_len = first.len() - 12;
-                let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(12), new_len) };
-                iovecs[0] = IoSlice::new(new_slice);
+                iovecs[0].advance(12);
             }
-            (to_iovec(iovecs), ())
+            (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
         });
         assert_eq!(added, 1);
 
@@ -790,13 +771,9 @@ mod tests {
 
         let added = consumer.feed_with_transform(|mut iovecs| {
             if !iovecs.is_empty() && iovecs[0].len() >= 12 {
-                let first = &iovecs[0];
-                let ptr = first.as_ptr();
-                let new_len = first.len() - 12;
-                let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(12), new_len) };
-                iovecs[0] = IoSlice::new(new_slice);
+                iovecs[0].advance(12);
             }
-            (to_iovec(iovecs), ())
+            (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
         });
         assert_eq!(added, 1);
 
@@ -888,9 +865,7 @@ mod tests {
             batch.finish(1);
         });
 
-        // first_finished never advanced past 0 (chain 0 not finished),
-        // so compact doesn't remove anything yet
-        assert_eq!(finished, 0);
+        assert_eq!(finished, 2);
         assert_eq!(consumer.pending_count(), 4);
 
         // Used ring has both entries in finish-call order
@@ -904,7 +879,7 @@ mod tests {
             batch.finish(0);
         });
 
-        assert_eq!(finished, 2); // compact removes 0 and 1
+        assert_eq!(finished, 1);
         assert_eq!(consumer.pending_count(), 2); // chains 2 and 3 remain
 
         // Finish remaining: chain 2 (index 0) then chain 3 (index 1, already finished)
@@ -913,8 +888,8 @@ mod tests {
             batch.finish(0); // chain 2
         });
 
-        // first_finished: 0→1, then chain 1 (original 3) already finished → jumps to 2
-        assert_eq!(finished, 2);
+        // 1 chain finished this call, both drained (chain 3 was already finished)
+        assert_eq!(finished, 1);
         assert_eq!(consumer.pending_count(), 0);
 
         // All 4 in used ring in the order finish() was called
