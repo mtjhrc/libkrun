@@ -77,7 +77,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Returns the number of chains added.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(Vec<AliasedIoSlice<'a>>) -> (R, R::Meta),
+        F: for<'a> FnMut(std::vec::IntoIter<AliasedIoSlice<'a>>) -> (Vec<AliasedIoSlice<'a>>, R::Meta),
     {
         let mut added = 0;
 
@@ -119,21 +119,25 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             // Compute original chain length before transformation
             let guest_len = iovecs.total_len();
 
-            // Apply transformation (callback takes ownership, returns representation)
-            let (repr, user_meta) = transform(iovecs);
+            // Apply transformation (callback returns iovecs with same lifetime + metadata)
+            let (transformed, user_meta) = transform(iovecs.into_iter());
 
-            // Compute final length
-            let max_bytes = repr.total_bytes();
+            // Compute final length after transformation
+            let max_bytes = transformed.total_len();
 
-            // Track bytes already consumed by transform
-            let bytes_used = max_bytes - repr.total_bytes();
+            // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
+            let raw = transformed
+                .into_iter()
+                .map(|v| unsafe { RawAliasedIoSlice::from_any(v) })
+                .collect();
+            let repr = R::from_raw_iovecs(raw);
 
             self.chain_repr.push(repr);
             self.chain_meta.push(ChainMeta {
                 head_index,
                 max_bytes,
                 guest_len,
-                bytes_used,
+                bytes_used: 0,
                 finished: false,
                 user_meta,
             });
@@ -235,11 +239,7 @@ impl TxQueueConsumer<IovecVec> {
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs| {
-            // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
-            let raw = iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect();
-            (IovecVec(raw), ())
-        })
+        self.feed_with_transform(|iovecs| (iovecs.collect(), ()))
     }
 }
 
@@ -432,10 +432,7 @@ impl<R: ChainsMemoryRepr + AdvanceBytes> TxConsumerBatch<'_, R> {
 
 #[cfg(test)]
 mod tests {
-    use crate::virtio::batch_queue::aliased_ioslice::{
-        AliasedIoSlice, AnyIoSlice, RawAliasedIoSlice,
-    };
-    use crate::virtio::batch_queue::IovecVec;
+    use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AnyIoSlice};
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
     use super::TxQueueConsumer;
@@ -578,12 +575,13 @@ mod tests {
         let mut consumer: TestTxConsumer =
             TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(|mut iovecs| {
+        let added = consumer.feed_with_transform(|iovecs| {
+            let mut v: Vec<_> = iovecs.collect();
             // Skip 4 bytes (like skipping vnet header)
-            if !iovecs.is_empty() && iovecs[0].len() >= 4 {
-                iovecs[0].advance(4);
+            if !v.is_empty() && v[0].len() >= 4 {
+                v[0].advance(4);
             }
-            (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
+            (v, ())
         });
 
         assert_eq!(added, 1);
@@ -732,12 +730,13 @@ mod tests {
         let mut consumer: TestTxConsumer =
             TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(|mut iovecs| {
+        let added = consumer.feed_with_transform(|iovecs| {
+            let mut v: Vec<_> = iovecs.collect();
             // Skip 12 bytes from first iovec
-            if !iovecs.is_empty() && iovecs[0].len() >= 12 {
-                iovecs[0].advance(12);
+            if !v.is_empty() && v[0].len() >= 12 {
+                v[0].advance(12);
             }
-            (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
+            (v, ())
         });
         assert_eq!(added, 1);
 
@@ -769,11 +768,12 @@ mod tests {
         let mut consumer: TestTxConsumer =
             TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(|mut iovecs| {
-            if !iovecs.is_empty() && iovecs[0].len() >= 12 {
-                iovecs[0].advance(12);
+        let added = consumer.feed_with_transform(|iovecs| {
+            let mut v: Vec<_> = iovecs.collect();
+            if !v.is_empty() && v[0].len() >= 12 {
+                v[0].advance(12);
             }
-            (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
+            (v, ())
         });
         assert_eq!(added, 1);
 

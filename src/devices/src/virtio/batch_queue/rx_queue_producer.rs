@@ -80,7 +80,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     ///
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(Vec<AliasedIoSliceMut<'a>>) -> (R, R::Meta),
+        F: for<'a> FnMut(std::vec::IntoIter<AliasedIoSliceMut<'a>>) -> (Vec<AliasedIoSliceMut<'a>>, R::Meta),
     {
         let mut added = 0;
 
@@ -122,11 +122,18 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             // Compute original chain length before transformation
             let max_bytes = iovecs.total_len();
 
-            // Apply transformation (callback takes ownership, returns representation)
-            let (repr, user_meta) = transform(iovecs);
+            // Apply transformation (callback returns iovecs with same lifetime + metadata)
+            let (transformed, user_meta) = transform(iovecs.into_iter());
 
             // Track bytes already consumed by transform
-            let bytes_used = max_bytes - repr.total_bytes();
+            let bytes_used = max_bytes - transformed.total_len();
+
+            // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
+            let raw = transformed
+                .into_iter()
+                .map(|v| unsafe { RawAliasedIoSlice::from_any(v) })
+                .collect();
+            let repr = R::from_raw_iovecs(raw);
 
             self.chain_repr.push(repr);
             self.chain_meta.push(ChainMeta {
@@ -243,11 +250,7 @@ impl RxQueueProducer<IovecVec> {
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs| {
-            // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
-            let raw = iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect();
-            (IovecVec(raw), ())
-        })
+        self.feed_with_transform(|iovecs| (iovecs.collect(), ()))
     }
 }
 
@@ -589,7 +592,7 @@ mod tests {
 
     use crate::virtio::batch_queue::aliased_ioslice::{AnyIoSlice, RawAliasedIoSlice};
     use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
-    use crate::virtio::batch_queue::{ChainsMemoryRepr, IovecVec, ReceivedLen};
+    use crate::virtio::batch_queue::{ChainsMemoryRepr, ReceivedLen};
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
     use super::RxQueueProducer;
@@ -739,13 +742,14 @@ mod tests {
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         let feed_with_hdr = |p: &mut TestRxProducer| {
-            p.feed_with_transform(|mut iovecs| {
-                iovecs.as_mut_slice().write(b"HD");
+            p.feed_with_transform(|iovecs| {
+                let mut v: Vec<_> = iovecs.collect();
+                v.as_mut_slice().write(b"HD");
                 // Remove fully consumed iovecs from the front
-                let orig_len = iovecs.len();
-                let remaining_len = iovecs.as_mut_slice().advance(2).len();
-                iovecs.drain(..orig_len - remaining_len);
-                (IovecVec(iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect()), ())
+                let orig_len = v.len();
+                let remaining_len = v.as_mut_slice().advance(2).len();
+                v.drain(..orig_len - remaining_len);
+                (v, ())
             })
         };
 
@@ -919,6 +923,13 @@ mod tests {
             self.iovecs.total_len()
         }
 
+        fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self {
+            CustomChainRepr {
+                iovecs,
+                received_len: Cell::new(0),
+            }
+        }
+
         fn clear(&mut self, _meta: &mut u32) {
             self.iovecs.clear();
             self.received_len.set(0);
@@ -950,11 +961,7 @@ mod tests {
         let mut tag = 0u32;
         let added = producer.feed_with_transform(|iovecs| {
             tag += 10;
-            let repr = CustomChainRepr {
-                iovecs: iovecs.into_iter().map(|v| unsafe { RawAliasedIoSlice::from_any(v) }).collect(),
-                received_len: Cell::new(0),
-            };
-            (repr, tag)
+            (iovecs.collect(), tag)
         });
         assert_eq!(added, 4);
 

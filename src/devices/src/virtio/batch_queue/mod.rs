@@ -47,6 +47,13 @@ pub unsafe trait ChainsMemoryRepr: Sized + Send {
     /// Total bytes across all slices.
     fn total_bytes(&self) -> usize;
 
+    /// Construct from raw iovec storage.
+    ///
+    /// Called internally by `feed_with_transform` after the user's callback
+    /// returns the (possibly transformed) iovecs. The raw iovecs point into
+    /// guest memory whose validity is guaranteed by the calling producer/consumer.
+    fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self;
+
     /// Release owned resources. Always called by the consumer/producer before
     /// drop, with the external `Meta` needed for cleanup.
     fn clear(&mut self, meta: &mut Self::Meta);
@@ -104,6 +111,10 @@ unsafe impl ChainsMemoryRepr for IovecVec {
 
     fn total_bytes(&self) -> usize {
         self.0.total_len()
+    }
+
+    fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self {
+        IovecVec(iovecs)
     }
 
     fn clear(&mut self, _meta: &mut ()) {
