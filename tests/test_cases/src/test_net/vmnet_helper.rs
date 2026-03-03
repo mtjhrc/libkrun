@@ -1,6 +1,7 @@
 //! vmnet-helper backend for virtio-net test (macOS only)
 
 use crate::{krun_call, ShouldRun, TestSetup};
+use krun_sys::{NET_FEATURE_CSUM, NET_FEATURE_GUEST_CSUM};
 use nix::libc;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read};
@@ -140,11 +141,16 @@ fn start_vmnet_helper(log_path: &std::path::Path) -> std::io::Result<VmnetConfig
             let helper_c = CString::new(helper.as_str()).unwrap();
             let arg_fd = CString::new("--fd").unwrap();
             let arg_fd_val = CString::new("3").unwrap();
+            // TODO: Enable when TSO is working.
+            // let arg_tso = CString::new("--enable-tso").unwrap();
+            let arg_csum = CString::new("--enable-checksum-offload").unwrap();
             libc::execlp(
                 helper_c.as_ptr(),
                 helper_c.as_ptr(),
                 arg_fd.as_ptr(),
                 arg_fd_val.as_ptr(),
+                // arg_tso.as_ptr(),
+                arg_csum.as_ptr(),
                 std::ptr::null::<libc::c_char>(),
             );
             libc::_exit(1);
@@ -237,7 +243,8 @@ pub(crate) fn setup_backend(ctx: u32, test_setup: &TestSetup) -> anyhow::Result<
             std::ptr::null(),
             config.fd,
             config.mac.as_mut_ptr(),
-            0, // no offloading - vmnet-helper uses raw ethernet frames
+            // TODO: Enable TSO (HOST_TSO4, GUEST_TSO4, etc.) — currently hangs.
+            NET_FEATURE_CSUM | NET_FEATURE_GUEST_CSUM,
             0, // no VFKIT flag
         ))?;
     }
