@@ -14,7 +14,8 @@ use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::batch_queue::iovec_utils::{advance_tx_iovecs_vec, write_to_iovecs};
+use crate::virtio::batch_queue::aliased_ioslice::RawAliasedIoSlice;
+use crate::virtio::batch_queue::ioslice_container_utils::{SliceOfIoSlicesExt, VecOfIoSlicesExt};
 use crate::virtio::batch_queue::{ChainsMemoryRepr, ReceivedLen, RxQueueProducer, TxQueueConsumer};
 use crate::virtio::queue::Queue;
 use crate::virtio::InterruptTransport;
@@ -42,8 +43,8 @@ type RawMsgHdr = msghdr_x;
 /// For RX, use `received_len()` to get the kernel-filled byte count.
 ///
 /// # Safety
-/// Uses `mem::forget` to transfer iovec Vec ownership into the header.
-/// The capacity is stored in `Meta` for proper cleanup via `Vec::from_raw_parts()`.
+/// `from_raw_iovecs` leaks a `Box<[iovec]>` into the header pointer;
+/// `clear()` reconstructs and drops it.
 #[repr(transparent)]
 pub struct MsgHdr(RawMsgHdr);
 
@@ -52,8 +53,7 @@ pub struct MsgHdr(RawMsgHdr);
 unsafe impl Send for MsgHdr {}
 
 unsafe impl ChainsMemoryRepr for MsgHdr {
-    /// Stores the Vec capacity for cleanup
-    type Meta = usize;
+    type Meta = ();
 
     fn len(&self) -> usize {
         #[cfg(target_os = "linux")]
@@ -76,23 +76,13 @@ unsafe impl ChainsMemoryRepr for MsgHdr {
         }
     }
 
-    fn clear(&mut self, capacity: &mut Self::Meta) {
-        let (ptr, len) = self.iov_ptr_len();
-        if !ptr.is_null() {
-            // Reconstruct Vec to drop it properly
-            unsafe {
-                let _: Vec<iovec> = Vec::from_raw_parts(ptr, len, *capacity);
-            }
-            self.set_iov_null();
-            *capacity = 0;
-        }
-    }
-}
+    fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self {
+        // into_boxed_slice() shrinks so capacity == len; clear() reconstructs
+        // the same Box to deallocate.
+        let boxed = iovecs.into_boxed_slice();
+        let len = boxed.len();
+        let iov_ptr = Box::into_raw(boxed) as *mut iovec;
 
-impl MsgHdr {
-    /// Create MsgHdr from raw iovec pointer and length.
-    #[inline]
-    fn from_raw(iov_ptr: *mut iovec, len: usize) -> Self {
         #[cfg(target_os = "linux")]
         {
             let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
@@ -111,6 +101,19 @@ impl MsgHdr {
         }
     }
 
+    fn clear(&mut self, _meta: &mut Self::Meta) {
+        let (ptr, len) = self.iov_ptr_len();
+        if !ptr.is_null() {
+            // Reconstruct the Box<[iovec]> leaked in from_raw_iovecs
+            unsafe {
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
+            }
+            self.set_iov_null();
+        }
+    }
+}
+
+impl MsgHdr {
     #[inline]
     fn iov_ptr_len(&self) -> (*mut iovec, usize) {
         #[cfg(target_os = "linux")]
@@ -268,31 +271,12 @@ impl NetBackend for Unixgram {
         };
 
         // Feed frames from queue, skipping vnet header
-        let fed = self.tx_consumer.feed_with_transform(|mut iovecs| {
-            let orig_len = iovecs.len();
-            let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
+        let fed = self.tx_consumer.feed_with_transform(|iovecs| {
+            let mut v: Vec<_> = iovecs.collect();
             if skip > 0 {
-                advance_tx_iovecs_vec(&mut iovecs, skip);
+                v.advance(skip);
             }
-            let ptr = iovecs.as_mut_ptr() as *mut iovec;
-            let len = iovecs.len();
-            let cap = iovecs.capacity();
-            let total_bytes: usize = unsafe {
-                std::slice::from_raw_parts(ptr as *const iovec, len)
-                    .iter()
-                    .map(|iov| iov.iov_len)
-                    .sum()
-            };
-            log::info!(
-                "TX feed: orig_iovecs={} orig_bytes={} after_skip: iovecs={} bytes={} cap={}",
-                orig_len,
-                orig_bytes,
-                len,
-                total_bytes,
-                cap
-            );
-            std::mem::forget(iovecs);
-            (MsgHdr::from_raw(ptr, len), cap)
+            (v, ())
         });
         if fed > 0 {
             log::info!(
@@ -328,30 +312,15 @@ impl NetBackend for Unixgram {
         );
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
-        let rx_fed = self.rx_producer.feed_with_transform(|mut iovecs| {
-            let orig_len = iovecs.len();
-            let orig_bytes: usize = iovecs.iter().map(|s| s.len()).sum();
+        let rx_fed = self.rx_producer.feed_with_transform(|iovecs| {
+            let mut v: Vec<_> = iovecs.collect();
             if vnet_offset > 0 {
                 // Write default vnet header to beginning of buffer
-                write_to_iovecs(&mut iovecs, &super::DEFAULT_VNET_HDR);
+                v.as_mut_slice().write(&super::DEFAULT_VNET_HDR);
                 // Advance iovecs past vnet header so receive goes after it
-                crate::virtio::batch_queue::iovec_utils::advance_iovecs_vec(
-                    &mut iovecs,
-                    vnet_offset,
-                );
+                v.advance(vnet_offset);
             }
-            let ptr = iovecs.as_mut_ptr() as *mut iovec;
-            let len = iovecs.len();
-            let cap = iovecs.capacity();
-            log::info!(
-                "RX feed: orig_iovecs={} orig_bytes={} after_vnet: iovecs={} cap={}",
-                orig_len,
-                orig_bytes,
-                len,
-                cap
-            );
-            std::mem::forget(iovecs);
-            (MsgHdr::from_raw(ptr, len), cap)
+            (v, ())
         });
         if rx_fed > 0 {
             log::info!(
@@ -388,12 +357,9 @@ impl Unixgram {
             let ret = unsafe { libc::sendmmsg(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT) };
 
             if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                match err.kind() {
-                    std::io::ErrorKind::WouldBlock => {}
-                    _ => {
-                        log::error!("sendmmsg failed: {err}");
-                    }
+                let err = nix::errno::Errno::last();
+                if err != nix::errno::Errno::EAGAIN {
+                    log::error!("sendmmsg failed: {err}");
                 }
                 return;
             }
@@ -429,8 +395,8 @@ impl Unixgram {
                 }
                 0 => log::warn!("recvmmsg returned 0 (unexpected)"),
                 _ => {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                    let err = nix::errno::Errno::last();
+                    if err != nix::errno::Errno::EAGAIN {
                         log::error!("recvmmsg failed: {err}");
                     }
                 }
@@ -450,25 +416,6 @@ impl Unixgram {
             let storage = batch.chains(0..len);
             let ptr = storage.as_ptr() as *const super::socket_x::msghdr_x;
 
-            // Debug: log each msghdr_x before sending
-            for i in 0..len {
-                let hdr = unsafe { &*ptr.add(i) };
-                let total: usize = if !hdr.msg_iov.is_null() && hdr.msg_iovlen > 0 {
-                    unsafe {
-                        std::slice::from_raw_parts(hdr.msg_iov, hdr.msg_iovlen as usize)
-                            .iter()
-                            .map(|iov| iov.iov_len)
-                            .sum()
-                    }
-                } else {
-                    0
-                };
-                log::info!(
-                    "sendmsg_x[{}]: iovlen={} total_bytes={} msg_datalen={} msg_flags={} msg_name={:?} msg_control={:?}",
-                    i, hdr.msg_iovlen, total, hdr.msg_datalen, hdr.msg_flags, hdr.msg_name, hdr.msg_control
-                );
-            }
-
             let ret = unsafe {
                 super::socket_x::sendmsg_x(
                     fd,
@@ -478,16 +425,11 @@ impl Unixgram {
                 )
             };
 
-            log::info!("sendmsg_x(fd={}, cnt={}) = {}", fd, len, ret);
-
             if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                log::info!("sendmsg_x error: {:?} (raw={})", err.kind(), err.raw_os_error().unwrap_or(-1));
-                match err.kind() {
-                    std::io::ErrorKind::WouldBlock => {}
-                    _ => {
-                        log::error!("sendmsg_x failed: {err:?}");
-                    }
+                let err = nix::errno::Errno::last();
+                match err {
+                    nix::errno::Errno::EAGAIN | nix::errno::Errno::ENOBUFS => {}
+                    _ => log::error!("sendmsg_x failed: {err:?}"),
                 }
                 return;
             }
@@ -502,8 +444,6 @@ impl Unixgram {
         let fd = self.fd.as_raw_fd();
 
         self.rx_producer.produce(|batch| {
-            log::info!("recv_macos: {} chains available", batch.len());
-
             let len = batch.len();
             let ret = {
                 let storage = batch.chains_mut(0..len);
@@ -513,17 +453,16 @@ impl Unixgram {
                 }
             };
 
-            log::info!("recvmsg_x(fd={}, cnt={}) = {}", fd, len, ret);
-
             match ret {
                 n if n > 0 => {
                     batch.complete_received_many(0..n as usize);
                 }
                 0 => log::warn!("recvmsg_x returned 0 (unexpected)"),
                 _ => {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() != std::io::ErrorKind::WouldBlock {
-                        log::error!("recvmsg_x failed: {err}");
+                    let err = nix::errno::Errno::last();
+                    match err {
+                        nix::errno::Errno::EAGAIN | nix::errno::Errno::ENOBUFS => {}
+                        _ => log::error!("recvmsg_x failed: {err}"),
                     }
                 }
             }

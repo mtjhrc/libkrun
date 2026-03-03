@@ -4,9 +4,8 @@ use libc::{
 };
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
-use nix::sys::uio::{readv, writev};
 use nix::{ioctl_write_int, ioctl_write_ptr};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::{io, mem, ptr};
 use utils::fd::SetNonblockingExt;
 use virtio_bindings::virtio_net::{
@@ -16,6 +15,7 @@ use virtio_bindings::virtio_net::{
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
+use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
 use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::queue::Queue;
 use crate::virtio::InterruptTransport;
@@ -105,7 +105,7 @@ impl Tap {
 
 impl NetBackend for Tap {
     fn send(&mut self) -> Result<(), WriteError> {
-        let fd = self.fd.as_fd();
+        let raw_fd = self.fd.as_raw_fd();
 
         self.tx_consumer.feed();
 
@@ -118,11 +118,17 @@ impl NetBackend for Tap {
                 if chain.is_empty() {
                     continue;
                 }
-                match writev(fd, chain) {
-                    Ok(_) => batch.finish(i),
-                    Err(nix::errno::Errno::EAGAIN) => break,
-                    Err(e) => {
-                        log::error!("writev to tap failed: {e:?}");
+                let ret = unsafe {
+                    libc::writev(raw_fd, chain.as_iovec_ptr(), chain.len() as c_int)
+                };
+                match ret {
+                    n if n >= 0 => batch.finish(i),
+                    _ => {
+                        let err = nix::errno::Errno::last();
+                        if err == nix::errno::Errno::EAGAIN {
+                            break;
+                        }
+                        log::error!("writev to tap failed: {err:?}");
                         break;
                     }
                 }
@@ -133,7 +139,7 @@ impl NetBackend for Tap {
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
-        let fd = self.fd.as_fd();
+        let raw_fd = self.fd.as_raw_fd();
 
         self.rx_producer.feed();
 
@@ -145,11 +151,18 @@ impl NetBackend for Tap {
                     break;
                 }
 
-                match readv(fd, iovecs) {
-                    Ok(n) => batch.complete(i, n),
-                    Err(nix::errno::Errno::EAGAIN) => break,
-                    Err(e) => {
-                        log::error!("readv from tap failed: {e:?}");
+                let ret = unsafe {
+                    libc::readv(raw_fd, iovecs.as_iovec_ptr(), iovecs.len() as c_int)
+                };
+                match ret {
+                    n if n > 0 => batch.complete(i, n as usize),
+                    0 => break, // EOF
+                    _ => {
+                        let err = nix::errno::Errno::last();
+                        if err == nix::errno::Errno::EAGAIN {
+                            break;
+                        }
+                        log::error!("readv from tap failed: {err:?}");
                     }
                 }
             }

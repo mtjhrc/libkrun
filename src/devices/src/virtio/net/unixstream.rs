@@ -1,27 +1,21 @@
 use nix::sys::socket::{
     connect, getsockopt, setsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
 };
-use nix::sys::uio::readv;
 use nix::unistd::read;
-use std::io::IoSlice;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::batch_queue::iovec_utils::{advance_tx_iovecs_vec, iovecs_len, truncate_iovecs};
-use crate::virtio::batch_queue::{IovecVec, RxQueueProducer, TxQueueConsumer};
+use crate::virtio::batch_queue::aliased_ioslice::AliasedIoSlice;
+use crate::virtio::batch_queue::ioslice_container_utils::{SliceOfIoSlicesExt, VecOfIoSlicesExt};
+use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
 use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};
 use super::FRAME_HEADER_LEN;
-
-/// Helper to convert IoSlice to IovecVec
-fn to_iovec(iovecs: Vec<IoSlice<'_>>) -> IovecVec {
-    IovecVec(unsafe { std::mem::transmute::<Vec<IoSlice<'_>>, Vec<libc::iovec>>(iovecs) })
-}
 
 /// Try to read/complete the frame length header.
 /// Returns Some(frame_len) when complete, None if incomplete or EAGAIN.
@@ -57,14 +51,15 @@ pub struct Unixstream {
     backend_handles_vnet_hdr: bool,
     tx_consumer: TxQueueConsumer,
     rx_producer: RxQueueProducer,
+    /// Shared frame-length header buffer for TX. Written before each writev
+    /// when the chain hasn't been partially sent yet.
+    tx_frame_header: Box<[u8; FRAME_HEADER_LEN]>,
     /// For RX: partial frame length header buffer
     rx_header_buf: [u8; FRAME_HEADER_LEN],
     /// For RX: bytes read into rx_header_buf so far
     rx_header_pos: usize,
     /// For RX: expected frame length (None when header not yet complete)
     expecting_frame_length: Option<u32>,
-    // TODO: lets have one allocation ptr for the u32 sending length box, and use that for every
-    // packet where we need to send the length or actually it could even be our expecting_frame_length LOL
 }
 
 impl Unixstream {
@@ -100,6 +95,7 @@ impl Unixstream {
             backend_handles_vnet_hdr,
             tx_consumer,
             rx_producer: rx_provider,
+            tx_frame_header: Box::new([0u8; FRAME_HEADER_LEN]),
             rx_header_buf: [0u8; FRAME_HEADER_LEN],
             rx_header_pos: 0,
             expecting_frame_length: None,
@@ -161,19 +157,14 @@ impl NetBackend for Unixstream {
             0
         };
 
-        // Feed frames from queue, prepending frame length header
-        let fed = self.tx_consumer.feed_with_transform(|mut iovecs| {
-            // Skip vnet header
-            advance_tx_iovecs_vec(&mut iovecs, skip);
-
-            // Calculate payload length (after vnet skip)
-            let payload_len = iovecs_len(&iovecs);
-
-            // FIXME: This leaks memory! Need proper header storage in TxQueueConsumer.
-            // For now, Box::leak the header bytes to get 'static lifetime.
-            let header = Box::leak(Box::new((payload_len as u32).to_be_bytes()));
-            iovecs.insert(0, IoSlice::new(header));
-            (to_iovec(iovecs), ())
+        // Prepend a header iovec pointing to our shared tx_frame_header buffer.
+        // The actual length value is written before each writev in consume().
+        let header_ptr = self.tx_frame_header.as_ptr();
+        let fed = self.tx_consumer.feed_with_transform(|iovecs| {
+            let mut v: Vec<_> = iovecs.collect();
+            v.advance(skip);
+            v.insert(0, unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
+            (v, ())
         });
         log::trace!(
             "Unixstream::send() fed {} frames, pending={}",
@@ -185,9 +176,10 @@ impl NetBackend for Unixstream {
             return Ok(());
         }
 
-        let fd = self.fd.as_fd();
+        let raw_fd = self.fd.as_raw_fd();
+        let header_ptr = self.tx_frame_header.as_mut_ptr() as *mut u32;
 
-        // Chains already have header prepended, just writev each one
+        // Chains have header iovec prepended; fill in the length before each writev.
         self.tx_consumer.consume(|batch| {
             for i in 0..batch.len() {
                 let chain = batch.io_slices(i);
@@ -195,11 +187,25 @@ impl NetBackend for Unixstream {
                     continue;
                 }
 
-                match nix::sys::uio::writev(fd, chain) {
-                    Ok(_) => batch.finish(i),
-                    Err(nix::errno::Errno::EAGAIN) => break,
-                    Err(e) => {
-                        log::error!("writev to unixstream failed: {e:?}");
+                // On first attempt (nothing sent yet), write the payload length
+                // into the shared header buffer via raw pointer (the iovecs
+                // alias this memory, so we must not create a &mut reference).
+                if batch.bytes_used(i) == 0 {
+                    let payload_len: usize = chain[1..].total_len();
+                    unsafe { std::ptr::write_volatile(header_ptr, (payload_len as u32).to_be()) };
+                }
+
+                let ret = unsafe {
+                    libc::writev(raw_fd, chain.as_iovec_ptr(), chain.len() as libc::c_int)
+                };
+                match ret {
+                    n if n >= 0 => batch.finish(i),
+                    _ => {
+                        let err = nix::errno::Errno::last();
+                        if err == nix::errno::Errno::EAGAIN {
+                            break;
+                        }
+                        log::error!("writev to unixstream failed: {err:?}");
                         break;
                     }
                 }
@@ -210,7 +216,8 @@ impl NetBackend for Unixstream {
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
-        let fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
+        let fd = self.fd.as_fd();
+        let raw_fd = self.fd.as_raw_fd();
         let vnet_offset = if !self.backend_handles_vnet_hdr {
             super::vnet_hdr_len()
         } else {
@@ -240,20 +247,26 @@ impl NetBackend for Unixstream {
 
                 // Read payload (truncated to remaining frame bytes)
                 let remaining = total_len - batch.bytes_used(i);
-                let iovecs = truncate_iovecs(batch.io_slices_mut(i), remaining);
+                let iovecs = batch.io_slices_mut(i).truncate(remaining);
 
-                match readv(fd, iovecs) {
-                    Ok(n) if n > 0 => {
-                        batch.advance(i, n);
+                let ret = unsafe {
+                    libc::readv(raw_fd, iovecs.as_iovec_ptr(), iovecs.len() as libc::c_int)
+                };
+                match ret {
+                    n if n > 0 => {
+                        batch.advance(i, n as usize);
                         if batch.bytes_used(i) >= total_len {
                             batch.finish(i);
                             *expecting = None;
                         }
                     }
-                    Ok(_) => break, // EOF or 0 bytes
-                    Err(nix::errno::Errno::EAGAIN) => break,
-                    Err(e) => {
-                        log::error!("readv from unixstream failed: {e:?}");
+                    0 => break, // EOF
+                    _ => {
+                        let err = nix::errno::Errno::last();
+                        if err == nix::errno::Errno::EAGAIN {
+                            break;
+                        }
+                        log::error!("readv from unixstream failed: {err:?}");
                         break;
                     }
                 }

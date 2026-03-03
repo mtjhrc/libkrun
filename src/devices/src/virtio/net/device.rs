@@ -21,7 +21,7 @@ use std::io::Write;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use virtio_bindings::{virtio_net::VIRTIO_NET_F_MAC, virtio_ring::VIRTIO_RING_F_EVENT_IDX};
-use vm_memory::{ByteValued, GuestMemoryMmap};
+use vm_memory::{ByteValued, GuestMemory, GuestMemoryMmap};
 
 const VIRTIO_F_VERSION_1: u32 = 32;
 
