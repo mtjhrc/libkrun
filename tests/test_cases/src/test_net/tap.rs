@@ -1,6 +1,6 @@
 //! TAP backend for virtio-net test
 
-use crate::{ShouldRun, TestSetup};
+use crate::{krun_call, ShouldRun, TestSetup};
 use krun_sys::COMPAT_NET_FEATURES;
 use nix::libc;
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
@@ -20,14 +20,11 @@ type KrunAddNetTapFn = unsafe extern "C" fn(
     flags: u32,
 ) -> i32;
 
-fn get_krun_add_net_tap() -> Option<KrunAddNetTapFn> {
+fn get_krun_add_net_tap() -> KrunAddNetTapFn {
     let symbol = CString::new("krun_add_net_tap").unwrap();
     let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr()) };
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { std::mem::transmute(ptr) })
-    }
+    assert!(!ptr.is_null(), "krun_add_net_tap not found");
+    unsafe { std::mem::transmute(ptr) }
 }
 
 fn interface_exists(name: &str) -> bool {
@@ -80,19 +77,25 @@ fn make_sockaddr_in(ip: [u8; 4]) -> libc::sockaddr {
 }
 
 fn create_tap(name: &str) -> std::io::Result<()> {
-    let tun = OpenOptions::new().read(true).write(true).open("/dev/net/tun")?;
+    let tun = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")?;
     let mut ifr: Ifreq = unsafe { std::mem::zeroed() };
     set_interface_name(&mut ifr, name);
     ifr.ifr_ifru.ifru_flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR;
-    unsafe { ioctl_tunsetiff(tun.as_raw_fd(), &ifr) }
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    unsafe { ioctl_tunsetpersist(tun.as_raw_fd(), 1) }
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    unsafe { ioctl_tunsetiff(tun.as_raw_fd(), &ifr) }.map_err(std::io::Error::other)?;
+    unsafe { ioctl_tunsetpersist(tun.as_raw_fd(), 1) }.map_err(std::io::Error::other)?;
     Ok(())
 }
 
 fn configure_host_interface(name: &str, ip: [u8; 4], netmask: [u8; 4]) -> nix::Result<()> {
-    let sock = socket(AddressFamily::Inet, SockType::Datagram, SockFlag::empty(), None)?;
+    let sock = socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )?;
     let fd = sock.as_raw_fd();
 
     let mut ifr: Ifreq = unsafe { std::mem::zeroed() };
@@ -114,12 +117,9 @@ fn configure_host_interface(name: &str, ip: [u8; 4], netmask: [u8; 4]) -> nix::R
     Ok(())
 }
 
-pub fn should_run() -> ShouldRun {
+pub(crate) fn should_run() -> ShouldRun {
     if cfg!(target_os = "macos") {
         return ShouldRun::No("TAP not supported on macOS");
-    }
-    if get_krun_add_net_tap().is_none() {
-        return ShouldRun::No("libkrun compiled without NET");
     }
     if let Ok(tap_name) = std::env::var("LIBKRUN_TAP_NAME") {
         if !interface_exists(&tap_name) {
@@ -131,7 +131,22 @@ pub fn should_run() -> ShouldRun {
     ShouldRun::Yes
 }
 
-pub fn setup_backend(ctx: u32, _test_setup: &TestSetup) -> anyhow::Result<()> {
+pub(crate) fn cleanup() {
+    if let Ok(tun) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")
+    {
+        let mut ifr: Ifreq = unsafe { std::mem::zeroed() };
+        set_interface_name(&mut ifr, DEFAULT_TAP_NAME);
+        ifr.ifr_ifru.ifru_flags = IFF_TAP | IFF_NO_PI;
+        if unsafe { ioctl_tunsetiff(tun.as_raw_fd(), &ifr) }.is_ok() {
+            let _ = unsafe { ioctl_tunsetpersist(tun.as_raw_fd(), 0) };
+        }
+    }
+}
+
+pub(crate) fn setup_backend(ctx: u32, _test_setup: &TestSetup) -> anyhow::Result<()> {
     let tap_name = if let Ok(name) = std::env::var("LIBKRUN_TAP_NAME") {
         name
     } else {
@@ -144,15 +159,14 @@ pub fn setup_backend(ctx: u32, _test_setup: &TestSetup) -> anyhow::Result<()> {
     let mut mac: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
     let tap_name_c = CString::new(tap_name).unwrap();
 
-    let net_result = unsafe {
-        get_krun_add_net_tap().unwrap()(
+    unsafe {
+        krun_call!(get_krun_add_net_tap()(
             ctx,
             tap_name_c.as_ptr(),
             mac.as_mut_ptr(),
             COMPAT_NET_FEATURES,
             0,
-        )
-    };
-    anyhow::ensure!(net_result >= 0, "krun_add_net_tap failed: {}", net_result);
+        ))?;
+    }
     Ok(())
 }

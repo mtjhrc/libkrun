@@ -1,7 +1,5 @@
 //! Shared network configuration utilities for guest-side network setup
 //!
-//! This module provides low-level network interface configuration using ioctls,
-//! used by virtio-net tests to configure eth0 in the guest.
 
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
 use std::os::fd::AsRawFd;
@@ -59,7 +57,12 @@ pub fn make_sockaddr_in(ip: [u8; 4]) -> nix::libc::sockaddr {
 
 /// Configure a network interface with IP address and netmask, and bring it UP
 pub fn configure_interface(name: &str, ip: [u8; 4], netmask: [u8; 4]) -> nix::Result<()> {
-    let sock = socket(AddressFamily::Inet, SockType::Datagram, SockFlag::empty(), None)?;
+    let sock = socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )?;
     let fd = sock.as_raw_fd();
 
     // Set IP address
