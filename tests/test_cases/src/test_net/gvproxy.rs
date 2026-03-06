@@ -54,8 +54,6 @@ fn start_gvproxy(
 ) -> std::io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
 
-    let _ = Command::new("pkill").arg("-9").arg("gvproxy").status();
-
     let gvproxy = gvproxy_path()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "gvproxy not found"))?;
 
@@ -103,7 +101,8 @@ pub(crate) fn setup_backend(ctx: u32, test_setup: &TestSetup) -> anyhow::Result<
     let socket_path = tmp_dir.join("gvproxy.sock");
     let gvproxy_log = tmp_dir.join("gvproxy.log");
 
-    let _gvproxy_child = start_gvproxy(socket_path.to_str().unwrap(), &gvproxy_log)?;
+    let gvproxy_child = start_gvproxy(socket_path.to_str().unwrap(), &gvproxy_log)?;
+    test_setup.register_cleanup_pid(gvproxy_child.id());
 
     anyhow::ensure!(
         wait_for_socket(&socket_path, 5000),

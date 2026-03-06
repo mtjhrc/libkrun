@@ -67,6 +67,7 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
 struct VmnetConfig {
     fd: i32,
     mac: [u8; 6],
+    pid: u32,
 }
 
 /// Start vmnet-helper with `--fd 3`, wait for its JSON config on stdout,
@@ -212,7 +213,11 @@ fn start_vmnet_helper(log_path: &std::path::Path) -> std::io::Result<VmnetConfig
         );
     }
 
-    Ok(VmnetConfig { fd: our_fd, mac })
+    Ok(VmnetConfig {
+        fd: our_fd,
+        mac,
+        pid: pid as u32,
+    })
 }
 
 pub(crate) fn should_run() -> ShouldRun {
@@ -236,6 +241,7 @@ pub(crate) fn setup_backend(ctx: u32, test_setup: &TestSetup) -> anyhow::Result<
     let vmnet_log = tmp_dir.join("vmnet-helper.log");
 
     let mut config = start_vmnet_helper(&vmnet_log)?;
+    test_setup.register_cleanup_pid(config.pid);
 
     unsafe {
         krun_call!(get_krun_add_net_unixgram()(
