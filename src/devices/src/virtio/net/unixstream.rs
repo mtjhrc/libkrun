@@ -160,8 +160,7 @@ impl NetBackend for Unixstream {
         // Prepend a header iovec pointing to our shared tx_frame_header buffer.
         // The actual length value is written before each writev in consume().
         let header_ptr = self.tx_frame_header.as_ptr();
-        let fed = self.tx_consumer.feed_with_transform(|iovecs| {
-            let mut v: Vec<_> = iovecs.collect();
+        let fed = self.tx_consumer.feed_with_transform(|mut v| {
             v.advance(skip);
             v.insert(0, unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
             (v, ())

@@ -4,6 +4,7 @@
 //! callable with method syntax on `&[T]` / `&mut [T]` and `Vec<T>`.
 
 use libc::{c_void, iovec};
+use smallvec::{Array, SmallVec};
 
 use super::aliased_ioslice::AnyIoSlice;
 
@@ -105,6 +106,22 @@ pub trait VecOfIoSlicesExt<T: AnyIoSlice> {
 }
 
 impl<T: AnyIoSlice> VecOfIoSlicesExt<T> for Vec<T> {
+    fn advance(&mut self, n: usize) {
+        let orig_len = self.len();
+        let remaining_len = self.as_mut_slice().advance(n).len();
+        self.drain(..orig_len - remaining_len);
+    }
+
+    fn truncate_bytes(&mut self, n: usize) {
+        let keep = self.as_mut_slice().truncate(n).len();
+        self.truncate(keep);
+    }
+}
+
+impl<A: Array> VecOfIoSlicesExt<A::Item> for SmallVec<A>
+where
+    A::Item: AnyIoSlice,
+{
     fn advance(&mut self, n: usize) {
         let orig_len = self.len();
         let remaining_len = self.as_mut_slice().advance(n).len();

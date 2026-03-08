@@ -11,7 +11,7 @@ use super::super::queue::{DescriptorChain, Queue};
 use super::super::InterruptTransport;
 use super::aliased_ioslice::{AliasedIoSlice, RawAliasedIoSlice};
 use super::ioslice_container_utils::SliceOfIoSlicesExt;
-use super::{AdvanceBytes, ChainsMemoryRepr, IovecVec};
+use super::{AdvanceBytes, ChainsMemoryRepr, IoSliceVec, IovecVec, RawIoSliceVec};
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug, Clone)]
@@ -41,6 +41,8 @@ pub struct TxQueueConsumer<R: ChainsMemoryRepr = IovecVec> {
     interrupt: InterruptTransport,
     /// Maximum number of chains to keep pending at once.
     max_chains: usize,
+    /// Pre-allocated storage shared across all chains.
+    pool: R::Pool,
     /// Per-chain representation (type depends on R)
     chain_repr: Vec<R>,
     /// Metadata for each chain (parallel to chain_repr)
@@ -56,6 +58,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             mem,
             interrupt,
             max_chains,
+            pool: R::create_pool(max_chains),
             chain_repr: Vec::new(),
             chain_meta: Vec::new(),
         }
@@ -69,7 +72,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Feed descriptor chains from the queue, converting each into the
     /// representation type `R` via a user-supplied callback.
     ///
-    /// The callback receives the chain's readable iovecs and returns an `(R, Meta)`
+    /// The callback receives the chain's readable iovecs and returns an `(IoSliceVec, Meta)`
     /// pair. It may mutate the iovecs before building `R` — for example, skipping
     /// a header so that subsequent I/O starts after it. Any bytes consumed by
     /// the callback are automatically tracked.
@@ -77,7 +80,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Returns the number of chains added.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(std::vec::IntoIter<AliasedIoSlice<'a>>) -> (Vec<AliasedIoSlice<'a>>, R::Meta),
+        F: for<'a> FnMut(IoSliceVec<'a>) -> (IoSliceVec<'a>, R::Meta),
     {
         let mut added = 0;
 
@@ -100,7 +103,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             };
 
             let head_index = head.index;
-            let mut iovecs: Vec<AliasedIoSlice<'_>> = Vec::new();
+            let mut iovecs = IoSliceVec::new();
 
             for desc in head.into_iter().filter(DescriptorChain::is_read_only) {
                 if let Some(iov) = unsafe { self.desc_to_volatile_ioslice(&desc) } {
@@ -120,17 +123,17 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
             let guest_len = iovecs.total_len();
 
             // Apply transformation (callback returns iovecs with same lifetime + metadata)
-            let (transformed, user_meta) = transform(iovecs.into_iter());
+            let (transformed, user_meta) = transform(iovecs);
 
             // Compute final length after transformation
             let max_bytes = transformed.total_len();
 
             // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
-            let raw = transformed
+            let raw: RawIoSliceVec = transformed
                 .into_iter()
                 .map(|v| unsafe { RawAliasedIoSlice::from_any(v) })
                 .collect();
-            let repr = R::from_raw_iovecs(raw);
+            let repr = R::from_raw_iovecs(&mut self.pool, &raw);
 
             self.chain_repr.push(repr);
             self.chain_meta.push(ChainMeta {
@@ -215,7 +218,7 @@ impl<R: ChainsMemoryRepr> TxQueueConsumer<R> {
     /// Remove consecutive finished chains from the front.
     fn compact(&mut self, count: usize) {
         for i in 0..count {
-            self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta);
+            self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta, &mut self.pool);
         }
         self.chain_repr.drain(..count);
         self.chain_meta.drain(..count);
@@ -239,7 +242,7 @@ impl TxQueueConsumer<IovecVec> {
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs| (iovecs.collect(), ()))
+        self.feed_with_transform(|iovecs| (iovecs, ()))
     }
 }
 
@@ -575,8 +578,7 @@ mod tests {
         let mut consumer: TestTxConsumer =
             TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(|iovecs| {
-            let mut v: Vec<_> = iovecs.collect();
+        let added = consumer.feed_with_transform(|mut v| {
             // Skip 4 bytes (like skipping vnet header)
             if !v.is_empty() && v[0].len() >= 4 {
                 v[0].advance(4);
@@ -730,8 +732,7 @@ mod tests {
         let mut consumer: TestTxConsumer =
             TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(|iovecs| {
-            let mut v: Vec<_> = iovecs.collect();
+        let added = consumer.feed_with_transform(|mut v| {
             // Skip 12 bytes from first iovec
             if !v.is_empty() && v[0].len() >= 12 {
                 v[0].advance(12);
@@ -768,8 +769,7 @@ mod tests {
         let mut consumer: TestTxConsumer =
             TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = consumer.feed_with_transform(|iovecs| {
-            let mut v: Vec<_> = iovecs.collect();
+        let added = consumer.feed_with_transform(|mut v| {
             if !v.is_empty() && v[0].len() >= 12 {
                 v[0].advance(12);
             }

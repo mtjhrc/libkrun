@@ -26,6 +26,71 @@ use super::socket_x::msghdr_x;
 const VFKIT_MAGIC: [u8; 4] = *b"VFKT";
 
 // ============================================================================
+// IovecPool - Pre-allocated fixed-size iovec storage
+// ============================================================================
+
+/// Maximum number of iovecs per chain slot. Networking descriptors typically
+/// have 1-3 scatter-gather elements; 16 is generous.
+const POOL_SLOT_IOVECS: usize = 16;
+
+/// Pre-allocated pool of iovec slots.
+///
+/// Provides fixed-size backing storage for [`MsgHdr`] iovec pointers.
+/// The storage is a `Box<[iovec]>` allocated once and never reallocated,
+/// so pointers into it remain valid for the pool's lifetime.
+pub struct IovecPool {
+    /// Fixed-size backing storage. Never reallocated.
+    storage: Box<[iovec]>,
+    /// Free slot indices (used as a stack).
+    free: Vec<usize>,
+}
+
+// Safety: The iovec pointers inside point to guest memory managed by the owning
+// TxQueueConsumer/RxQueueProducer. The pool is only accessed from the virtio-net
+// worker thread that owns the consumer/producer.
+unsafe impl Send for IovecPool {}
+
+impl IovecPool {
+    fn new(num_slots: usize) -> Self {
+        let storage = vec![
+            iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            };
+            num_slots * POOL_SLOT_IOVECS
+        ]
+        .into_boxed_slice();
+        let free = (0..num_slots).collect();
+        Self { storage, free }
+    }
+
+    /// Allocate a slot, returning a pointer to `POOL_SLOT_IOVECS` iovecs.
+    #[inline]
+    fn alloc(&mut self) -> *mut iovec {
+        let slot = self.free.pop().expect("IovecPool exhausted");
+        let offset = slot * POOL_SLOT_IOVECS;
+        &mut self.storage[offset] as *mut iovec
+    }
+
+    /// Return a slot to the pool. Derives the slot index from the pointer.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by a previous `alloc()` on this pool.
+    #[inline]
+    unsafe fn dealloc(&mut self, ptr: *mut iovec) {
+        let base = self.storage.as_ptr() as usize;
+        let offset = (ptr as usize - base) / std::mem::size_of::<iovec>();
+        let slot = offset / POOL_SLOT_IOVECS;
+        debug_assert!(
+            slot * POOL_SLOT_IOVECS < self.storage.len(),
+            "pointer doesn't belong to this pool"
+        );
+        self.free.push(slot);
+    }
+}
+
+// ============================================================================
 // MsgHdr - Chain representation that IS an mmsghdr/msghdr_x
 // ============================================================================
 
@@ -37,23 +102,25 @@ type RawMsgHdr = msghdr_x;
 
 /// Chain representation that wraps mmsghdr/msghdr_x.
 ///
-/// The iovec pointer is stored directly in the header, avoiding allocation
-/// of a separate mmsghdr array for sendmmsg/sendmsg_x/recvmmsg/recvmsg_x.
+/// The iovec pointer points into a pre-allocated [`IovecPool`] slot,
+/// avoiding per-chain heap allocation on the hot path.
 ///
 /// For RX, use `received_len()` to get the kernel-filled byte count.
-///
-/// # Safety
-/// `from_raw_iovecs` leaks a `Box<[iovec]>` into the header pointer;
-/// `clear()` reconstructs and drops it.
 #[repr(transparent)]
 pub struct MsgHdr(RawMsgHdr);
 
-// Safety: The raw pointer inside points to heap memory that we have exclusive ownership of.
-// Transferring to another thread is safe because we transfer ownership of the entire struct.
+// Safety: The raw pointer inside points to pool memory owned by the
+// TxQueueConsumer/RxQueueProducer. Transferring to another thread is safe
+// because we transfer ownership of the entire struct.
 unsafe impl Send for MsgHdr {}
 
 unsafe impl ChainsMemoryRepr for MsgHdr {
     type Meta = ();
+    type Pool = IovecPool;
+
+    fn create_pool(max_chains: usize) -> IovecPool {
+        IovecPool::new(max_chains)
+    }
 
     fn len(&self) -> usize {
         #[cfg(target_os = "linux")]
@@ -71,23 +138,31 @@ unsafe impl ChainsMemoryRepr for MsgHdr {
         if ptr.is_null() {
             0
         } else {
-            let slices = unsafe { std::slice::from_raw_parts(ptr as *const iovec, len) };
+            let slices = unsafe { std::slice::from_raw_parts(ptr, len) };
             slices.iter().map(|s| s.iov_len).sum()
         }
     }
 
-    fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self {
-        // into_boxed_slice() shrinks so capacity == len; clear() reconstructs
-        // the same Box to deallocate.
-        let boxed = iovecs.into_boxed_slice();
-        let len = boxed.len();
-        let iov_ptr = Box::into_raw(boxed) as *mut iovec;
+    fn from_raw_iovecs(pool: &mut IovecPool, iovecs: &[RawAliasedIoSlice]) -> Self {
+        let n = iovecs.len();
+        assert!(
+            n <= POOL_SLOT_IOVECS,
+            "chain has {n} iovecs, exceeds pool slot size {POOL_SLOT_IOVECS}"
+        );
+
+        let iov_ptr = pool.alloc();
+
+        // Copy iovecs into the pool slot.
+        // Safety: RawAliasedIoSlice is #[repr(transparent)] over iovec.
+        unsafe {
+            std::ptr::copy_nonoverlapping(iovecs.as_ptr() as *const iovec, iov_ptr, n);
+        }
 
         #[cfg(target_os = "linux")]
         {
             let mut hdr: mmsghdr = unsafe { std::mem::zeroed() };
             hdr.msg_hdr.msg_iov = iov_ptr;
-            hdr.msg_hdr.msg_iovlen = len;
+            hdr.msg_hdr.msg_iovlen = n;
             Self(hdr)
         }
 
@@ -95,19 +170,17 @@ unsafe impl ChainsMemoryRepr for MsgHdr {
         {
             Self(msghdr_x {
                 msg_iov: iov_ptr,
-                msg_iovlen: len as c_int,
+                msg_iovlen: n as c_int,
                 ..Default::default()
             })
         }
     }
 
-    fn clear(&mut self, _meta: &mut Self::Meta) {
-        let (ptr, len) = self.iov_ptr_len();
+    fn clear(&mut self, _meta: &mut (), pool: &mut IovecPool) {
+        let (ptr, _len) = self.iov_ptr_len();
         if !ptr.is_null() {
-            // Reconstruct the Box<[iovec]> leaked in from_raw_iovecs
-            unsafe {
-                let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
-            }
+            // Safety: ptr was returned by pool.alloc() in from_raw_iovecs.
+            unsafe { pool.dealloc(ptr) };
             self.set_iov_null();
         }
     }
@@ -160,6 +233,10 @@ pub struct Unixgram {
     include_vnet_header: bool,
     tx_consumer: TxQueueConsumer<MsgHdr>,
     rx_producer: RxQueueProducer<MsgHdr>,
+    // Temporary debug counters
+    tx_send_calls: u64,
+    tx_total_fed: u64,
+    tx_total_sent: u64,
 }
 
 impl Unixgram {
@@ -200,6 +277,9 @@ impl Unixgram {
             include_vnet_header,
             tx_consumer,
             rx_producer,
+            tx_send_calls: 0,
+            tx_total_fed: 0,
+            tx_total_sent: 0,
         }
     }
 
@@ -270,33 +350,44 @@ impl NetBackend for Unixgram {
             0
         };
 
-        // Feed frames from queue, skipping vnet header
-        let fed = self.tx_consumer.feed_with_transform(|iovecs| {
-            let mut v: Vec<_> = iovecs.collect();
-            if skip > 0 {
-                v.advance(skip);
+        loop {
+            // Feed frames from queue, skipping vnet header
+            let fed = self.tx_consumer.feed_with_transform(|mut v| {
+                if skip > 0 {
+                    v.advance(skip);
+                }
+                (v, ())
+            });
+
+            if !self.tx_consumer.has_pending() {
+                return Ok(());
             }
-            (v, ())
-        });
-        if fed > 0 {
-            log::info!(
-                "TX: fed {} chains, pending={}",
-                fed,
-                self.tx_consumer.pending_count()
-            );
+
+            self.tx_send_calls += 1;
+            self.tx_total_fed += fed as u64;
+
+            #[cfg(target_os = "linux")]
+            let sent = self.send_linux()?;
+
+            #[cfg(target_os = "macos")]
+            let sent = self.send_macos()?;
+
+            self.tx_total_sent += sent as u64;
+
+            if self.tx_send_calls % 10000 == 0 {
+                eprintln!(
+                    "TX stats: calls={} avg_fed={:.1} avg_sent={:.1}",
+                    self.tx_send_calls,
+                    self.tx_total_fed as f64 / self.tx_send_calls as f64,
+                    self.tx_total_sent as f64 / self.tx_send_calls as f64,
+                );
+            }
+
+            // Socket blocked (EAGAIN/ENOBUFS) or partial send — wait for EPOLLOUT.
+            if sent == 0 || self.tx_consumer.has_pending() {
+                return Ok(());
+            }
         }
-
-        if !self.tx_consumer.has_pending() {
-            return Ok(());
-        }
-
-        #[cfg(target_os = "linux")]
-        self.send_linux()?;
-
-        #[cfg(target_os = "macos")]
-        self.send_macos()?;
-
-        Ok(())
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
@@ -312,8 +403,7 @@ impl NetBackend for Unixgram {
         );
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
-        let rx_fed = self.rx_producer.feed_with_transform(|iovecs| {
-            let mut v: Vec<_> = iovecs.collect();
+        let rx_fed = self.rx_producer.feed_with_transform(|mut v| {
             if vnet_offset > 0 {
                 // Write default vnet header to beginning of buffer
                 v.as_mut_slice().write(&super::DEFAULT_VNET_HDR);
@@ -346,10 +436,10 @@ impl NetBackend for Unixgram {
 
 #[cfg(target_os = "linux")]
 impl Unixgram {
-    fn send_linux(&mut self) -> Result<(), WriteError> {
+    fn send_linux(&mut self) -> Result<usize, WriteError> {
         let fd = self.fd.as_raw_fd();
 
-        self.tx_consumer.consume(|batch| {
+        let sent = self.tx_consumer.consume(|batch| {
             let len = batch.len();
             let chains = batch.chains(0..len);
             let ptr = chains.as_ptr() as *mut mmsghdr;
@@ -367,7 +457,7 @@ impl Unixgram {
             batch.finish_many(0..ret as usize);
         });
 
-        Ok(())
+        Ok(sent)
     }
 
     fn recv_linux(&mut self) {
@@ -407,22 +497,17 @@ impl Unixgram {
 
 #[cfg(target_os = "macos")]
 impl Unixgram {
-    fn send_macos(&mut self) -> Result<(), WriteError> {
+    fn send_macos(&mut self) -> Result<usize, WriteError> {
         let fd = self.fd.as_raw_fd();
 
-        self.tx_consumer.consume(|batch| {
+        let sent = self.tx_consumer.consume(|batch| {
             let len = batch.len();
             // Safety: No chains have been completed yet, so 0..len is valid.
             let storage = batch.chains(0..len);
             let ptr = storage.as_ptr() as *const super::socket_x::msghdr_x;
 
             let ret = unsafe {
-                super::socket_x::sendmsg_x(
-                    fd,
-                    ptr,
-                    len as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                )
+                super::socket_x::sendmsg_x(fd, ptr, len as libc::c_uint, libc::MSG_DONTWAIT)
             };
 
             if ret < 0 {
@@ -437,7 +522,7 @@ impl Unixgram {
             batch.finish_many(0..ret as usize);
         });
 
-        Ok(())
+        Ok(sent)
     }
 
     fn recv_macos(&mut self) {

@@ -11,7 +11,7 @@ use super::super::queue::{DescriptorChain, Queue};
 use super::super::InterruptTransport;
 use super::aliased_ioslice::{AliasedIoSliceMut, RawAliasedIoSlice};
 use super::ioslice_container_utils::SliceOfIoSlicesExt;
-use super::{AdvanceBytes, ChainsMemoryRepr, IovecVec, ReceivedLen, TruncateBytes};
+use super::{AdvanceBytes, ChainsMemoryRepr, IoSliceMutVec, IovecVec, RawIoSliceVec, ReceivedLen, TruncateBytes};
 
 /// Metadata for a pending descriptor chain.
 #[derive(Debug)]
@@ -43,6 +43,8 @@ pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
     interrupt: InterruptTransport,
     /// Maximum number of chains to keep pending at once.
     max_chains: usize,
+    /// Pre-allocated storage shared across all chains.
+    pool: R::Pool,
     /// Per-chain representation (type depends on R)
     chain_repr: Vec<R>,
     /// Metadata for each chain (parallel to chain_repr)
@@ -58,6 +60,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             mem,
             interrupt,
             max_chains,
+            pool: R::create_pool(max_chains),
             chain_repr: Vec::new(),
             chain_meta: Vec::new(),
         }
@@ -80,7 +83,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     ///
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(std::vec::IntoIter<AliasedIoSliceMut<'a>>) -> (Vec<AliasedIoSliceMut<'a>>, R::Meta),
+        F: for<'a> FnMut(IoSliceMutVec<'a>) -> (IoSliceMutVec<'a>, R::Meta),
     {
         let mut added = 0;
 
@@ -103,7 +106,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             };
 
             let head_index = head.index;
-            let mut iovecs: Vec<AliasedIoSliceMut<'_>> = Vec::new();
+            let mut iovecs = IoSliceMutVec::new();
 
             for desc in head.into_iter().filter(DescriptorChain::is_write_only) {
                 if let Some(iov) = unsafe { self.desc_to_volatile_ioslice_mut(&desc) } {
@@ -123,17 +126,17 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             let max_bytes = iovecs.total_len();
 
             // Apply transformation (callback returns iovecs with same lifetime + metadata)
-            let (transformed, user_meta) = transform(iovecs.into_iter());
+            let (transformed, user_meta) = transform(iovecs);
 
             // Track bytes already consumed by transform
             let bytes_used = max_bytes - transformed.total_len();
 
             // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
-            let raw = transformed
+            let raw: RawIoSliceVec = transformed
                 .into_iter()
                 .map(|v| unsafe { RawAliasedIoSlice::from_any(v) })
                 .collect();
-            let repr = R::from_raw_iovecs(raw);
+            let repr = R::from_raw_iovecs(&mut self.pool, &raw);
 
             self.chain_repr.push(repr);
             self.chain_meta.push(ChainMeta {
@@ -220,7 +223,7 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
     /// Remove consecutive finished chains from the front.
     fn compact(&mut self, count: usize) {
         for i in 0..count {
-            self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta);
+            self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta, &mut self.pool);
         }
         self.chain_repr.drain(..count);
         self.chain_meta.drain(..count);
@@ -250,7 +253,7 @@ impl RxQueueProducer<IovecVec> {
     /// This is a convenience method for the common case where no header
     /// transformation is needed.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs| (iovecs.collect(), ()))
+        self.feed_with_transform(|iovecs| (iovecs, ()))
     }
 }
 
@@ -742,13 +745,9 @@ mod tests {
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         let feed_with_hdr = |p: &mut TestRxProducer| {
-            p.feed_with_transform(|iovecs| {
-                let mut v: Vec<_> = iovecs.collect();
+            p.feed_with_transform(|mut v| {
                 v.as_mut_slice().write(b"HD");
-                // Remove fully consumed iovecs from the front
-                let orig_len = v.len();
-                let remaining_len = v.as_mut_slice().advance(2).len();
-                v.drain(..orig_len - remaining_len);
+                v.advance(2);
                 (v, ())
             })
         };
@@ -914,6 +913,9 @@ mod tests {
 
     unsafe impl ChainsMemoryRepr for CustomChainRepr {
         type Meta = u32; // tag to verify metadata works
+        type Pool = ();
+
+        fn create_pool(_max_chains: usize) -> () {}
 
         fn len(&self) -> usize {
             self.iovecs.len()
@@ -923,14 +925,14 @@ mod tests {
             self.iovecs.total_len()
         }
 
-        fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self {
+        fn from_raw_iovecs(_pool: &mut (), iovecs: &[RawAliasedIoSlice]) -> Self {
             CustomChainRepr {
-                iovecs,
+                iovecs: iovecs.into(),
                 received_len: Cell::new(0),
             }
         }
 
-        fn clear(&mut self, _meta: &mut u32) {
+        fn clear(&mut self, _meta: &mut u32, _pool: &mut ()) {
             self.iovecs.clear();
             self.received_len.set(0);
         }
@@ -961,7 +963,7 @@ mod tests {
         let mut tag = 0u32;
         let added = producer.feed_with_transform(|iovecs| {
             tag += 10;
-            (iovecs.collect(), tag)
+            (iovecs, tag)
         });
         assert_eq!(added, 4);
 

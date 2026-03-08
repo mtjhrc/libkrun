@@ -12,6 +12,7 @@
 
 use aliased_ioslice::RawAliasedIoSlice;
 use ioslice_container_utils::{SliceOfIoSlicesExt, VecOfIoSlicesExt};
+use smallvec::SmallVec;
 
 pub mod aliased_ioslice;
 pub mod ioslice_container_utils;
@@ -20,6 +21,16 @@ mod tx_queue_consumer;
 
 pub use rx_queue_producer::{RxProducerBatch, RxQueueProducer};
 pub use tx_queue_consumer::{TxConsumerBatch, TxQueueConsumer};
+
+/// Inline capacity for per-chain iovec SmallVecs.
+/// Virtio-net descriptors typically have 1–3 scatter-gather elements;
+/// 4 covers that without heap allocation.
+const IOVEC_INLINE_CAP: usize = 4;
+
+/// SmallVec type aliases used by feed_with_transform callbacks.
+pub type IoSliceVec<'a> = SmallVec<[aliased_ioslice::AliasedIoSlice<'a>; IOVEC_INLINE_CAP]>;
+pub type IoSliceMutVec<'a> = SmallVec<[aliased_ioslice::AliasedIoSliceMut<'a>; IOVEC_INLINE_CAP]>;
+type RawIoSliceVec = SmallVec<[RawAliasedIoSlice; IOVEC_INLINE_CAP]>;
 
 /// Base trait for descriptor chain memory representation.
 ///
@@ -36,6 +47,13 @@ pub unsafe trait ChainsMemoryRepr: Sized + Send {
     /// User-defined metadata stored alongside each chain (e.g., Vec capacity).
     type Meta: Default;
 
+    /// Pre-allocated storage shared across all chains (e.g., iovec pool).
+    /// Use `()` when no pool is needed.
+    type Pool;
+
+    /// Create a pool sized for `max_chains` concurrent chains.
+    fn create_pool(max_chains: usize) -> Self::Pool;
+
     /// Number of slices in this chain.
     fn len(&self) -> usize;
 
@@ -47,16 +65,16 @@ pub unsafe trait ChainsMemoryRepr: Sized + Send {
     /// Total bytes across all slices.
     fn total_bytes(&self) -> usize;
 
-    /// Construct from raw iovec storage.
+    /// Construct from raw iovec storage, using the pool for backing memory.
     ///
     /// Called internally by `feed_with_transform` after the user's callback
     /// returns the (possibly transformed) iovecs. The raw iovecs point into
     /// guest memory whose validity is guaranteed by the calling producer/consumer.
-    fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self;
+    fn from_raw_iovecs(pool: &mut Self::Pool, iovecs: &[RawAliasedIoSlice]) -> Self;
 
     /// Release owned resources. Always called by the consumer/producer before
     /// drop, with the external `Meta` needed for cleanup.
-    fn clear(&mut self, meta: &mut Self::Meta);
+    fn clear(&mut self, meta: &mut Self::Meta, pool: &mut Self::Pool);
 }
 
 /// Trait for representation types that support advancing (consuming bytes from front).
@@ -104,6 +122,9 @@ unsafe impl Send for IovecVec {}
 
 unsafe impl ChainsMemoryRepr for IovecVec {
     type Meta = ();
+    type Pool = ();
+
+    fn create_pool(_max_chains: usize) -> () {}
 
     fn len(&self) -> usize {
         self.0.len()
@@ -113,11 +134,11 @@ unsafe impl ChainsMemoryRepr for IovecVec {
         self.0.total_len()
     }
 
-    fn from_raw_iovecs(iovecs: Vec<RawAliasedIoSlice>) -> Self {
-        IovecVec(iovecs)
+    fn from_raw_iovecs(_pool: &mut (), iovecs: &[RawAliasedIoSlice]) -> Self {
+        Self(iovecs.into())
     }
 
-    fn clear(&mut self, _meta: &mut ()) {
+    fn clear(&mut self, _meta: &mut (), _pool: &mut ()) {
         self.0.clear();
     }
 }
