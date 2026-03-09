@@ -209,6 +209,11 @@ pub trait Test {
     fn should_run(&self) -> ShouldRun {
         ShouldRun::Yes
     }
+
+    /// Per-test timeout in seconds. The runner kills the test if it exceeds this.
+    fn timeout_secs(&self) -> u64 {
+        15
+    }
 }
 
 #[guest]
@@ -233,6 +238,12 @@ impl TestCase {
     #[host]
     pub fn should_run(&self) -> ShouldRun {
         self.test.should_run()
+    }
+
+
+    #[host]
+    pub fn timeout_secs(&self) -> u64 {
+        self.test.timeout_secs()
     }
 
     #[allow(dead_code)]

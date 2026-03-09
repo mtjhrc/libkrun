@@ -12,14 +12,24 @@ use super::aliased_ioslice::{AliasedIoSlice, AnyIoSlice};
 use super::{raw_as_io_slices, IovecAppender, IovecStorage, WorkItem, WorkItemState};
 
 /// Iterator over the readable slices in one descriptor chain.
+///
+/// Implements `ExactSizeIterator` so the transform can call `.len()` to know
+/// how many iovecs to reserve before pushing.
 pub struct ReadableChainIter<'a> {
     inner: DescIter<'a>,
+    remaining: usize,
 }
 
 impl<'a> ReadableChainIter<'a> {
     fn new(head: DescriptorChain<'a>) -> Self {
+        let remaining = head
+            .clone()
+            .into_iter()
+            .filter(DescriptorChain::is_read_only)
+            .count();
         Self {
             inner: head.into_iter(),
+            remaining,
         }
     }
 }
@@ -39,10 +49,17 @@ impl<'a> Iterator for ReadableChainIter<'a> {
                 .mem
                 .get_slice(desc.addr, len)
                 .expect("descriptor validated before transform");
+            self.remaining -= 1;
             return Some(unsafe { AliasedIoSlice::from_slice(&slice) });
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl ExactSizeIterator for ReadableChainIter<'_> {}
 
 /// TxQueueConsumer owns the TX queue and batches readable descriptor chains.
 pub struct TxQueueConsumer<T: WorkItemState = ()> {
@@ -75,10 +92,12 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
     /// Feed readable descriptor chains from the queue and transform them.
     ///
     /// The callback receives an iterator over the chain's readable iovecs and
-    /// an [`IovecAppender`] that writes directly into the shared arena.
+    /// an [`IovecAppender`]. It must call [`IovecAppender::reserve`] before
+    /// pushing iovecs. If `reserve` returns `false` (ring full), the callback
+    /// should return `None` to stop feeding.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a, 'b> FnMut(ReadableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> T,
+        F: for<'a, 'b> FnMut(ReadableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> Option<T>,
     {
         let mut added = 0;
 
@@ -99,23 +118,13 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             };
 
             let head_index = head.index;
-            let Some((iov_count, total_bytes)) = self.validate_readable_chain(&head) else {
-                error!("Invalid descriptor chain headed by {}, skipping it", head_index);
-                continue 'next_chain;
-            };
 
-            if total_bytes == 0 {
-                warn!("Found empty chain, ignoring it");
-                continue 'next_chain;
-            }
-
-            let Some(alloc_start) = self.iovecs.begin_chain(iov_count) else {
+            let mut appender = IovecAppender::new(&mut self.iovecs);
+            let Some(state) = transform(ReadableChainIter::new(head), &mut appender) else {
                 self.queue.undo_pop();
                 break 'next_chain;
             };
-            let mut appender = IovecAppender::new(&mut self.iovecs);
-            let state = transform(ReadableChainIter::new(head), &mut appender);
-            let (live, max_bytes) = appender.finish();
+            let (alloc_start, live, max_bytes) = appender.finish();
             let allocation = alloc_start..live.end;
 
             let item = WorkItem::new(head_index, max_bytes, 0, allocation, live);
@@ -171,28 +180,6 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
         finished_count
     }
 
-    unsafe fn desc_to_volatile_ioslice(
-        &self,
-        desc: &DescriptorChain,
-    ) -> Option<AliasedIoSlice<'_>> {
-        let len = desc.len as usize;
-        let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        Some(unsafe { AliasedIoSlice::from_slice(&slice) })
-    }
-
-    fn validate_readable_chain(&self, head: &DescriptorChain<'_>) -> Option<(usize, usize)> {
-        let mut count = 0;
-        let mut total = 0;
-
-        for desc in head.clone().into_iter().filter(DescriptorChain::is_read_only) {
-            let iov = unsafe { self.desc_to_volatile_ioslice(&desc) }?;
-            count += 1;
-            total += iov.len();
-        }
-
-        Some((count, total))
-    }
-
     fn release(&mut self, count: usize) {
         if count == 0 {
             return;
@@ -214,7 +201,11 @@ impl TxQueueConsumer<()> {
     /// Feed readable descriptor chains without extra transformed state.
     pub fn feed(&mut self) -> usize {
         self.feed_with_transform(|iovecs, out| {
+            if !out.reserve(iovecs.len()) {
+                return None;
+            }
             out.extend(iovecs);
+            Some(())
         })
     }
 }
@@ -477,7 +468,9 @@ mod tests {
             TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         let added = consumer.feed_with_transform(|iovecs, out| {
+            out.reserve(iovecs.len());
             out.extend(AliasedIoSlice::skip_bytes(iovecs, 4));
+            Some(())
         });
 
         assert_eq!(added, 1);
@@ -611,7 +604,9 @@ mod tests {
 
         assert_eq!(
             consumer.feed_with_transform(|iovecs, out| {
+                out.reserve(iovecs.len());
                 out.extend(AliasedIoSlice::skip_bytes(iovecs, 12));
+                Some(())
             }),
             1
         );
@@ -641,7 +636,9 @@ mod tests {
 
         assert_eq!(
             consumer.feed_with_transform(|iovecs, out| {
+                out.reserve(iovecs.len());
                 out.extend(AliasedIoSlice::skip_bytes(iovecs, 12));
+                Some(())
             }),
             1
         );

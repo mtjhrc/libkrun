@@ -87,7 +87,7 @@ impl Unixstream {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        let iovec_capacity = tx_queue.size as usize * 2;
+        let iovec_capacity = tx_queue.size as usize * 30;
         let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), iovec_capacity);
         let rx_producer = RxQueueProducer::new(rx_queue, mem, iovec_capacity);
 
@@ -163,8 +163,12 @@ impl NetBackend for Unixstream {
         // The actual length value is written before each writev in consume().
         let header_ptr = self.tx_frame_header.as_ptr();
         let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
+            if !out.reserve(iovecs.len() + 1) {
+                return None;
+            }
             out.push(unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
             out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
+            Some(())
         });
         log::trace!(
             "Unixstream::send() fed {} frames, pending={}",

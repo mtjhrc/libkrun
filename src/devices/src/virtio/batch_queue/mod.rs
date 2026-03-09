@@ -67,22 +67,51 @@ pub(crate) fn raw_as_io_slices_mut<'a>(
 /// the descriptor chain iterator that produces the iovecs.
 pub struct IovecAppender<'s, 'iov> {
     storage: &'s mut IovecStorage,
+    /// Absolute index before any wrap padding from `reserve()`.
+    alloc_start: usize,
+    /// Absolute index where iovecs are actually pushed (after wrap padding).
     start: usize,
     len: usize,
+    reserved: usize,
     total_bytes: usize,
     _marker: std::marker::PhantomData<&'iov ()>,
 }
 
 impl<'s, 'iov> IovecAppender<'s, 'iov> {
     pub(crate) fn new(storage: &'s mut IovecStorage) -> Self {
-        let start = storage.end_index();
+        let pos = storage.end_index();
         Self {
             storage,
-            start,
+            alloc_start: pos,
+            start: pos,
             len: 0,
+            reserved: 0,
             total_bytes: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Reserve `count` contiguous iovec slots in the ring buffer.
+    ///
+    /// Returns `true` if the reservation succeeded. Returns `false` when the
+    /// ring is too full — the caller should return `None` from the transform
+    /// so the feed loop can `undo_pop`.
+    pub fn reserve(&mut self, count: usize) -> bool {
+        assert!(self.reserved == 0, "reserve() called twice");
+        let cap = self.storage.buf.len();
+        let phys_tail = self.storage.abs_tail % cap;
+        if phys_tail + count > cap {
+            // wrap to physical 0 — the gap is dead space
+            self.storage.abs_tail += cap - phys_tail;
+        }
+        if self.storage.abs_tail + count - self.storage.abs_head > cap {
+            // not enough free slots — undo any wrap padding
+            self.storage.abs_tail = self.alloc_start;
+            return false;
+        }
+        self.start = self.storage.abs_tail;
+        self.reserved = count;
+        true
     }
 
     /// Append one iovec to the shared arena.
@@ -90,6 +119,13 @@ impl<'s, 'iov> IovecAppender<'s, 'iov> {
         if iov.is_empty() {
             return;
         }
+
+        assert!(
+            self.len < self.reserved,
+            "IovecAppender: pushed {} iovecs but only {} were reserved",
+            self.len + 1,
+            self.reserved,
+        );
 
         let raw = unsafe { RawAliasedIoSlice::from_any(iov) };
         self.total_bytes += raw.len();
@@ -112,8 +148,8 @@ impl<'s, 'iov> IovecAppender<'s, 'iov> {
         self.total_bytes
     }
 
-    pub(crate) fn finish(self) -> (Range<usize>, usize) {
-        (self.start..self.start + self.len, self.total_bytes)
+    pub(crate) fn finish(self) -> (usize, Range<usize>, usize) {
+        (self.alloc_start, self.start..self.start + self.len, self.total_bytes)
     }
 }
 
@@ -147,28 +183,6 @@ impl IovecStorage {
         self.abs_tail
     }
 
-    /// Try to reserve `count` contiguous iovec slots for the next chain.
-    ///
-    /// If there isn't enough room at the physical tail, the tail wraps to 0.
-    /// Returns `Some(alloc_start)` on success — the absolute index *before*
-    /// any padding, so the caller can build an `allocation` range that
-    /// includes the wrap gap.  Returns `None` when the ring is too full.
-    pub(crate) fn begin_chain(&mut self, count: usize) -> Option<usize> {
-        let cap = self.buf.len();
-        let saved_tail = self.abs_tail;
-        let phys_tail = self.abs_tail % cap;
-        if phys_tail + count > cap {
-            // wrap to physical 0 — the gap is dead space
-            self.abs_tail += cap - phys_tail;
-        }
-        if self.abs_tail + count - self.abs_head > cap {
-            // not enough free slots — undo any wrap padding
-            self.abs_tail = saved_tail;
-            return None;
-        }
-        Some(saved_tail)
-    }
-
     pub(crate) fn push(&mut self, iov: RawAliasedIoSlice) {
         let phys = self.abs_tail % self.buf.len();
         self.buf[phys] = iov;
@@ -182,9 +196,10 @@ impl IovecStorage {
         let cap = self.buf.len();
         let start = range.start % cap;
         let len = range.end - range.start;
-        debug_assert!(
+        assert!(
             start + len <= cap,
-            "slice not contiguous: phys_start={start} len={len} cap={cap}"
+            "slice not contiguous: phys_start={start} len={len} cap={cap} abs_range={range:?} abs_head={} abs_tail={}",
+            self.abs_head, self.abs_tail,
         );
         &self.buf[start..start + len]
     }
@@ -196,9 +211,10 @@ impl IovecStorage {
         let cap = self.buf.len();
         let start = range.start % cap;
         let len = range.end - range.start;
-        debug_assert!(
+        assert!(
             start + len <= cap,
-            "slice not contiguous: phys_start={start} len={len} cap={cap}"
+            "slice_mut not contiguous: phys_start={start} len={len} cap={cap} abs_range={range:?} abs_head={} abs_tail={}",
+            self.abs_head, self.abs_tail,
         );
         &mut self.buf[start..start + len]
     }
@@ -206,6 +222,10 @@ impl IovecStorage {
     pub(crate) fn release_front_len(&mut self, len: usize) {
         self.abs_head += len;
         debug_assert!(self.abs_head <= self.abs_tail);
+        if self.abs_head == self.abs_tail {
+            self.abs_head = 0;
+            self.abs_tail = 0;
+        }
     }
 }
 
@@ -293,5 +313,287 @@ impl WorkItem {
         if remaining == 0 {
             self.live.end = start + keep;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ioslice(buf: &[u8]) -> AliasedIoSlice<'_> {
+        unsafe { AliasedIoSlice::from_raw(buf.as_ptr(), buf.len()) }
+    }
+
+    /// Helper: reserve and push N iovecs into storage.
+    fn reserve_and_push(storage: &mut IovecStorage, count: usize, iov_len: usize) -> (usize, Range<usize>) {
+        // We need stable pointers, but for testing we only care about ring structure.
+        // Use a leaked buffer so pointers stay valid.
+        let buf = vec![0u8; iov_len].leak();
+        let mut appender = IovecAppender::new(storage);
+        assert!(appender.reserve(count));
+        for _ in 0..count {
+            appender.push(ioslice(buf));
+        }
+        let (alloc_start, live, _) = appender.finish();
+        (alloc_start, live)
+    }
+
+    #[test]
+    fn reserve_basic() {
+        let mut storage = IovecStorage::with_capacity(8);
+        let buf = [1u8; 10];
+
+        let mut appender = IovecAppender::new(&mut storage);
+        assert!(appender.reserve(3));
+        appender.push(ioslice(&buf));
+        appender.push(ioslice(&buf));
+        appender.push(ioslice(&buf));
+        let (alloc_start, live, total) = appender.finish();
+
+        assert_eq!(alloc_start, 0);
+        assert_eq!(live, 0..3);
+        assert_eq!(total, 30);
+        assert_eq!(storage.slice(live).len(), 3);
+    }
+
+    #[test]
+    fn reserve_wraps_when_tail_near_end() {
+        let mut storage = IovecStorage::with_capacity(8);
+
+        // Fill 6 slots (don't release — we need tail to stay at phys 6).
+        reserve_and_push(&mut storage, 6, 1);
+        // Release only 4 so ring isn't fully drained (head=4, tail=6).
+        storage.release_front_len(4);
+
+        // Reserve 4 — doesn't fit at phys 6 (6+4=10>8), should wrap to phys 0.
+        let buf = [1u8; 5];
+        let mut appender = IovecAppender::new(&mut storage);
+        assert!(appender.reserve(4));
+        for _ in 0..4 {
+            appender.push(ioslice(&buf));
+        }
+        let (alloc_start, live, _) = appender.finish();
+
+        // alloc_start is pre-wrap position (6), live starts after wrap gap (8)
+        assert_eq!(alloc_start, 6);
+        assert_eq!(live, 8..12);
+        // Physical positions should be 0..4
+        assert_eq!(storage.slice(live).len(), 4);
+    }
+
+    #[test]
+    fn reserve_fails_when_ring_full() {
+        let mut storage = IovecStorage::with_capacity(8);
+
+        // Fill 6 slots (not released).
+        reserve_and_push(&mut storage, 6, 1);
+
+        // Try to reserve 4 more — only 2 slots free.
+        let mut a2 = IovecAppender::new(&mut storage);
+        assert!(!a2.reserve(4));
+
+        // But reserving 2 should work.
+        let mut a3 = IovecAppender::new(&mut storage);
+        assert!(a3.reserve(2));
+    }
+
+    #[test]
+    fn reserve_fails_when_wrap_still_not_enough() {
+        let mut storage = IovecStorage::with_capacity(8);
+
+        // Put 5 in, release 2 from front. head=2, tail=5.
+        reserve_and_push(&mut storage, 5, 1);
+        storage.release_front_len(2); // head=2, tail=5
+
+        // Try to reserve 5. At phys 5, 5+5=10>8 so wrap to 8.
+        // After wrap: tail=8, 8+5-2=11>8. Not enough. Should fail.
+        let mut a = IovecAppender::new(&mut storage);
+        assert!(!a.reserve(5));
+
+        // Tail should be restored to 5 (no wrap damage).
+        assert_eq!(storage.abs_tail, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "reserve() called twice")]
+    fn reserve_called_twice_panics() {
+        let mut storage = IovecStorage::with_capacity(8);
+        let mut appender = IovecAppender::new(&mut storage);
+        appender.reserve(2);
+        appender.reserve(2);
+    }
+
+    #[test]
+    #[should_panic(expected = "only 2 were reserved")]
+    fn push_beyond_reserved_panics() {
+        let mut storage = IovecStorage::with_capacity(8);
+        let buf = [1u8; 10];
+
+        let mut appender = IovecAppender::new(&mut storage);
+        appender.reserve(2);
+        appender.push(ioslice(&buf));
+        appender.push(ioslice(&buf));
+        appender.push(ioslice(&buf)); // 3rd push, only 2 reserved
+    }
+
+    #[test]
+    fn push_empty_iovec_skipped() {
+        let mut storage = IovecStorage::with_capacity(8);
+        let buf = [1u8; 10];
+        let empty: &[u8] = &[];
+
+        let mut appender = IovecAppender::new(&mut storage);
+        appender.reserve(2);
+        appender.push(ioslice(&buf));
+        appender.push(ioslice(empty)); // skipped, doesn't count
+        appender.push(ioslice(&buf));
+        let (_, live, total) = appender.finish();
+
+        assert_eq!(live.len(), 2); // only 2 non-empty pushed
+        assert_eq!(total, 20);
+    }
+
+    #[test]
+    fn multiple_chains_contiguous() {
+        let mut storage = IovecStorage::with_capacity(8);
+
+        let (_, l1) = reserve_and_push(&mut storage, 3, 10);
+        let (_, l2) = reserve_and_push(&mut storage, 2, 20);
+
+        assert_eq!(l1, 0..3);
+        assert_eq!(l2, 3..5);
+        assert_eq!(storage.slice(l1.clone()).len(), 3);
+        assert_eq!(storage.slice(l2.clone()).len(), 2);
+
+        // Release first chain, second still valid.
+        storage.release_front_len(l1.len());
+        assert_eq!(storage.slice(l2).len(), 2);
+    }
+
+    #[test]
+    fn release_and_reuse() {
+        let mut storage = IovecStorage::with_capacity(4);
+
+        // Fill all 4 slots.
+        let (a1, l1) = reserve_and_push(&mut storage, 4, 1);
+        assert_eq!(l1, 0..4);
+
+        // Can't reserve any more.
+        let mut a = IovecAppender::new(&mut storage);
+        assert!(!a.reserve(1));
+
+        // Release all 4 — ring resets to 0.
+        storage.release_front_len(l1.end - a1);
+        assert_eq!(storage.abs_head, 0);
+        assert_eq!(storage.abs_tail, 0);
+
+        // Now we can reserve the full capacity again.
+        let (_, l2) = reserve_and_push(&mut storage, 4, 1);
+        assert_eq!(l2, 0..4);
+        assert_eq!(storage.slice(l2).len(), 4);
+    }
+
+    #[test]
+    fn slice_contiguity_after_wrap() {
+        let mut storage = IovecStorage::with_capacity(8);
+
+        // Fill 6, release 5. head=5, tail=6.
+        // (release 5 so there's enough room after the wrap gap)
+        reserve_and_push(&mut storage, 6, 1);
+        storage.release_front_len(5);
+
+        // Reserve 5 — doesn't fit at phys 6 (6+5=11>8), wraps to phys 0.
+        // After wrap: abs_tail=8, check: 8+5-5=8<=8 → OK.
+        let (_, live) = reserve_and_push(&mut storage, 5, 1);
+
+        // Live should start at phys 0.
+        let phys_start = live.start % 8;
+        assert_eq!(phys_start, 0);
+        assert_eq!(live.len(), 5);
+        // slice should succeed (contiguous at phys 0..5).
+        assert_eq!(storage.slice(live).len(), 5);
+    }
+
+    #[test]
+    fn release_multiple_allocations_spanning_wrap() {
+        // cap=8. Chain A at tail end, chain B wraps to phys 0.
+        // Release both, then verify full capacity is available.
+        let mut storage = IovecStorage::with_capacity(8);
+
+        // Fill 5, release only 3 so ring doesn't drain fully.
+        // head=3, tail=5.
+        reserve_and_push(&mut storage, 5, 1);
+        storage.release_front_len(3);
+
+        // Chain A: 2 iovecs at phys 5..7.
+        let (a_alloc, a_live) = reserve_and_push(&mut storage, 2, 10);
+        assert_eq!(a_alloc, 5);
+        assert_eq!(a_live, 5..7);
+
+        // Chain B: 3 iovecs — wraps. alloc 7..11, live 8..11.
+        let (b_alloc, b_live) = reserve_and_push(&mut storage, 3, 20);
+        assert_eq!(b_alloc, 7);
+        assert_eq!(b_live, 8..11);
+
+        // Verify both slices work.
+        assert_eq!(storage.slice(a_live.clone()).len(), 2);
+        assert_eq!(storage.slice(b_live.clone()).len(), 3);
+
+        // Release the initial 2 unreleased + chain A + chain B.
+        // Initial 2 at alloc 3..5 (len 2), chain A 5..7 (len 2), chain B 7..11 (len 4).
+        storage.release_front_len(2 + 2 + 4); // total 8
+
+        // Ring fully drained — should reset to 0.
+        assert_eq!(storage.abs_head, 0);
+        assert_eq!(storage.abs_tail, 0);
+
+        // Full capacity available.
+        let (_, l_new) = reserve_and_push(&mut storage, 8, 1);
+        assert_eq!(l_new, 0..8);
+        assert_eq!(storage.slice(l_new).len(), 8);
+    }
+
+    #[test]
+    fn full_capacity_available_after_drain() {
+        // After filling and fully draining the ring, we should be able to
+        // reserve the full capacity again regardless of where phys_tail ended up.
+        let mut storage = IovecStorage::with_capacity(8);
+
+        // Advance phys_tail to 5.
+        let (a0, l0) = reserve_and_push(&mut storage, 5, 1);
+        storage.release_front_len(l0.end - a0);
+        // Ring empty, but phys_tail = 5.
+
+        // Should be able to fit all 8.
+        let (_, l) = reserve_and_push(&mut storage, 8, 1);
+        assert_eq!(l.len(), 8);
+        assert_eq!(storage.slice(l).len(), 8);
+    }
+
+    #[test]
+    fn release_chain_with_wrap_gap_then_reuse() {
+        // After releasing a chain whose allocation includes a wrap gap,
+        // verify the freed space is reusable.
+        let mut storage = IovecStorage::with_capacity(4);
+
+        // Fill 3, release 2 so there's room after wrap gap. head=2, tail=3.
+        reserve_and_push(&mut storage, 3, 1);
+        storage.release_front_len(2);
+
+        // Reserve 2: phys 3, 3+2=5>4 → wrap. abs_tail becomes 4, then 4+2-2=4<=4 → OK.
+        // alloc=3..6, live=4..6.
+        let (a1, l1) = reserve_and_push(&mut storage, 2, 1);
+        assert_eq!(a1, 3);
+        assert_eq!(l1, 4..6);
+
+        // Release the remaining 1 from initial + the wrapped chain.
+        // Initial remainder: alloc 2..3 (len 1), chain: alloc 3..6 (len 3).
+        storage.release_front_len(1 + 3);
+
+        // Ring fully drained — resets to 0. Full capacity available.
+        assert_eq!(storage.abs_head, 0);
+        let (_, l2) = reserve_and_push(&mut storage, 4, 1);
+        assert_eq!(l2, 0..4);
+        assert_eq!(storage.slice(l2).len(), 4);
     }
 }

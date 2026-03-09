@@ -14,14 +14,24 @@ use super::{
 };
 
 /// Iterator over the writable slices in one descriptor chain.
+///
+/// Implements `ExactSizeIterator` so the transform can call `.len()` to know
+/// how many iovecs to reserve before pushing.
 pub struct WritableChainIter<'a> {
     inner: DescIter<'a>,
+    remaining: usize,
 }
 
 impl<'a> WritableChainIter<'a> {
     fn new(head: DescriptorChain<'a>) -> Self {
+        let remaining = head
+            .clone()
+            .into_iter()
+            .filter(DescriptorChain::is_write_only)
+            .count();
         Self {
             inner: head.into_iter(),
+            remaining,
         }
     }
 }
@@ -41,10 +51,17 @@ impl<'a> Iterator for WritableChainIter<'a> {
                 .mem
                 .get_slice(desc.addr, len)
                 .expect("descriptor validated before transform");
+            self.remaining -= 1;
             return Some(unsafe { AliasedIoSliceMut::from_slice(&slice) });
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl ExactSizeIterator for WritableChainIter<'_> {}
 
 /// RxQueueProducer owns the RX queue and batches writable descriptor chains.
 pub struct RxQueueProducer<T: WorkItemState = ()> {
@@ -75,9 +92,14 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     }
 
     /// Feed writable descriptor chains from the queue and transform them.
+    ///
+    /// The callback must call [`IovecAppender::reserve`] before pushing iovecs.
+    /// If `reserve` returns `false` (ring full), return `None` to stop feeding.
+    /// On success, return `Some((max_bytes, state))` where `max_bytes` is the
+    /// total byte capacity of the original (pre-transform) chain.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> T,
+        F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> Option<(usize, T)>,
     {
         let mut added = 0;
 
@@ -98,23 +120,13 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             };
 
             let head_index = head.index;
-            let Some((iov_count, max_bytes)) = self.validate_writable_chain(&head) else {
-                error!("Invalid descriptor chain headed by {}, skipping it", head_index);
-                continue 'next_chain;
-            };
 
-            if max_bytes == 0 {
-                warn!("Found empty chain, ignoring it");
-                continue 'next_chain;
-            }
-
-            let Some(alloc_start) = self.iovecs.begin_chain(iov_count) else {
+            let mut appender = IovecAppender::new(&mut self.iovecs);
+            let Some((max_bytes, state)) = transform(WritableChainIter::new(head), &mut appender) else {
                 self.queue.undo_pop();
                 break 'next_chain;
             };
-            let mut appender = IovecAppender::new(&mut self.iovecs);
-            let state = transform(WritableChainIter::new(head), &mut appender);
-            let (live, transformed_bytes) = appender.finish();
+            let (alloc_start, live, transformed_bytes) = appender.finish();
             let bytes_used = max_bytes - transformed_bytes;
             let allocation = alloc_start..live.end;
 
@@ -138,28 +150,6 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     /// Check if there are any pending chains.
     pub fn has_pending(&self) -> bool {
         !self.work_items.is_empty()
-    }
-
-    unsafe fn desc_to_volatile_ioslice_mut(
-        &self,
-        desc: &DescriptorChain,
-    ) -> Option<AliasedIoSliceMut<'_>> {
-        let len = desc.len as usize;
-        let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        Some(unsafe { AliasedIoSliceMut::from_slice(&slice) })
-    }
-
-    fn validate_writable_chain(&self, head: &DescriptorChain<'_>) -> Option<(usize, usize)> {
-        let mut count = 0;
-        let mut total = 0;
-
-        for desc in head.clone().into_iter().filter(DescriptorChain::is_write_only) {
-            let iov = unsafe { self.desc_to_volatile_ioslice_mut(&desc) }?;
-            count += 1;
-            total += iov.len();
-        }
-
-        Some((count, total))
     }
 
     /// Produce frames by calling the callback with a batch.
@@ -214,7 +204,11 @@ impl RxQueueProducer<()> {
     /// Feed writable descriptor chains without extra transformed state.
     pub fn feed(&mut self) -> usize {
         self.feed_with_transform(|iovecs, out| {
-            out.extend(iovecs);
+            if !out.reserve(iovecs.len()) {
+                return None;
+            }
+            let total_bytes: usize = iovecs.map(|iov| { let n = iov.len(); out.push(iov); n }).sum();
+            Some((total_bytes, ()))
         })
     }
 }
@@ -531,7 +525,11 @@ mod tests {
 
         let feed_with_hdr = |p: &mut TestRxProducer| {
             p.feed_with_transform(|iovecs, out| {
+                if !out.reserve(iovecs.len()) {
+                    return None;
+                }
                 out.extend(AliasedIoSliceMut::write_prefix(iovecs, b"HD"));
+                Some((out.total_bytes() + 2, ()))
             })
         };
 
@@ -648,12 +646,15 @@ mod tests {
 
         let mut tag = 0u32;
         let added = producer.feed_with_transform(|iovecs, out| {
+            if !out.reserve(iovecs.len()) {
+                return None;
+            }
             tag += 10;
             out.extend(iovecs);
-            CustomState {
+            Some((out.total_bytes(), CustomState {
                 tag,
                 received_len: Cell::new(0),
-            }
+            }))
         });
         assert_eq!(added, 4);
 
@@ -703,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "finished sequentially")]
+    #[should_panic(expected = "already finished")]
     fn test_double_finish_panics() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
@@ -715,7 +716,7 @@ mod tests {
         producer.feed();
         producer.produce(|batch| {
             batch.complete(0, 10);
-            batch.complete(0, 10); // should panic: expected 1
+            batch.complete(0, 10); // should panic: already finished
         });
     }
 }

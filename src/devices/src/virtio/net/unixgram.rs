@@ -212,8 +212,11 @@ impl NetBackend for Unixgram {
         loop {
             // Feed frames from queue, skipping vnet header
             let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
+                if !out.reserve(iovecs.len()) {
+                    return None;
+                }
                 out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
-                MsgHdrItem::default()
+                Some(MsgHdrItem::default())
             });
 
             if !self.tx_consumer.has_pending() {
@@ -265,11 +268,16 @@ impl NetBackend for Unixgram {
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
         let rx_fed = self.rx_producer.feed_with_transform(|iovecs, out| {
+            if !out.reserve(iovecs.len()) {
+                return None;
+            }
             out.extend(AliasedIoSliceMut::write_prefix(
                 iovecs,
                 &super::DEFAULT_VNET_HDR[..vnet_offset],
             ));
-            MsgHdrItem::default()
+            // max_bytes = transformed_bytes + vnet_offset (the prefix we wrote)
+            let max_bytes = out.total_bytes() + vnet_offset;
+            Some((max_bytes, MsgHdrItem::default()))
         });
         if rx_fed > 0 {
             log::info!(

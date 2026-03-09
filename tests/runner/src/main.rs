@@ -40,6 +40,46 @@ fn start_vm(test_setup: TestSetup) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Kill background processes registered via cleanup PID files.
+fn kill_cleanup_pids(test_dir: &Path) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    use std::io::BufRead;
+
+    let Ok(file) = File::open(test_dir.join("cleanup.pids")) else {
+        return;
+    };
+
+    let mut pids = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if let Ok(raw) = line.trim().parse::<i32>() {
+            pids.push(Pid::from_raw(raw));
+        }
+    }
+
+    for &pid in &pids {
+        let _ = kill(pid, Signal::SIGTERM);
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        pids.retain(|&pid| kill(pid, None).is_ok());
+        if pids.is_empty() || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    for &pid in &pids {
+        eprintln!(
+            "WARNING: cleanup process {} did not exit after SIGTERM, sending SIGKILL",
+            pid
+        );
+        let _ = kill(pid, Signal::SIGKILL);
+    }
+}
+
 fn run_single_test(
     test_case: &TestCase,
     base_dir: &Path,
@@ -81,6 +121,36 @@ fn run_single_test(
         .stderr(log_file)
         .spawn()
         .context("Failed to start subprocess for test")?;
+
+    // Enforce a per-test timeout. If the child doesn't exit within the
+    // deadline, kill it so we don't hang the entire suite.
+    let timeout = std::time::Duration::from_secs(test_case.timeout_secs());
+    let mut child = child;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(_) = child.try_wait().unwrap_or(None) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!("TIMEOUT ({}s)", timeout.as_secs());
+            let _ = child.kill();
+            if let Ok(output) = child.wait_with_output() {
+                if !output.stdout.is_empty() {
+                    let stdout_path = test_dir.join("stdout.txt");
+                    let _ = fs::write(&stdout_path, &output.stdout);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    eprintln!("--- stdout from timed-out test ---\n{stdout}---");
+                }
+            }
+            kill_cleanup_pids(&test_dir);
+            return Ok(TestResult {
+                name: test_case.name.to_string(),
+                outcome: TestOutcome::Fail,
+                log_path: Some(log_path),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     let test_name = test_case.name.to_string();
     let outcome = match catch_unwind(|| {
