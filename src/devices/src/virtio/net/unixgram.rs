@@ -14,7 +14,7 @@ use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::batch_queue::aliased_ioslice::{AnyIoSlice, RawAliasedIoSlice};
+use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AliasedIoSliceMut, AnyIoSlice, RawAliasedIoSlice};
 use crate::virtio::batch_queue::{ReceivedBytes, RxQueueProducer, TxQueueConsumer, WorkItemState};
 use crate::virtio::queue::Queue;
 use crate::virtio::InterruptTransport;
@@ -49,7 +49,7 @@ impl Default for MsgHdrItem {
 }
 
 impl WorkItemState for MsgHdrItem {
-    fn fixup_iovecs(&mut self, iovecs: &[RawAliasedIoSlice]) {
+    fn set_iovecs(&mut self, iovecs: &[RawAliasedIoSlice]) {
         let ptr = if iovecs.is_empty() {
             std::ptr::null_mut()
         } else {
@@ -87,6 +87,7 @@ impl ReceivedBytes for MsgHdrItem {
 pub struct Unixgram {
     fd: OwnedFd,
     include_vnet_header: bool,
+    interrupt: InterruptTransport,
     tx_consumer: TxQueueConsumer<MsgHdrItem>,
     rx_producer: RxQueueProducer<MsgHdrItem>,
     // Temporary debug counters
@@ -125,12 +126,14 @@ impl Unixgram {
             };
         }
 
-        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
-        let rx_producer = RxQueueProducer::new(rx_queue, mem, interrupt);
+        let iovec_capacity = tx_queue.size as usize * 2;
+        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), iovec_capacity);
+        let rx_producer = RxQueueProducer::new(rx_queue, mem, iovec_capacity);
 
         Self {
             fd,
             include_vnet_header,
+            interrupt,
             tx_consumer,
             rx_producer,
             tx_send_calls: 0,
@@ -209,15 +212,7 @@ impl NetBackend for Unixgram {
         loop {
             // Feed frames from queue, skipping vnet header
             let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
-                let mut remaining_skip = skip;
-                for mut iov in iovecs {
-                    if remaining_skip != 0 {
-                        let advance = remaining_skip.min(iov.len());
-                        iov.advance(advance);
-                        remaining_skip -= advance;
-                    }
-                    out.push(iov);
-                }
+                out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
                 MsgHdrItem::default()
             });
 
@@ -233,6 +228,10 @@ impl NetBackend for Unixgram {
 
             #[cfg(target_os = "macos")]
             let sent = self.send_macos()?;
+
+            if sent > 0 {
+                self.interrupt.signal_used_queue();
+            }
 
             self.tx_total_sent += sent as u64;
 
@@ -266,17 +265,10 @@ impl NetBackend for Unixgram {
 
         // Feed chains from queue, writing vnet header and advancing iovecs during feed
         let rx_fed = self.rx_producer.feed_with_transform(|iovecs, out| {
-            let mut header = &super::DEFAULT_VNET_HDR[..vnet_offset];
-
-            for mut iov in iovecs {
-                if !header.is_empty() {
-                    let written = iov.write(header);
-                    header = &header[written..];
-                    iov.advance(written);
-                }
-                out.push(iov);
-            }
-
+            out.extend(AliasedIoSliceMut::write_prefix(
+                iovecs,
+                &super::DEFAULT_VNET_HDR[..vnet_offset],
+            ));
             MsgHdrItem::default()
         });
         if rx_fed > 0 {
@@ -288,10 +280,14 @@ impl NetBackend for Unixgram {
         }
 
         #[cfg(target_os = "linux")]
-        self.recv_linux();
+        let finished = self.recv_linux();
 
         #[cfg(target_os = "macos")]
-        self.recv_macos();
+        let finished = self.recv_macos();
+
+        if finished > 0 {
+            self.interrupt.signal_used_queue();
+        }
 
         Ok(())
     }
@@ -327,7 +323,7 @@ impl Unixgram {
         Ok(sent)
     }
 
-    fn recv_linux(&mut self) {
+    fn recv_linux(&mut self) -> usize {
         let fd = self.fd.as_raw_fd();
 
         self.rx_producer.produce(|batch| {
@@ -358,7 +354,7 @@ impl Unixgram {
                     }
                 }
             }
-        });
+        })
     }
 }
 
@@ -391,7 +387,7 @@ impl Unixgram {
         Ok(sent)
     }
 
-    fn recv_macos(&mut self) {
+    fn recv_macos(&mut self) -> usize {
         let fd = self.fd.as_raw_fd();
 
         self.rx_producer.produce(|batch| {
@@ -417,6 +413,6 @@ impl Unixgram {
                     }
                 }
             }
-        });
+        })
     }
 }

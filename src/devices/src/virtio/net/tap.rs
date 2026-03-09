@@ -15,7 +15,7 @@ use virtio_bindings::virtio_net::{
 use vm_memory::GuestMemoryMmap;
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};
-use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
+use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AliasedIoSliceMut, AnyIoSlice};
 use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::queue::Queue;
 use crate::virtio::InterruptTransport;
@@ -26,6 +26,7 @@ ioctl_write_ptr!(tunsetvnethdrsz, b'T', 216, c_int);
 
 pub struct Tap {
     fd: OwnedFd,
+    interrupt: InterruptTransport,
     tx_consumer: TxQueueConsumer,
     rx_producer: RxQueueProducer,
 }
@@ -92,13 +93,15 @@ impl Tap {
             log::warn!("Failed to set O_NONBLOCK on tap: {e}");
         }
 
-        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
-        let rx_provider = RxQueueProducer::new(rx_queue, mem, interrupt);
+        let iovec_capacity = tx_queue.size as usize * 2;
+        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), iovec_capacity);
+        let rx_producer = RxQueueProducer::new(rx_queue, mem, iovec_capacity);
 
         Ok(Self {
             fd,
+            interrupt,
             tx_consumer,
-            rx_producer: rx_provider,
+            rx_producer,
         })
     }
 }
@@ -112,14 +115,14 @@ impl NetBackend for Tap {
         // Each descriptor chain is one packet. TAP's writev combines iovecs into
         // a single packet, so we can use it directly without flattening.
         // One writev syscall per packet.
-        self.tx_consumer.consume(|batch| {
+        let finished = self.tx_consumer.consume(|batch| {
             for i in 0..batch.len() {
                 let chain = batch.io_slices(i);
                 if chain.is_empty() {
                     continue;
                 }
                 let ret = unsafe {
-                    libc::writev(raw_fd, chain.as_iovec_ptr(), chain.len() as c_int)
+                    libc::writev(raw_fd, AliasedIoSlice::as_iovec_ptr(chain), chain.len() as c_int)
                 };
                 match ret {
                     n if n >= 0 => batch.finish(i),
@@ -135,6 +138,10 @@ impl NetBackend for Tap {
             }
         });
 
+        if finished > 0 {
+            self.interrupt.signal_used_queue();
+        }
+
         Ok(())
     }
 
@@ -143,7 +150,7 @@ impl NetBackend for Tap {
 
         self.rx_producer.feed();
 
-        self.rx_producer.produce(|batch| {
+        let finished = self.rx_producer.produce(|batch| {
             for i in 0..batch.len() {
                 let iovecs = batch.io_slices_mut(i);
                 if iovecs.is_empty() {
@@ -152,7 +159,7 @@ impl NetBackend for Tap {
                 }
 
                 let ret = unsafe {
-                    libc::readv(raw_fd, iovecs.as_iovec_ptr(), iovecs.len() as c_int)
+                    libc::readv(raw_fd, AliasedIoSliceMut::as_iovec_ptr(iovecs), iovecs.len() as c_int)
                 };
                 match ret {
                     n if n > 0 => batch.complete(i, n as usize),
@@ -167,6 +174,10 @@ impl NetBackend for Tap {
                 }
             }
         });
+
+        if finished > 0 {
+            self.interrupt.signal_used_queue();
+        }
 
         Ok(())
     }

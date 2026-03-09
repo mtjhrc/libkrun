@@ -8,9 +8,7 @@ use std::ops::Range;
 use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 use super::super::queue::{DescIter, DescriptorChain, Queue};
-use super::super::InterruptTransport;
 use super::aliased_ioslice::{AliasedIoSliceMut, AnyIoSlice};
-use super::ioslice_container_utils::SliceOfIoSlicesExt;
 use super::{
     raw_as_io_slices_mut, IovecAppender, IovecStorage, ReceivedBytes, WorkItem, WorkItemState,
 };
@@ -43,7 +41,7 @@ impl<'a> Iterator for WritableChainIter<'a> {
                 .mem
                 .get_slice(desc.addr, len)
                 .expect("descriptor validated before transform");
-            return Some(unsafe { AliasedIoSliceMut::from_volatile(&slice) });
+            return Some(unsafe { AliasedIoSliceMut::from_slice(&slice) });
         }
     }
 }
@@ -52,40 +50,34 @@ impl<'a> Iterator for WritableChainIter<'a> {
 pub struct RxQueueProducer<T: WorkItemState = ()> {
     queue: Queue,
     mem: GuestMemoryMmap,
-    interrupt: InterruptTransport,
-    max_chains: usize,
     iovecs: IovecStorage,
     work_items: Vec<WorkItem>,
     transformed: Vec<T>,
 }
 
 impl<T: WorkItemState> RxQueueProducer<T> {
-    /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
-    pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
-        let max_chains = queue.size as usize * 8;
+    /// Create a new RxQueueProducer with a fixed-size iovec ring buffer.
+    ///
+    /// `iovec_capacity` is the total number of iovec slots in the ring buffer.
+    /// Feeding stops when the ring is full or the queue is drained.
+    pub fn new(
+        queue: Queue,
+        mem: GuestMemoryMmap,
+        iovec_capacity: usize,
+    ) -> Self {
         Self {
             queue,
             mem,
-            interrupt,
-            max_chains,
-            iovecs: IovecStorage::with_capacity(max_chains * 4),
-            work_items: Vec::with_capacity(max_chains),
-            transformed: Vec::with_capacity(max_chains),
+            iovecs: IovecStorage::with_capacity(iovec_capacity),
+            work_items: Vec::new(),
+            transformed: Vec::new(),
         }
-    }
-
-    /// Set the maximum number of chains to keep pending at once.
-    pub fn set_max_chains(&mut self, max: usize) {
-        self.max_chains = max;
-        self.work_items.reserve(max.saturating_sub(self.work_items.capacity()));
-        self.transformed
-            .reserve(max.saturating_sub(self.transformed.capacity()));
     }
 
     /// Feed writable descriptor chains from the queue and transform them.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b>) -> T,
+        F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> T,
     {
         let mut added = 0;
 
@@ -93,7 +85,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             warn!("Failed to disable queue notifications: {e:?}");
         }
 
-        'next_chain: while self.pending_count() < self.max_chains {
+        'next_chain: loop {
             let Some(head) = self.queue.pop(&self.mem) else {
                 match self.queue.enable_notification(&self.mem) {
                     Ok(true) => continue 'next_chain,
@@ -116,27 +108,21 @@ impl<T: WorkItemState> RxQueueProducer<T> {
                 continue 'next_chain;
             }
 
-            let reserve_moved = self.iovecs.reserve(iov_count);
+            let Some(alloc_start) = self.iovecs.begin_chain(iov_count) else {
+                self.queue.undo_pop();
+                break 'next_chain;
+            };
             let mut appender = IovecAppender::new(&mut self.iovecs);
             let state = transform(WritableChainIter::new(head), &mut appender);
-            let (allocation, append_moved, transformed_bytes) = appender.finish();
-            let moved = reserve_moved || append_moved;
+            let (live, transformed_bytes) = appender.finish();
             let bytes_used = max_bytes - transformed_bytes;
+            let allocation = alloc_start..live.end;
 
-            self.work_items.push(WorkItem::new(
-                head_index,
-                max_bytes,
-                max_bytes,
-                bytes_used,
-                allocation,
-            ));
+            let item = WorkItem::new(head_index, max_bytes, bytes_used, allocation, live);
+            let mut state = state;
+            state.set_iovecs(item.raw_slice(&self.iovecs));
+            self.work_items.push(item);
             self.transformed.push(state);
-
-            if moved {
-                self.fixup_all_transformed();
-            } else {
-                self.fixup_transformed(self.work_items.len() - 1);
-            }
 
             added += 1;
         }
@@ -160,7 +146,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     ) -> Option<AliasedIoSliceMut<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        Some(unsafe { AliasedIoSliceMut::from_volatile(&slice) })
+        Some(unsafe { AliasedIoSliceMut::from_slice(&slice) })
     }
 
     fn validate_writable_chain(&self, head: &DescriptorChain<'_>) -> Option<(usize, usize)> {
@@ -177,6 +163,9 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     }
 
     /// Produce frames by calling the callback with a batch.
+    ///
+    /// Returns the number of chains finished by the callback. The caller is
+    /// responsible for signaling the guest when the return value is non-zero.
     pub fn produce<F>(&mut self, f: F) -> usize
     where
         F: for<'a> FnOnce(&mut RxProducerBatch<'a, T>),
@@ -185,7 +174,6 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             return 0;
         }
 
-        let compact_count;
         let finished_count;
         {
             let mut batch = RxProducerBatch {
@@ -194,60 +182,32 @@ impl<T: WorkItemState> RxQueueProducer<T> {
                 iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
-                first_unfinished: 0,
                 finished_count: 0,
             };
 
             f(&mut batch);
-            compact_count = batch.first_unfinished;
             finished_count = batch.finished_count;
         }
 
-        self.compact(compact_count);
-
-        if finished_count > 0 {
-            self.signal_used_if_needed();
-        }
-
+        self.release(finished_count);
         finished_count
     }
 
-    fn compact(&mut self, count: usize) {
+    fn release(&mut self, count: usize) {
         if count == 0 {
             return;
         }
 
-        let released = self.work_items[..count]
+        let released: usize = self.work_items[..count]
             .iter()
             .map(WorkItem::allocation_len)
             .sum();
 
         self.work_items.drain(..count);
         self.transformed.drain(..count);
-
-        if self.iovecs.release_front_len(released) {
-            self.fixup_all_transformed();
-        }
+        self.iovecs.release_front_len(released);
     }
 
-    fn fixup_transformed(&mut self, index: usize) {
-        let iovecs = self.work_items[index].raw_slice(&self.iovecs);
-        self.transformed[index].fixup_iovecs(iovecs);
-    }
-
-    fn fixup_all_transformed(&mut self) {
-        for (item, transformed) in self.work_items.iter().zip(self.transformed.iter_mut()) {
-            transformed.fixup_iovecs(item.raw_slice(&self.iovecs));
-        }
-    }
-
-    fn signal_used_if_needed(&mut self) {
-        match self.queue.needs_notification(&self.mem) {
-            Ok(true) => self.interrupt.signal_used_queue(),
-            Ok(false) => {}
-            Err(e) => error!("RxQueueProducer: needs_notification error: {e}"),
-        }
-    }
 }
 
 impl RxQueueProducer<()> {
@@ -266,8 +226,7 @@ pub struct RxProducerBatch<'a, T: WorkItemState> {
     iovecs: &'a mut IovecStorage,
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
-    /// Prefix length of consecutively finished chains.
-    first_unfinished: usize,
+    /// Number of chains finished so far (must be finished sequentially from 0).
     finished_count: usize,
 }
 
@@ -284,7 +243,7 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     #[inline]
     pub fn is_finished(&self, index: usize) -> bool {
-        self.work_items[index].finished
+        index < self.finished_count
     }
 
     #[inline]
@@ -321,19 +280,24 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
         raw_as_io_slices_mut(self.iovecs.slice_mut(live))
     }
 
+    /// Mark a contiguous range of chains as finished and add them to the used ring.
+    ///
+    /// Chains must be finished in order starting from 0. Out-of-order completion
+    /// may be added in the future if needed.
     pub fn finish_many(&mut self, range: Range<usize>) {
         if range.is_empty() {
             return;
         }
 
-        let range_start = range.start;
-        let range_end = range.end;
-        let count = range_end - range_start;
+        assert!(
+            range.start == self.finished_count,
+            "chains must be finished sequentially: expected start {}, got {}",
+            self.finished_count,
+            range.start
+        );
 
         for index in range {
-            self.assert_not_finished(index);
-            let item = &mut self.work_items[index];
-            item.finished = true;
+            let item = &self.work_items[index];
 
             if let Err(e) = self
                 .queue
@@ -341,17 +305,8 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
             {
                 error!("failed to add_used: {e}");
             }
-        }
 
-        self.finished_count += count;
-
-        if range_start == self.first_unfinished {
-            self.first_unfinished = range_end;
-            while self.first_unfinished < self.work_items.len()
-                && self.work_items[self.first_unfinished].finished
-            {
-                self.first_unfinished += 1;
-            }
+            self.finished_count += 1;
         }
     }
 
@@ -384,7 +339,7 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
         );
         item.advance(self.iovecs, bytes);
         let iovecs = item.raw_slice(self.iovecs);
-        self.transformed[index].fixup_iovecs(iovecs);
+        self.transformed[index].set_iovecs(iovecs);
     }
 
     pub fn truncate(&mut self, index: usize, max_bytes: usize) {
@@ -392,12 +347,13 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
         let item = &mut self.work_items[index];
         item.truncate_bytes(self.iovecs, max_bytes);
         let iovecs = item.raw_slice(self.iovecs);
-        self.transformed[index].fixup_iovecs(iovecs);
+        self.transformed[index].set_iovecs(iovecs);
     }
 
     #[allow(clippy::result_unit_err)]
     pub fn write_advance(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
-        let written = self.io_slices_mut(index).write(data);
+        let written =
+            AliasedIoSliceMut::scatter_write(self.io_slices_mut(index).iter().copied(), data);
         if written != data.len() {
             return Err(());
         }
@@ -407,7 +363,8 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     #[allow(clippy::result_unit_err)]
     pub fn write_complete(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
-        let written = self.io_slices_mut(index).write(data);
+        let written =
+            AliasedIoSliceMut::scatter_write(self.io_slices_mut(index).iter().copied(), data);
         if written != data.len() {
             return Err(());
         }
@@ -452,10 +409,9 @@ impl<T: WorkItemState + ReceivedBytes> RxProducerBatch<'_, T> {
 mod tests {
     use std::cell::Cell;
 
-    use crate::virtio::batch_queue::aliased_ioslice::{AnyIoSlice, RawAliasedIoSlice};
-    use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
+    use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSliceMut, AnyIoSlice, RawAliasedIoSlice};
     use crate::virtio::batch_queue::{ReceivedBytes, WorkItemState};
-    use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
+    use crate::virtio::test_utils::{ExpectedUsed, TestSetup};
 
     use super::RxQueueProducer;
 
@@ -466,7 +422,7 @@ mod tests {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(producer.pending_count(), 0);
         assert_eq!(producer.feed(), 0);
@@ -481,7 +437,7 @@ mod tests {
         _driver.writable(&[1500]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(producer.feed(), 1);
         assert_eq!(producer.pending_count(), 1);
@@ -494,7 +450,7 @@ mod tests {
         driver.writable(&[512, 1024]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(producer.feed(), 1);
         assert_eq!(producer.pending_count(), 1);
@@ -510,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_feed_respects_max_frames() {
+    fn test_feed_respects_iovec_capacity() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
         driver
@@ -520,9 +476,9 @@ mod tests {
             .writable(&[1500])
             .writable(&[1500]);
 
+        // Iovec capacity of 2: only 2 single-iovec chains fit.
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
-        producer.set_max_chains(2);
+            RxQueueProducer::new(queue, setup.mem().clone(), 2);
 
         assert_eq!(producer.feed(), 2);
         assert_eq!(producer.pending_count(), 2);
@@ -535,7 +491,7 @@ mod tests {
         driver.writable(&[10, 90]).writable(&[100]).writable(&[100]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(),16);
 
         producer.feed();
 
@@ -571,19 +527,11 @@ mod tests {
             .writable(&[6, 12, 6]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(),32);
 
         let feed_with_hdr = |p: &mut TestRxProducer| {
             p.feed_with_transform(|iovecs, out| {
-                let mut header = b"HD".as_slice();
-                for mut iov in iovecs {
-                    if !header.is_empty() {
-                        let written = iov.write(header);
-                        header = &header[written..];
-                        iov.advance(written);
-                    }
-                    out.push(iov);
-                }
+                out.extend(AliasedIoSliceMut::write_prefix(iovecs, b"HD"));
             })
         };
 
@@ -593,7 +541,7 @@ mod tests {
         let completed = producer.produce(|batch| {
             batch.write_complete(0, b"aaaaaaaaaaaaaaaaaa").unwrap();
 
-            let written = batch.io_slices_mut(1).write(b"bbbb");
+            let written = AliasedIoSliceMut::scatter_write(batch.io_slices_mut(1).iter().copied(), b"bbbb");
             assert_eq!(written, 4);
             batch.advance(1, 4);
         });
@@ -608,7 +556,7 @@ mod tests {
         assert_eq!(producer.pending_count(), 4);
 
         let completed = producer.produce(|batch| {
-            let written = batch.io_slices_mut(0).write(b"bbbbbbbb");
+            let written = AliasedIoSliceMut::scatter_write(batch.io_slices_mut(0).iter().copied(), b"bbbbbbbb");
             assert_eq!(written, 8);
             batch.complete(0, 8);
         });
@@ -654,51 +602,19 @@ mod tests {
     }
 
     #[test]
-    fn test_out_of_order_completion() {
+    #[should_panic(expected = "finished sequentially")]
+    fn test_out_of_order_completion_panics() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
-        driver
-            .writable(&[2, 2])
-            .writable(&[2, 2])
-            .writable(&[2, 2])
-            .writable(&[2, 2]);
+        driver.writable(&[2, 2]).writable(&[2, 2]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), 16);
 
         producer.feed();
-
-        let completed = producer.produce(|batch| {
-            batch.write_complete(3, b"pkt3").unwrap();
-            batch.write_complete(1, b"pkt1").unwrap();
+        producer.produce(|batch| {
+            batch.write_complete(1, b"pkt1").unwrap(); // should panic: expected 0
         });
-
-        assert_eq!(completed, 2);
-        assert_eq!(producer.pending_count(), 4);
-        driver.assert_used(&[
-            (3, ExpectedUsed::Writable(b"pkt3")),
-            (1, ExpectedUsed::Writable(b"pkt1")),
-        ]);
-
-        let completed = producer.produce(|batch| {
-            batch.write_complete(0, b"pkt0").unwrap();
-        });
-
-        assert_eq!(completed, 1);
-        assert_eq!(producer.pending_count(), 2);
-
-        let completed = producer.produce(|batch| {
-            batch.write_complete(0, b"pkt2").unwrap();
-        });
-
-        assert_eq!(completed, 1);
-        assert_eq!(producer.pending_count(), 0);
-        driver.assert_used(&[
-            (3, ExpectedUsed::Writable(b"pkt3")),
-            (1, ExpectedUsed::Writable(b"pkt1")),
-            (0, ExpectedUsed::Writable(b"pkt0")),
-            (2, ExpectedUsed::Writable(b"pkt2")),
-        ]);
     }
 
     #[derive(Default)]
@@ -708,7 +624,7 @@ mod tests {
     }
 
     impl WorkItemState for CustomState {
-        fn fixup_iovecs(&mut self, _iovecs: &[RawAliasedIoSlice]) {}
+        fn set_iovecs(&mut self, _iovecs: &[RawAliasedIoSlice]) {}
     }
 
     impl ReceivedBytes for CustomState {
@@ -728,7 +644,7 @@ mod tests {
             .writable(&[100]);
 
         let mut producer: RxQueueProducer<CustomState> =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(),16);
 
         let mut tag = 0u32;
         let added = producer.feed_with_transform(|iovecs, out| {
@@ -748,24 +664,19 @@ mod tests {
             assert_eq!(batch.transformed_item(2).tag, 30);
             assert_eq!(batch.transformed_item(3).tag, 40);
 
-            let written = batch.io_slices_mut(0).write(b"aaaa");
+            let written = AliasedIoSliceMut::scatter_write(batch.io_slices_mut(0).iter().copied(), b"aaaa");
             batch.transformed_item_mut(0).received_len.set(written);
 
-            let written = batch.io_slices_mut(1).write(b"bbbbbbbb");
+            let written = AliasedIoSliceMut::scatter_write(batch.io_slices_mut(1).iter().copied(), b"bbbbbbbb");
             batch.transformed_item_mut(1).received_len.set(written);
 
-            let written = batch.io_slices_mut(3).write(b"dddddddddddd");
-            batch.transformed_item_mut(3).received_len.set(written);
-
             batch.complete_received_many(0..2);
-            batch.complete_received(3);
         });
-        assert_eq!(completed, 3);
+        assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 2);
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"aaaa")),
             (1, ExpectedUsed::Writable(b"bbbbbbbb")),
-            (3, ExpectedUsed::Writable(b"dddddddddddd")),
         ]);
 
         let completed = producer.produce(|batch| {
@@ -773,34 +684,38 @@ mod tests {
             assert_eq!(batch.transformed_item(0).tag, 30);
             assert_eq!(batch.transformed_item(1).tag, 40);
 
-            let written = batch.io_slices_mut(0).write(b"cccccc");
+            let written = AliasedIoSliceMut::scatter_write(batch.io_slices_mut(0).iter().copied(), b"cccccc");
             batch.transformed_item_mut(0).received_len.set(written);
-            batch.complete_received(0);
+
+            let written = AliasedIoSliceMut::scatter_write(batch.io_slices_mut(1).iter().copied(), b"dddddddddddd");
+            batch.transformed_item_mut(1).received_len.set(written);
+
+            batch.complete_received_many(0..2);
         });
-        assert_eq!(completed, 1);
+        assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 0);
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"aaaa")),
             (1, ExpectedUsed::Writable(b"bbbbbbbb")),
-            (3, ExpectedUsed::Writable(b"dddddddddddd")),
             (2, ExpectedUsed::Writable(b"cccccc")),
+            (3, ExpectedUsed::Writable(b"dddddddddddd")),
         ]);
     }
 
     #[test]
-    #[should_panic(expected = "already finished")]
+    #[should_panic(expected = "finished sequentially")]
     fn test_double_finish_panics() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
         driver.writable(&[100]);
 
         let mut producer: TestRxProducer =
-            RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
+            RxQueueProducer::new(queue, setup.mem().clone(), 16);
 
         producer.feed();
         producer.produce(|batch| {
             batch.complete(0, 10);
-            batch.complete(0, 10);
+            batch.complete(0, 10); // should panic: expected 1
         });
     }
 }

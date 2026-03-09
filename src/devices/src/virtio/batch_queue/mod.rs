@@ -3,42 +3,36 @@
 
 //! Batched virtio queue producer/consumer infrastructure.
 //!
-//! Raw iovecs always live in one shared contiguous arena owned by the batch
-//! queue. Per-chain metadata stores only ranges into that arena. Optional
+//! Raw iovecs live in a fixed-capacity ring buffer owned by the batch queue.
+//! Each descriptor chain's iovecs occupy a contiguous slice of the ring; when
+//! the tail has insufficient room the allocation wraps to physical index 0.
+//! Per-chain metadata stores absolute ranges into the ring.  Optional
 //! user-transformed state lives in a separate array aligned with the work
-//! items, so pointer-bearing state like `mmsghdr` can be rebuilt whenever the
-//! arena moves.
+//! items.
 
-use std::alloc::{self, Layout};
 use std::ops::Range;
-use std::ptr::NonNull;
 
 use aliased_ioslice::{AliasedIoSlice, AliasedIoSliceMut, AnyIoSlice, RawAliasedIoSlice};
-use ioslice_container_utils::SliceOfIoSlicesExt;
 
 pub mod aliased_ioslice;
-pub mod ioslice_container_utils;
 mod rx_queue_producer;
 mod tx_queue_consumer;
 
 pub use rx_queue_producer::{RxProducerBatch, RxQueueProducer};
 pub use tx_queue_consumer::{TxConsumerBatch, TxQueueConsumer};
 
-/// Compact reclaimed prefix once it becomes meaningfully large.
-const IOVEC_COMPACT_THRESHOLD: usize = 64;
-
-/// Optional user-owned transformed state aligned 1:1 with the work items.
+/// Per-chain state returned by the feed transform and stored alongside each
+/// work item.
 ///
-/// The transform callback receives an iterator over the descriptor chain and an
-/// [`IovecAppender`] that writes directly into the queue-owned raw iovec arena.
-/// If the state needs pointers into that arena, rebuild them here from the
-/// current live slice.
+/// `set_iovecs` is called to update cached iovec pointers: once after feed,
+/// and again after any `advance` or `truncate` that changes the live window.
+/// Implementors like `MsgHdrItem` use this to keep `mmsghdr.msg_iov` in sync.
 pub trait WorkItemState: Send {
-    fn fixup_iovecs(&mut self, iovecs: &[RawAliasedIoSlice]);
+    fn set_iovecs(&mut self, iovecs: &[RawAliasedIoSlice]);
 }
 
 impl WorkItemState for () {
-    fn fixup_iovecs(&mut self, _iovecs: &[RawAliasedIoSlice]) {}
+    fn set_iovecs(&mut self, _iovecs: &[RawAliasedIoSlice]) {}
 }
 
 /// Optional trait for transformed state that records receive byte counts.
@@ -67,35 +61,39 @@ pub(crate) fn raw_as_io_slices_mut<'a>(
 ///
 /// This appends directly into the shared raw-iovec arena instead of collecting
 /// a temporary per-chain container first.
-pub struct IovecAppender<'a> {
-    storage: &'a mut IovecStorage,
+///
+/// `'iov` is the lifetime of the iovec data (guest memory).  Only iovecs that
+/// live at least as long as `'iov` can be pushed, which ties the appender to
+/// the descriptor chain iterator that produces the iovecs.
+pub struct IovecAppender<'s, 'iov> {
+    storage: &'s mut IovecStorage,
     start: usize,
     len: usize,
     total_bytes: usize,
-    moved: bool,
+    _marker: std::marker::PhantomData<&'iov ()>,
 }
 
-impl<'a> IovecAppender<'a> {
-    pub(crate) fn new(storage: &'a mut IovecStorage) -> Self {
+impl<'s, 'iov> IovecAppender<'s, 'iov> {
+    pub(crate) fn new(storage: &'s mut IovecStorage) -> Self {
         let start = storage.end_index();
         Self {
             storage,
             start,
             len: 0,
             total_bytes: 0,
-            moved: false,
+            _marker: std::marker::PhantomData,
         }
     }
 
     /// Append one iovec to the shared arena.
-    pub fn push(&mut self, iov: impl AnyIoSlice) {
+    pub fn push(&mut self, iov: impl AnyIoSlice + 'iov) {
         if iov.is_empty() {
             return;
         }
 
         let raw = unsafe { RawAliasedIoSlice::from_any(iov) };
         self.total_bytes += raw.len();
-        self.moved |= self.storage.push(raw);
+        self.storage.push(raw);
         self.len += 1;
     }
 
@@ -103,268 +101,149 @@ impl<'a> IovecAppender<'a> {
     pub fn extend<I>(&mut self, iovecs: I)
     where
         I: IntoIterator,
-        I::Item: AnyIoSlice,
+        I::Item: AnyIoSlice + 'iov,
     {
         for iov in iovecs {
             self.push(iov);
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 
-    pub(crate) fn finish(self) -> (Range<usize>, bool, usize) {
-        (self.start..self.start + self.len, self.moved, self.total_bytes)
+    pub(crate) fn finish(self) -> (Range<usize>, usize) {
+        (self.start..self.start + self.len, self.total_bytes)
     }
 }
 
-/// Manual heap array for the shared raw-iovec arena.
-pub(crate) struct RawIovecArray {
-    ptr: NonNull<RawAliasedIoSlice>,
-    len: usize,
-    cap: usize,
-}
-
-impl Default for RawIovecArray {
-    fn default() -> Self {
-        Self {
-            ptr: NonNull::dangling(),
-            len: 0,
-            cap: 0,
-        }
-    }
+/// Fixed-capacity ring buffer for raw iovecs.
+///
+/// Chains are allocated contiguously: when the tail doesn't have enough room
+/// for a chain's iovecs, it wraps to physical index 0.  The gap between the
+/// old tail and the buffer end is included in the chain's `allocation` so it
+/// is reclaimed when the chain is released.
+pub(crate) struct IovecStorage {
+    buf: Box<[RawAliasedIoSlice]>,
+    /// Monotonically increasing logical head / tail.
+    abs_head: usize,
+    abs_tail: usize,
 }
 
 // Safety: the stored iovecs point into guest memory owned by the surrounding
 // queue object.
-unsafe impl Send for RawIovecArray {}
-
-impl RawIovecArray {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        if capacity == 0 {
-            return Self::default();
-        }
-
-        let layout = Layout::array::<RawAliasedIoSlice>(capacity).unwrap();
-        let ptr = unsafe { alloc::alloc(layout) as *mut RawAliasedIoSlice };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| alloc::handle_alloc_error(layout));
-
-        Self {
-            ptr,
-            len: 0,
-            cap: capacity,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn as_slice(&self) -> &[RawAliasedIoSlice] {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [RawAliasedIoSlice] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-    }
-
-    fn extend_from_slice(&mut self, data: &[RawAliasedIoSlice]) -> bool {
-        if data.is_empty() {
-            return false;
-        }
-
-        let moved = self.reserve(data.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                self.ptr.as_ptr().add(self.len),
-                data.len(),
-            );
-        }
-        self.len += data.len();
-        moved
-    }
-
-    fn reserve(&mut self, additional: usize) -> bool {
-        let required = self.len + additional;
-        if required <= self.cap {
-            return false;
-        }
-
-        let new_cap = required.max(self.cap.saturating_mul(2)).max(8);
-        let new_layout = Layout::array::<RawAliasedIoSlice>(new_cap).unwrap();
-        let new_ptr = unsafe { alloc::alloc(new_layout) as *mut RawAliasedIoSlice };
-        let new_ptr = NonNull::new(new_ptr).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), new_ptr.as_ptr(), self.len);
-        }
-
-        if self.cap > 0 {
-            let old_layout = Layout::array::<RawAliasedIoSlice>(self.cap).unwrap();
-            unsafe {
-                alloc::dealloc(self.ptr.as_ptr() as *mut u8, old_layout);
-            }
-        }
-
-        self.ptr = new_ptr;
-        self.cap = new_cap;
-        true
-    }
-
-    fn drain_prefix(&mut self, count: usize) {
-        assert!(count <= self.len);
-        if count == 0 {
-            return;
-        }
-
-        let remaining = self.len - count;
-        unsafe {
-            std::ptr::copy(self.ptr.as_ptr().add(count), self.ptr.as_ptr(), remaining);
-        }
-        self.len = remaining;
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-    }
-}
-
-impl Drop for RawIovecArray {
-    fn drop(&mut self) {
-        if self.cap == 0 {
-            return;
-        }
-
-        let layout = Layout::array::<RawAliasedIoSlice>(self.cap).unwrap();
-        unsafe {
-            alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
-        }
-    }
-}
-
-/// Shared contiguous raw-iovec storage.
-#[derive(Default)]
-pub(crate) struct IovecStorage {
-    storage: RawIovecArray,
-    /// Absolute index of `storage[0]`.
-    base_index: usize,
-    /// Number of fully released entries still resident at the front.
-    reclaimed_prefix: usize,
-}
+unsafe impl Send for IovecStorage {}
 
 impl IovecStorage {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(cap: usize) -> Self {
         Self {
-            storage: RawIovecArray::with_capacity(capacity),
-            base_index: 0,
-            reclaimed_prefix: 0,
+            buf: vec![RawAliasedIoSlice::zeroed(); cap].into_boxed_slice(),
+            abs_head: 0,
+            abs_tail: 0,
         }
     }
 
     pub(crate) fn end_index(&self) -> usize {
-        self.base_index + self.storage.len()
+        self.abs_tail
     }
 
-    pub(crate) fn reserve(&mut self, additional: usize) -> bool {
-        self.storage.reserve(additional)
+    /// Try to reserve `count` contiguous iovec slots for the next chain.
+    ///
+    /// If there isn't enough room at the physical tail, the tail wraps to 0.
+    /// Returns `Some(alloc_start)` on success — the absolute index *before*
+    /// any padding, so the caller can build an `allocation` range that
+    /// includes the wrap gap.  Returns `None` when the ring is too full.
+    pub(crate) fn begin_chain(&mut self, count: usize) -> Option<usize> {
+        let cap = self.buf.len();
+        let saved_tail = self.abs_tail;
+        let phys_tail = self.abs_tail % cap;
+        if phys_tail + count > cap {
+            // wrap to physical 0 — the gap is dead space
+            self.abs_tail += cap - phys_tail;
+        }
+        if self.abs_tail + count - self.abs_head > cap {
+            // not enough free slots — undo any wrap padding
+            self.abs_tail = saved_tail;
+            return None;
+        }
+        Some(saved_tail)
     }
 
-    pub(crate) fn push(&mut self, iov: RawAliasedIoSlice) -> bool {
-        self.storage.extend_from_slice(std::slice::from_ref(&iov))
+    pub(crate) fn push(&mut self, iov: RawAliasedIoSlice) {
+        let phys = self.abs_tail % self.buf.len();
+        self.buf[phys] = iov;
+        self.abs_tail += 1;
     }
 
     pub(crate) fn slice(&self, range: Range<usize>) -> &[RawAliasedIoSlice] {
-        let physical = self.physical_range(range);
-        &self.storage.as_slice()[physical]
+        if range.is_empty() {
+            return &[];
+        }
+        let cap = self.buf.len();
+        let start = range.start % cap;
+        let len = range.end - range.start;
+        debug_assert!(
+            start + len <= cap,
+            "slice not contiguous: phys_start={start} len={len} cap={cap}"
+        );
+        &self.buf[start..start + len]
     }
 
     pub(crate) fn slice_mut(&mut self, range: Range<usize>) -> &mut [RawAliasedIoSlice] {
-        let physical = self.physical_range(range);
-        &mut self.storage.as_mut_slice()[physical]
+        if range.is_empty() {
+            return &mut [];
+        }
+        let cap = self.buf.len();
+        let start = range.start % cap;
+        let len = range.end - range.start;
+        debug_assert!(
+            start + len <= cap,
+            "slice not contiguous: phys_start={start} len={len} cap={cap}"
+        );
+        &mut self.buf[start..start + len]
     }
 
-    pub(crate) fn release_front_len(&mut self, len: usize) -> bool {
-        if len == 0 {
-            return false;
-        }
-
-        debug_assert!(self.reclaimed_prefix + len <= self.storage.len());
-        self.reclaimed_prefix += len;
-        self.maybe_compact()
-    }
-
-    fn physical_range(&self, range: Range<usize>) -> Range<usize> {
-        debug_assert!(range.start >= self.base_index);
-        debug_assert!(range.end >= range.start);
-        debug_assert!(range.end <= self.base_index + self.storage.len());
-        (range.start - self.base_index)..(range.end - self.base_index)
-    }
-
-    fn maybe_compact(&mut self) -> bool {
-        if self.reclaimed_prefix == 0 {
-            return false;
-        }
-
-        if self.reclaimed_prefix == self.storage.len() {
-            self.storage.clear();
-            self.base_index += self.reclaimed_prefix;
-            self.reclaimed_prefix = 0;
-            return false;
-        }
-
-        if self.reclaimed_prefix < IOVEC_COMPACT_THRESHOLD
-            && self.reclaimed_prefix * 2 < self.storage.len()
-        {
-            return false;
-        }
-
-        self.storage.drain_prefix(self.reclaimed_prefix);
-        self.base_index += self.reclaimed_prefix;
-        self.reclaimed_prefix = 0;
-        true
+    pub(crate) fn release_front_len(&mut self, len: usize) {
+        self.abs_head += len;
+        debug_assert!(self.abs_head <= self.abs_tail);
     }
 }
 
 /// Queue-owned per-chain metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct WorkItem {
+    /// Virtqueue descriptor chain head index, passed back to `add_used` on completion.
     pub(crate) head_index: u16,
-    pub(crate) guest_len: usize,
+    /// Total byte capacity of the transformed iovec window. Used as an upper
+    /// bound for `bytes_used` and for computing remaining capacity.
     pub(crate) max_bytes: usize,
+    /// Cumulative bytes consumed (TX) or written (RX) so far. For RX this is
+    /// the value reported to `add_used`; may be pre-seeded during feed when the
+    /// transform writes data (e.g. a vnet header) before I/O begins.
     pub(crate) bytes_used: usize,
-    pub(crate) finished: bool,
-    /// Full reservation in the shared arena. Kept until the chain is drained.
+    /// Full reservation in the iovec ring, including any dead-space gap from
+    /// wrapping. `allocation_len()` is used during release to advance the ring
+    /// head by the correct amount.
     pub(crate) allocation: Range<usize>,
-    /// Live iovec window for the current partial progress state.
+    /// Current active iovec window within the ring. Shrinks from the front on
+    /// `advance` and from the back on `truncate_bytes`.
     pub(crate) live: Range<usize>,
 }
 
 impl WorkItem {
     pub(crate) fn new(
         head_index: u16,
-        guest_len: usize,
         max_bytes: usize,
         bytes_used: usize,
         allocation: Range<usize>,
+        live: Range<usize>,
     ) -> Self {
         Self {
             head_index,
-            guest_len,
             max_bytes,
             bytes_used,
-            finished: false,
-            live: allocation.clone(),
             allocation,
+            live,
         }
     }
 
@@ -373,7 +252,7 @@ impl WorkItem {
     }
 
     pub(crate) fn allocation_len(&self) -> usize {
-        self.allocation.end - self.allocation.start
+        self.allocation.len()
     }
 
     pub(crate) fn advance(&mut self, storage: &mut IovecStorage, bytes: usize) {
@@ -385,7 +264,7 @@ impl WorkItem {
         {
             let iovecs = storage.slice_mut(self.live.clone());
             let original_len = iovecs.len();
-            let remaining_len = iovecs.advance(bytes).len();
+            let remaining_len = RawAliasedIoSlice::advance_slices(iovecs, bytes).len();
             new_start += original_len - remaining_len;
         }
         self.live.start = new_start;
@@ -402,9 +281,7 @@ impl WorkItem {
                 break;
             }
             if remaining < len {
-                unsafe {
-                    iov.set_len(remaining);
-                }
+                iov.shorten(remaining);
                 keep += 1;
                 remaining = 0;
                 break;

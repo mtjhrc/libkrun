@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AnyIoSlice};
-use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
+use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AliasedIoSliceMut, AnyIoSlice};
 use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
@@ -49,6 +48,7 @@ fn try_read_frame_header(
 pub struct Unixstream {
     fd: OwnedFd,
     backend_handles_vnet_hdr: bool,
+    interrupt: InterruptTransport,
     tx_consumer: TxQueueConsumer,
     rx_producer: RxQueueProducer,
     /// Shared frame-length header buffer for TX. Written before each writev
@@ -87,14 +87,16 @@ impl Unixstream {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), interrupt.clone());
-        let rx_provider = RxQueueProducer::new(rx_queue, mem, interrupt);
+        let iovec_capacity = tx_queue.size as usize * 2;
+        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), iovec_capacity);
+        let rx_producer = RxQueueProducer::new(rx_queue, mem, iovec_capacity);
 
         Self {
             fd,
             backend_handles_vnet_hdr,
+            interrupt,
             tx_consumer,
-            rx_producer: rx_provider,
+            rx_producer,
             tx_frame_header: Box::new([0u8; FRAME_HEADER_LEN]),
             rx_header_buf: [0u8; FRAME_HEADER_LEN],
             rx_header_pos: 0,
@@ -162,16 +164,7 @@ impl NetBackend for Unixstream {
         let header_ptr = self.tx_frame_header.as_ptr();
         let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
             out.push(unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
-
-            let mut remaining_skip = skip;
-            for mut iov in iovecs {
-                if remaining_skip != 0 {
-                    let advance = remaining_skip.min(iov.len());
-                    iov.advance(advance);
-                    remaining_skip -= advance;
-                }
-                out.push(iov);
-            }
+            out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
         });
         log::trace!(
             "Unixstream::send() fed {} frames, pending={}",
@@ -187,7 +180,7 @@ impl NetBackend for Unixstream {
         let header_ptr = self.tx_frame_header.as_mut_ptr() as *mut u32;
 
         // Chains have header iovec prepended; fill in the length before each writev.
-        self.tx_consumer.consume(|batch| {
+        let finished = self.tx_consumer.consume(|batch| {
             for i in 0..batch.len() {
                 let chain = batch.io_slices(i);
                 if chain.is_empty() {
@@ -198,12 +191,12 @@ impl NetBackend for Unixstream {
                 // into the shared header buffer via raw pointer (the iovecs
                 // alias this memory, so we must not create a &mut reference).
                 if batch.bytes_used(i) == 0 {
-                    let payload_len: usize = chain[1..].total_len();
+                    let payload_len: usize = AliasedIoSlice::total_len(chain[1..].iter().copied());
                     unsafe { std::ptr::write_volatile(header_ptr, (payload_len as u32).to_be()) };
                 }
 
                 let ret = unsafe {
-                    libc::writev(raw_fd, chain.as_iovec_ptr(), chain.len() as libc::c_int)
+                    libc::writev(raw_fd, AliasedIoSlice::as_iovec_ptr(chain), chain.len() as libc::c_int)
                 };
                 match ret {
                     n if n >= 0 => batch.finish(i),
@@ -218,6 +211,10 @@ impl NetBackend for Unixstream {
                 }
             }
         });
+
+        if finished > 0 {
+            self.interrupt.signal_used_queue();
+        }
 
         Ok(())
     }
@@ -237,7 +234,7 @@ impl NetBackend for Unixstream {
         let header_pos = &mut self.rx_header_pos;
         let expecting = &mut self.expecting_frame_length;
 
-        self.rx_producer.produce(|batch| {
+        let finished = self.rx_producer.produce(|batch| {
             for i in 0..batch.len() {
                 // Read frame header
                 let frame_len = match try_read_frame_header(fd, header_buf, header_pos, expecting) {
@@ -254,10 +251,11 @@ impl NetBackend for Unixstream {
 
                 // Read payload (truncated to remaining frame bytes)
                 let remaining = total_len - batch.bytes_used(i);
-                let iovecs = batch.io_slices_mut(i).truncate(remaining);
+                let iovecs =
+                    AliasedIoSliceMut::truncate_slices(batch.io_slices_mut(i), remaining);
 
                 let ret = unsafe {
-                    libc::readv(raw_fd, iovecs.as_iovec_ptr(), iovecs.len() as libc::c_int)
+                    libc::readv(raw_fd, AliasedIoSliceMut::as_iovec_ptr(iovecs), iovecs.len() as libc::c_int)
                 };
                 match ret {
                     n if n > 0 => {
@@ -279,6 +277,10 @@ impl NetBackend for Unixstream {
                 }
             }
         });
+
+        if finished > 0 {
+            self.interrupt.signal_used_queue();
+        }
 
         Ok(())
     }

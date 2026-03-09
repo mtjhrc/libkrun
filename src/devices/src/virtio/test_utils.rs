@@ -8,10 +8,8 @@ use std::mem::size_of;
 
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
 
-use crate::legacy::DummyIrqChip;
 use crate::virtio::queue::tests::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
 use crate::virtio::queue::{Descriptor, Queue, VirtqUsedElem};
-use crate::virtio::InterruptTransport;
 
 const MEM_SIZE: u64 = 0x100000;
 /// Per-queue data region size (64 KB).
@@ -81,11 +79,6 @@ impl TestSetup {
     }
 }
 
-/// Create an InterruptTransport for testing
-pub fn create_interrupt() -> InterruptTransport {
-    InterruptTransport::new(DummyIrqChip::new().into(), "test".to_string()).unwrap()
-}
-
 /// A segment within a descriptor chain (address + size + optional expected data)
 #[derive(Clone)]
 pub struct DescSegment {
@@ -111,10 +104,8 @@ pub struct BuiltChain {
 pub enum ExpectedUsed<'a> {
     /// Writable chain - verify content matches exactly
     Writable(&'a [u8]),
-    /// Readable chain - verify wasn't modified, expect this length in used ring
-    Readable(u32),
-    /// Readable chain - verify wasn't modified, don't check length
-    ReadableAnyLen,
+    /// Readable chain - verify wasn't modified
+    Readable,
 }
 
 /// Simulates the guest driver side of a VirtIO queue for testing.
@@ -327,8 +318,7 @@ impl<'a> VirtQueueDriver<'a> {
     ///
     /// Each entry is `(chain_idx, expected)` where `expected` is:
     /// - `Writable(bytes)` - verify writable chain content matches
-    /// - `Readable(len)` - verify readable chain wasn't modified, check length
-    /// - `ReadableAnyLen` - verify readable chain wasn't modified, skip length check
+    /// - `Readable` - verify readable chain wasn't modified
     #[track_caller]
     pub fn assert_used(&self, expected: &[(usize, ExpectedUsed<'_>)]) {
         let used = self.used_entries();
@@ -373,18 +363,7 @@ impl<'a> VirtQueueDriver<'a> {
                         i, chain_idx, expected_bytes, actual_data
                     );
                 }
-                ExpectedUsed::Readable(expected_len) => {
-                    // Verify readable data wasn't modified
-                    self.assert_chain_unchanged(&chains, *chain_idx);
-                    // Verify length
-                    assert_eq!(
-                        actual_len, *expected_len,
-                        "used[{}] length mismatch: expected {}, got {}",
-                        i, expected_len, actual_len
-                    );
-                }
-                ExpectedUsed::ReadableAnyLen => {
-                    // Verify readable data wasn't modified (skip length check)
+                ExpectedUsed::Readable => {
                     self.assert_chain_unchanged(&chains, *chain_idx);
                 }
             }

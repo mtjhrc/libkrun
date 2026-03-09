@@ -8,7 +8,6 @@ use std::ops::Range;
 use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 use super::super::queue::{DescIter, DescriptorChain, Queue};
-use super::super::InterruptTransport;
 use super::aliased_ioslice::{AliasedIoSlice, AnyIoSlice};
 use super::{raw_as_io_slices, IovecAppender, IovecStorage, WorkItem, WorkItemState};
 
@@ -40,7 +39,7 @@ impl<'a> Iterator for ReadableChainIter<'a> {
                 .mem
                 .get_slice(desc.addr, len)
                 .expect("descriptor validated before transform");
-            return Some(unsafe { AliasedIoSlice::from_volatile(&slice) });
+            return Some(unsafe { AliasedIoSlice::from_slice(&slice) });
         }
     }
 }
@@ -49,34 +48,28 @@ impl<'a> Iterator for ReadableChainIter<'a> {
 pub struct TxQueueConsumer<T: WorkItemState = ()> {
     queue: Queue,
     mem: GuestMemoryMmap,
-    interrupt: InterruptTransport,
-    max_chains: usize,
     iovecs: IovecStorage,
     work_items: Vec<WorkItem>,
     transformed: Vec<T>,
 }
 
 impl<T: WorkItemState> TxQueueConsumer<T> {
-    /// Create a new TxQueueConsumer with the given queue, memory, and interrupt.
-    pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
-        let max_chains = queue.size as usize * 8;
+    /// Create a new TxQueueConsumer with a fixed-size iovec ring buffer.
+    ///
+    /// `iovec_capacity` is the total number of iovec slots in the ring buffer.
+    /// Feeding stops when the ring is full or the queue is drained.
+    pub fn new(
+        queue: Queue,
+        mem: GuestMemoryMmap,
+        iovec_capacity: usize,
+    ) -> Self {
         Self {
             queue,
             mem,
-            interrupt,
-            max_chains,
-            iovecs: IovecStorage::with_capacity(max_chains * 4),
-            work_items: Vec::with_capacity(max_chains),
-            transformed: Vec::with_capacity(max_chains),
+            iovecs: IovecStorage::with_capacity(iovec_capacity),
+            work_items: Vec::new(),
+            transformed: Vec::new(),
         }
-    }
-
-    /// Set the maximum number of chains to keep pending at once.
-    pub fn set_max_chains(&mut self, max: usize) {
-        self.max_chains = max;
-        self.work_items.reserve(max.saturating_sub(self.work_items.capacity()));
-        self.transformed
-            .reserve(max.saturating_sub(self.transformed.capacity()));
     }
 
     /// Feed readable descriptor chains from the queue and transform them.
@@ -85,7 +78,7 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
     /// an [`IovecAppender`] that writes directly into the shared arena.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a, 'b> FnMut(ReadableChainIter<'a>, &mut IovecAppender<'b>) -> T,
+        F: for<'a, 'b> FnMut(ReadableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> T,
     {
         let mut added = 0;
 
@@ -93,7 +86,7 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             warn!("Failed to disable queue notifications: {e:?}");
         }
 
-        'next_chain: while self.pending_count() < self.max_chains {
+        'next_chain: loop {
             let Some(head) = self.queue.pop(&self.mem) else {
                 match self.queue.enable_notification(&self.mem) {
                     Ok(true) => continue 'next_chain,
@@ -106,36 +99,30 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             };
 
             let head_index = head.index;
-            let Some((iov_count, guest_len)) = self.validate_readable_chain(&head) else {
+            let Some((iov_count, total_bytes)) = self.validate_readable_chain(&head) else {
                 error!("Invalid descriptor chain headed by {}, skipping it", head_index);
                 continue 'next_chain;
             };
 
-            if guest_len == 0 {
+            if total_bytes == 0 {
                 warn!("Found empty chain, ignoring it");
                 continue 'next_chain;
             }
 
-            let reserve_moved = self.iovecs.reserve(iov_count);
+            let Some(alloc_start) = self.iovecs.begin_chain(iov_count) else {
+                self.queue.undo_pop();
+                break 'next_chain;
+            };
             let mut appender = IovecAppender::new(&mut self.iovecs);
             let state = transform(ReadableChainIter::new(head), &mut appender);
-            let (allocation, append_moved, max_bytes) = appender.finish();
-            let moved = reserve_moved || append_moved;
+            let (live, max_bytes) = appender.finish();
+            let allocation = alloc_start..live.end;
 
-            self.work_items.push(WorkItem::new(
-                head_index,
-                guest_len,
-                max_bytes,
-                0,
-                allocation,
-            ));
+            let item = WorkItem::new(head_index, max_bytes, 0, allocation, live);
+            let mut state = state;
+            state.set_iovecs(item.raw_slice(&self.iovecs));
+            self.work_items.push(item);
             self.transformed.push(state);
-
-            if moved {
-                self.fixup_all_transformed();
-            } else {
-                self.fixup_transformed(self.work_items.len() - 1);
-            }
 
             added += 1;
         }
@@ -155,7 +142,8 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
 
     /// Consume pending chains using a callback that performs the actual I/O.
     ///
-    /// Returns the number of chains finished by the callback.
+    /// Returns the number of chains finished by the callback. The caller is
+    /// responsible for signaling the guest when the return value is non-zero.
     pub fn consume<F>(&mut self, f: F) -> usize
     where
         F: for<'a> FnOnce(&mut TxConsumerBatch<'a, T>),
@@ -164,7 +152,6 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             return 0;
         }
 
-        let compact_count;
         let finished_count;
         {
             let mut batch = TxConsumerBatch {
@@ -173,21 +160,14 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
                 iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
-                first_finished: 0,
                 finished_count: 0,
             };
 
             f(&mut batch);
-            compact_count = batch.first_finished;
             finished_count = batch.finished_count;
         }
 
-        self.compact(compact_count);
-
-        if finished_count > 0 {
-            self.signal_used_if_needed();
-        }
-
+        self.release(finished_count);
         finished_count
     }
 
@@ -197,7 +177,7 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
     ) -> Option<AliasedIoSlice<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        Some(unsafe { AliasedIoSlice::from_volatile(&slice) })
+        Some(unsafe { AliasedIoSlice::from_slice(&slice) })
     }
 
     fn validate_readable_chain(&self, head: &DescriptorChain<'_>) -> Option<(usize, usize)> {
@@ -213,42 +193,21 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
         Some((count, total))
     }
 
-    fn compact(&mut self, count: usize) {
+    fn release(&mut self, count: usize) {
         if count == 0 {
             return;
         }
 
-        let released = self.work_items[..count]
+        let released: usize = self.work_items[..count]
             .iter()
             .map(WorkItem::allocation_len)
             .sum();
 
         self.work_items.drain(..count);
         self.transformed.drain(..count);
-
-        if self.iovecs.release_front_len(released) {
-            self.fixup_all_transformed();
-        }
+        self.iovecs.release_front_len(released);
     }
 
-    fn fixup_transformed(&mut self, index: usize) {
-        let iovecs = self.work_items[index].raw_slice(&self.iovecs);
-        self.transformed[index].fixup_iovecs(iovecs);
-    }
-
-    fn fixup_all_transformed(&mut self) {
-        for (item, transformed) in self.work_items.iter().zip(self.transformed.iter_mut()) {
-            transformed.fixup_iovecs(item.raw_slice(&self.iovecs));
-        }
-    }
-
-    fn signal_used_if_needed(&mut self) {
-        match self.queue.needs_notification(&self.mem) {
-            Ok(true) => self.interrupt.signal_used_queue(),
-            Ok(false) => {}
-            Err(e) => error!("TxQueueConsumer: needs_notification error: {e}"),
-        }
-    }
 }
 
 impl TxQueueConsumer<()> {
@@ -267,8 +226,7 @@ pub struct TxConsumerBatch<'a, T: WorkItemState> {
     iovecs: &'a mut IovecStorage,
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
-    /// Prefix length of consecutively finished chains.
-    first_finished: usize,
+    /// Number of chains finished so far (must be finished sequentially from 0).
     finished_count: usize,
 }
 
@@ -285,7 +243,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
 
     #[inline]
     pub fn is_finished(&self, index: usize) -> bool {
-        self.work_items[index].finished
+        index < self.finished_count
     }
 
     #[inline]
@@ -322,33 +280,31 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
     }
 
     pub fn total_bytes(&self) -> usize {
-        self.work_items
+        self.work_items[self.finished_count..]
             .iter()
-            .filter(|item| !item.finished)
             .map(|item| item.max_bytes.saturating_sub(item.bytes_used))
             .sum()
     }
 
+    /// Mark chain at `index` as finished and add it to the used ring.
+    ///
+    /// Chains must be finished in order (0, 1, 2, …). Out-of-order completion
+    /// may be added in the future if needed.
     pub fn finish(&mut self, index: usize) {
-        self.assert_not_finished(index);
-        let item = &mut self.work_items[index];
-        item.finished = true;
-        self.finished_count += 1;
+        assert!(
+            index == self.finished_count,
+            "chains must be finished sequentially: expected index {}, got {index}",
+            self.finished_count
+        );
+        let item = &self.work_items[index];
 
-        if let Err(e) = self
-            .queue
-            .add_used(self.mem, item.head_index, item.guest_len as u32)
-        {
+        // For TX (device-readable) buffers the `len` field in the used ring is
+        // unspecified by the virtio spec and ignored by guest drivers.
+        if let Err(e) = self.queue.add_used(self.mem, item.head_index, 0) {
             error!("TxConsumerBatch: failed to add_used: {e}");
         }
 
-        if index == self.first_finished {
-            while self.first_finished < self.work_items.len()
-                && self.work_items[self.first_finished].finished
-            {
-                self.first_finished += 1;
-            }
-        }
+        self.finished_count += 1;
     }
 
     pub fn finish_many(&mut self, range: Range<usize>) {
@@ -369,7 +325,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
         );
         item.advance(self.iovecs, bytes);
         let iovecs = item.raw_slice(self.iovecs);
-        self.transformed[index].fixup_iovecs(iovecs);
+        self.transformed[index].set_iovecs(iovecs);
     }
 
     #[track_caller]
@@ -388,7 +344,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
 #[cfg(test)]
 mod tests {
     use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AnyIoSlice};
-    use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
+    use crate::virtio::test_utils::{ExpectedUsed, TestSetup};
 
     use super::TxQueueConsumer;
 
@@ -405,7 +361,7 @@ mod tests {
         let setup = TestSetup::new();
         let (queue, _driver) = setup.create_queue(16);
         let consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(consumer.pending_count(), 0);
         assert!(!consumer.has_pending());
@@ -418,7 +374,7 @@ mod tests {
         driver.readable(&[b"Hello, World!"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         let added = consumer.feed();
 
@@ -433,7 +389,7 @@ mod tests {
         });
 
         assert_eq!(finished, 1);
-        driver.assert_used(&[(0, ExpectedUsed::Readable(13))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
     }
 
     #[test]
@@ -443,7 +399,7 @@ mod tests {
         driver.readable(&[b"First", b"Second"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         let added = consumer.feed();
 
@@ -458,7 +414,7 @@ mod tests {
         });
 
         assert_eq!(finished, 1);
-        driver.assert_used(&[(0, ExpectedUsed::Readable(11))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
     }
 
     #[test]
@@ -471,7 +427,7 @@ mod tests {
             .readable(&[b"Frame3"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         let added = consumer.feed();
 
@@ -485,14 +441,14 @@ mod tests {
 
         assert_eq!(finished, 3);
         driver.assert_used(&[
-            (0, ExpectedUsed::Readable(6)),
-            (1, ExpectedUsed::Readable(6)),
-            (2, ExpectedUsed::Readable(6)),
+            (0, ExpectedUsed::Readable),
+            (1, ExpectedUsed::Readable),
+            (2, ExpectedUsed::Readable),
         ]);
     }
 
     #[test]
-    fn test_feed_respects_max_chains() {
+    fn test_feed_respects_iovec_capacity() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
         driver
@@ -502,9 +458,9 @@ mod tests {
             .readable(&[b"F3"])
             .readable(&[b"F4"]);
 
+        // Iovec capacity of 2: only 2 single-iovec chains fit.
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
-        consumer.set_max_chains(2);
+            TxQueueConsumer::new(queue, setup.mem().clone(), 2);
 
         assert_eq!(consumer.feed(), 2);
         assert_eq!(consumer.pending_count(), 2);
@@ -518,18 +474,10 @@ mod tests {
         driver.readable(&[b"TestData12345"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         let added = consumer.feed_with_transform(|iovecs, out| {
-            let mut remaining_skip = 4;
-            for mut iov in iovecs {
-                if remaining_skip != 0 {
-                    let advance = remaining_skip.min(iov.len());
-                    iov.advance(advance);
-                    remaining_skip -= advance;
-                }
-                out.push(iov);
-            }
+            out.extend(AliasedIoSlice::skip_bytes(iovecs, 4));
         });
 
         assert_eq!(added, 1);
@@ -538,7 +486,7 @@ mod tests {
             batch.finish(0);
         });
 
-        driver.assert_used(&[(0, ExpectedUsed::Readable(13))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
     }
 
     #[test]
@@ -550,7 +498,7 @@ mod tests {
             .readable(&[b"SecondChain"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         consumer.feed();
         assert_eq!(consumer.pending_count(), 2);
@@ -563,8 +511,8 @@ mod tests {
         assert_eq!(finished, 2);
         assert_eq!(consumer.pending_count(), 0);
         driver.assert_used(&[
-            (0, ExpectedUsed::Readable(10)),
-            (1, ExpectedUsed::Readable(11)),
+            (0, ExpectedUsed::Readable),
+            (1, ExpectedUsed::Readable),
         ]);
     }
 
@@ -578,7 +526,7 @@ mod tests {
             .readable(&[b"Chain22222"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         consumer.feed();
 
@@ -588,11 +536,11 @@ mod tests {
 
         assert_eq!(finished, 1);
         assert_eq!(consumer.pending_count(), 2);
-        driver.assert_used(&[(0, ExpectedUsed::Readable(10))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
     }
 
     #[test]
-    fn test_compact() {
+    fn test_release() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
         driver
@@ -603,7 +551,7 @@ mod tests {
             .readable(&[b"test"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         consumer.feed();
 
@@ -614,9 +562,9 @@ mod tests {
         assert_eq!(finished, 3);
         assert_eq!(consumer.pending_count(), 2);
         driver.assert_used(&[
-            (0, ExpectedUsed::Readable(4)),
-            (1, ExpectedUsed::Readable(4)),
-            (2, ExpectedUsed::Readable(4)),
+            (0, ExpectedUsed::Readable),
+            (1, ExpectedUsed::Readable),
+            (2, ExpectedUsed::Readable),
         ]);
     }
 
@@ -626,7 +574,7 @@ mod tests {
         let (queue, _driver) = setup.create_queue(16);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(consumer.feed(), 0);
         assert_eq!(consumer.pending_count(), 0);
@@ -640,7 +588,7 @@ mod tests {
         driver.readable(&[b"TestData"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         consumer.feed();
 
@@ -659,19 +607,11 @@ mod tests {
         driver.readable(&[&data]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(
             consumer.feed_with_transform(|iovecs, out| {
-                let mut remaining_skip = 12;
-                for mut iov in iovecs {
-                    if remaining_skip != 0 {
-                        let advance = remaining_skip.min(iov.len());
-                        iov.advance(advance);
-                        remaining_skip -= advance;
-                    }
-                    out.push(iov);
-                }
+                out.extend(AliasedIoSlice::skip_bytes(iovecs, 12));
             }),
             1
         );
@@ -684,7 +624,7 @@ mod tests {
 
         assert_eq!(finished, 1);
         assert_eq!(consumer.pending_count(), 0);
-        driver.assert_used(&[(0, ExpectedUsed::Readable(112))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
     }
 
     #[test]
@@ -697,19 +637,11 @@ mod tests {
         driver.readable(&[&data]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         assert_eq!(
             consumer.feed_with_transform(|iovecs, out| {
-                let mut remaining_skip = 12;
-                for mut iov in iovecs {
-                    if remaining_skip != 0 {
-                        let advance = remaining_skip.min(iov.len());
-                        iov.advance(advance);
-                        remaining_skip -= advance;
-                    }
-                    out.push(iov);
-                }
+                out.extend(AliasedIoSlice::skip_bytes(iovecs, 12));
             }),
             1
         );
@@ -722,11 +654,11 @@ mod tests {
         });
 
         assert_eq!(consumer.pending_count(), 0);
-        driver.assert_used(&[(0, ExpectedUsed::Readable(112))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
     }
 
     #[test]
-    fn test_stop_resume_across_compact() {
+    fn test_stop_resume_across_release() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
 
@@ -734,7 +666,7 @@ mod tests {
         driver.readable(&[&data]).readable(&[&data]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(),16);
 
         consumer.feed();
         assert_eq!(consumer.pending_count(), 2);
@@ -744,7 +676,7 @@ mod tests {
             batch.advance(1, 15);
         });
         assert_eq!(consumer.pending_count(), 1);
-        driver.assert_used(&[(0, ExpectedUsed::Readable(30))]);
+        driver.assert_used(&[(0, ExpectedUsed::Readable)]);
 
         driver.readable(&[&data]);
 
@@ -757,75 +689,42 @@ mod tests {
         assert_eq!(consumer.pending_count(), 0);
 
         driver.assert_used(&[
-            (0, ExpectedUsed::Readable(30)),
-            (1, ExpectedUsed::Readable(30)),
-            (2, ExpectedUsed::Readable(30)),
+            (0, ExpectedUsed::Readable),
+            (1, ExpectedUsed::Readable),
+            (2, ExpectedUsed::Readable),
         ]);
     }
 
     #[test]
-    fn test_out_of_order_finish() {
+    #[should_panic(expected = "finished sequentially")]
+    fn test_out_of_order_finish_panics() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
-        driver
-            .readable(&[b"pkt0"])
-            .readable(&[b"pkt1"])
-            .readable(&[b"pkt2"])
-            .readable(&[b"pkt3"]);
+        driver.readable(&[b"pkt0"]).readable(&[b"pkt1"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(), 16);
 
         consumer.feed();
-        assert_eq!(consumer.pending_count(), 4);
-
-        let finished = consumer.consume(|batch| {
-            batch.finish(3);
-            batch.finish(1);
+        consumer.consume(|batch| {
+            batch.finish(1); // should panic: expected 0
         });
-
-        assert_eq!(finished, 2);
-        assert_eq!(consumer.pending_count(), 4);
-        driver.assert_used(&[
-            (3, ExpectedUsed::ReadableAnyLen),
-            (1, ExpectedUsed::ReadableAnyLen),
-        ]);
-
-        let finished = consumer.consume(|batch| {
-            batch.finish(0);
-        });
-
-        assert_eq!(finished, 1);
-        assert_eq!(consumer.pending_count(), 2);
-
-        let finished = consumer.consume(|batch| {
-            batch.finish(0);
-        });
-
-        assert_eq!(finished, 1);
-        assert_eq!(consumer.pending_count(), 0);
-        driver.assert_used(&[
-            (3, ExpectedUsed::ReadableAnyLen),
-            (1, ExpectedUsed::ReadableAnyLen),
-            (0, ExpectedUsed::ReadableAnyLen),
-            (2, ExpectedUsed::ReadableAnyLen),
-        ]);
     }
 
     #[test]
-    #[should_panic(expected = "already finished")]
+    #[should_panic(expected = "finished sequentially")]
     fn test_double_finish_panics() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
         driver.readable(&[b"data"]);
 
         let mut consumer: TestTxConsumer =
-            TxQueueConsumer::new(queue, setup.mem().clone(), create_interrupt());
+            TxQueueConsumer::new(queue, setup.mem().clone(), 16);
 
         consumer.feed();
         consumer.consume(|batch| {
             batch.finish(0);
-            batch.finish(0);
+            batch.finish(0); // should panic: expected 1
         });
     }
 }
