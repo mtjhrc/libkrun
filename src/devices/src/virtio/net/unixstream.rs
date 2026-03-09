@@ -1,10 +1,9 @@
 use nix::sys::socket::{
     connect, getsockopt, setsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
 };
-use nix::unistd::read;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
-use utils::fd::SetNonblockingExt;
+use std::time::Instant;
 use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AliasedIoSliceMut, AnyIoSlice};
@@ -16,10 +15,10 @@ use crate::virtio::InterruptTransport;
 use super::backend::{NetBackend, ReadError, WriteError};
 use super::FRAME_HEADER_LEN;
 
-/// Try to read/complete the frame length header.
+/// Try to read/complete the frame length header using non-blocking recv.
 /// Returns Some(frame_len) when complete, None if incomplete or EAGAIN.
 fn try_read_frame_header(
-    fd: BorrowedFd,
+    raw_fd: RawFd,
     header_buf: &mut [u8; FRAME_HEADER_LEN],
     header_pos: &mut usize,
     expecting: &mut Option<u32>,
@@ -29,9 +28,17 @@ fn try_read_frame_header(
     }
 
     let remaining = &mut header_buf[*header_pos..];
-    match read(fd, remaining) {
-        Ok(n) if n > 0 => {
-            *header_pos += n;
+    let ret = unsafe {
+        libc::recv(
+            raw_fd,
+            remaining.as_mut_ptr() as *mut libc::c_void,
+            remaining.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    match ret {
+        n if n > 0 => {
+            *header_pos += n as usize;
             if *header_pos == FRAME_HEADER_LEN {
                 let len = u32::from_be_bytes(*header_buf);
                 *expecting = Some(len);
@@ -43,6 +50,18 @@ fn try_read_frame_header(
         }
         _ => None,
     }
+}
+
+/// Read body using recvmsg with MSG_WAITALL into scatter-gather iovecs.
+///
+/// # Safety
+/// The iovec pointer must be valid and the iovecs must describe writable memory.
+unsafe fn recvmsg_waitall(raw_fd: RawFd, iov_ptr: *mut libc::iovec, iov_len: usize) -> isize {
+    let mut hdr: libc::msghdr = std::mem::zeroed();
+    hdr.msg_iov = iov_ptr;
+    hdr.msg_iovlen = iov_len as _;
+
+    libc::recvmsg(raw_fd, &mut hdr, libc::MSG_WAITALL)
 }
 
 pub struct Unixstream {
@@ -60,6 +79,11 @@ pub struct Unixstream {
     rx_header_pos: usize,
     /// For RX: expected frame length (None when header not yet complete)
     expecting_frame_length: Option<u32>,
+    // Timing/stats counters
+    rx_calls: u64,
+    rx_total_frames: u64,
+    rx_total_time_us: u64,
+    rx_productive_calls: u64,
 }
 
 impl Unixstream {
@@ -72,13 +96,14 @@ impl Unixstream {
         mem: GuestMemoryMmap,
         interrupt: InterruptTransport,
     ) -> Self {
-        // Set socket to non-blocking mode (critical for epoll-based event loop)
-        if let Err(e) = fd.set_nonblocking(true) {
-            log::error!("Failed to set O_NONBLOCK on the socket: {e}");
-        }
+        // Blocking socket — we use MSG_DONTWAIT for header reads and MSG_WAITALL
+        // for body reads, so we don't need O_NONBLOCK.
 
         if let Err(e) = setsockopt(&fd, sockopt::SndBuf, &(16 * 1024 * 1024)) {
             log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
+        }
+        if let Err(e) = setsockopt(&fd, sockopt::RcvBuf, &(16 * 1024 * 1024)) {
+            log::warn!("Failed to increase SO_RCVBUF (performance may be decreased): {e}");
         }
 
         log::debug!(
@@ -87,7 +112,7 @@ impl Unixstream {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        let iovec_capacity = tx_queue.size as usize * 30;
+        let iovec_capacity = tx_queue.size as usize * 2;
         let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), iovec_capacity);
         let rx_producer = RxQueueProducer::new(rx_queue, mem, iovec_capacity);
 
@@ -101,6 +126,10 @@ impl Unixstream {
             rx_header_buf: [0u8; FRAME_HEADER_LEN],
             rx_header_pos: 0,
             expecting_frame_length: None,
+            rx_calls: 0,
+            rx_total_frames: 0,
+            rx_total_time_us: 0,
+            rx_productive_calls: 0,
         }
     }
 
@@ -114,18 +143,13 @@ impl Unixstream {
         interrupt: InterruptTransport,
     ) -> Result<Self, ConnectError> {
         #[cfg(target_os = "linux")]
-        let flags = SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC;
+        let flags = SockFlag::SOCK_CLOEXEC;
         #[cfg(not(target_os = "linux"))]
         let flags = SockFlag::empty();
 
         let fd = socket(AddressFamily::Unix, SockType::Stream, flags, None)
             .map_err(ConnectError::CreateSocket)?;
 
-        // On macOS, set nonblocking after socket creation since SOCK_NONBLOCK isn't available
-        #[cfg(not(target_os = "linux"))]
-        fd.set_nonblocking(true).map_err(|e| {
-            ConnectError::CreateSocket(nix::Error::from_raw(e.raw_os_error().unwrap_or(libc::EIO)))
-        })?;
         let peer_addr = UnixAddr::new(&path).map_err(ConnectError::InvalidAddress)?;
         connect(fd.as_raw_fd(), &peer_addr).map_err(ConnectError::Binding)?;
 
@@ -159,64 +183,81 @@ impl NetBackend for Unixstream {
             0
         };
 
-        // Prepend a header iovec pointing to our shared tx_frame_header buffer.
-        // The actual length value is written before each writev in consume().
-        let header_ptr = self.tx_frame_header.as_ptr();
-        let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
-            if !out.reserve(iovecs.len() + 1) {
-                return None;
-            }
-            out.push(unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
-            out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
-            Some(())
-        });
-        log::trace!(
-            "Unixstream::send() fed {} frames, pending={}",
-            fed,
-            self.tx_consumer.pending_count()
-        );
+        let mut total_finished = 0;
 
-        if !self.tx_consumer.has_pending() {
-            return Ok(());
-        }
+        self.tx_consumer.disable_notification();
 
-        let raw_fd = self.fd.as_raw_fd();
-        let header_ptr = self.tx_frame_header.as_mut_ptr() as *mut u32;
+        loop {
+            // Prepend a header iovec pointing to our shared tx_frame_header buffer.
+            // The actual length value is written before each writev in consume().
+            let header_ptr = self.tx_frame_header.as_ptr();
+            self.tx_consumer.feed_with_transform(|iovecs, out| {
+                if !out.reserve(iovecs.len() + 1) {
+                    return None;
+                }
+                out.push(unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
+                out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
+                Some(())
+            });
 
-        // Chains have header iovec prepended; fill in the length before each writev.
-        let finished = self.tx_consumer.consume(|batch| {
-            for i in 0..batch.len() {
-                let chain = batch.io_slices(i);
-                if chain.is_empty() {
+            if !self.tx_consumer.has_pending() {
+                if self.tx_consumer.enable_notification() {
+                    self.tx_consumer.disable_notification();
                     continue;
                 }
+                break;
+            }
 
-                // On first attempt (nothing sent yet), write the payload length
-                // into the shared header buffer via raw pointer (the iovecs
-                // alias this memory, so we must not create a &mut reference).
-                if batch.bytes_used(i) == 0 {
-                    let payload_len: usize = AliasedIoSlice::total_len(chain[1..].iter().copied());
-                    unsafe { std::ptr::write_volatile(header_ptr, (payload_len as u32).to_be()) };
-                }
+            let raw_fd = self.fd.as_raw_fd();
+            let header_ptr = self.tx_frame_header.as_mut_ptr() as *mut u32;
 
-                let ret = unsafe {
-                    libc::writev(raw_fd, AliasedIoSlice::as_iovec_ptr(chain), chain.len() as libc::c_int)
-                };
-                match ret {
-                    n if n >= 0 => batch.finish(i),
-                    _ => {
-                        let err = nix::errno::Errno::last();
-                        if err == nix::errno::Errno::EAGAIN {
+            // Chains have header iovec prepended; fill in the length before each writev.
+            let finished = self.tx_consumer.consume(|batch| {
+                for i in 0..batch.len() {
+                    let chain = batch.io_slices(i);
+                    if chain.is_empty() {
+                        continue;
+                    }
+
+                    // On first attempt (nothing sent yet), write the payload length
+                    // into the shared header buffer via raw pointer (the iovecs
+                    // alias this memory, so we must not create a &mut reference).
+                    if batch.bytes_used(i) == 0 {
+                        let payload_len: usize =
+                            AliasedIoSlice::total_len(chain[1..].iter().copied());
+                        unsafe {
+                            std::ptr::write_volatile(header_ptr, (payload_len as u32).to_be())
+                        };
+                    }
+
+                    let ret = unsafe {
+                        libc::writev(
+                            raw_fd,
+                            AliasedIoSlice::as_iovec_ptr(chain),
+                            chain.len() as libc::c_int,
+                        )
+                    };
+                    match ret {
+                        n if n >= 0 => batch.finish(i),
+                        _ => {
+                            let err = nix::errno::Errno::last();
+                            if err == nix::errno::Errno::EAGAIN {
+                                break;
+                            }
+                            log::error!("writev to unixstream failed: {err:?}");
                             break;
                         }
-                        log::error!("writev to unixstream failed: {err:?}");
-                        break;
                     }
                 }
-            }
-        });
+            });
 
-        if finished > 0 {
+            total_finished += finished;
+            if finished == 0 || self.tx_consumer.has_pending() {
+                break;
+            }
+        }
+
+        if total_finished > 0 && self.tx_consumer.needs_notification() {
             self.interrupt.signal_used_queue();
         }
 
@@ -224,7 +265,6 @@ impl NetBackend for Unixstream {
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
-        let fd = self.fd.as_fd();
         let raw_fd = self.fd.as_raw_fd();
         let vnet_offset = if !self.backend_handles_vnet_hdr {
             super::vnet_hdr_len()
@@ -232,57 +272,122 @@ impl NetBackend for Unixstream {
             0
         };
 
-        self.rx_producer.feed();
+        let mut total_finished = 0;
+        self.rx_calls += 1;
+        let frames_before = self.rx_total_frames;
+        let call_start = Instant::now();
 
-        let header_buf = &mut self.rx_header_buf;
-        let header_pos = &mut self.rx_header_pos;
-        let expecting = &mut self.expecting_frame_length;
+        self.rx_producer.disable_notification();
 
-        let finished = self.rx_producer.produce(|batch| {
-            for i in 0..batch.len() {
-                // Read frame header
-                let frame_len = match try_read_frame_header(fd, header_buf, header_pos, expecting) {
-                    Some(len) => len,
-                    None => break,
-                };
-                let total_len = vnet_offset + frame_len;
+        loop {
+            self.rx_producer.feed();
 
-                // Write vnet header at start of new frame
-                if batch.bytes_used(i) == 0 && vnet_offset > 0 {
-                    // Header is small, chain should always have space
-                    let _ = batch.write_advance(i, &super::DEFAULT_VNET_HDR);
+            if !self.rx_producer.has_pending() {
+                if self.rx_producer.enable_notification() {
+                    self.rx_producer.disable_notification();
+                    continue;
                 }
+                break;
+            }
 
-                // Read payload (truncated to remaining frame bytes)
-                let remaining = total_len - batch.bytes_used(i);
-                let iovecs =
-                    AliasedIoSliceMut::truncate_slices(batch.io_slices_mut(i), remaining);
+            let header_buf = &mut self.rx_header_buf;
+            let header_pos = &mut self.rx_header_pos;
+            let expecting = &mut self.expecting_frame_length;
 
-                let ret = unsafe {
-                    libc::readv(raw_fd, AliasedIoSliceMut::as_iovec_ptr(iovecs), iovecs.len() as libc::c_int)
-                };
-                match ret {
-                    n if n > 0 => {
-                        batch.advance(i, n as usize);
-                        if batch.bytes_used(i) >= total_len {
-                            batch.finish(i);
+            let finished = self.rx_producer.produce(|batch| {
+                for i in 0..batch.len() {
+                    // Read frame header (non-blocking)
+                    let frame_len =
+                        match try_read_frame_header(raw_fd, header_buf, header_pos, expecting) {
+                            Some(len) => len,
+                            None => break,
+                        };
+
+                    let total_len = vnet_offset + frame_len;
+
+                    // Write vnet header at start of new frame
+                    if batch.bytes_used(i) == 0 && vnet_offset > 0 {
+                        let _ = batch.write_advance(i, &super::DEFAULT_VNET_HDR);
+                    }
+
+                    // Fast path: if the first iovec is large enough for the whole
+                    // frame body, use plain recv (avoids recvmsg/msghdr overhead).
+                    let iovecs = batch.io_slices_mut(i);
+                    let ret = if !iovecs.is_empty() && iovecs[0].len() >= frame_len {
+                        let iov = iovecs[0].into_iovec();
+                        unsafe {
+                            libc::recv(
+                                raw_fd,
+                                iov.iov_base,
+                                frame_len,
+                                libc::MSG_WAITALL,
+                            )
+                        }
+                    } else {
+                        // Slow path: scatter-gather read across multiple iovecs
+                        let iovecs =
+                            AliasedIoSliceMut::truncate_slices(iovecs, frame_len);
+                        unsafe {
+                            recvmsg_waitall(
+                                raw_fd,
+                                AliasedIoSliceMut::as_iovec_ptr(iovecs) as *mut libc::iovec,
+                                iovecs.len(),
+                            )
+                        }
+                    };
+                    match ret {
+                        n if n > 0 => {
+                            batch.complete(i, n as usize);
                             *expecting = None;
                         }
-                    }
-                    0 => break, // EOF
-                    _ => {
-                        let err = nix::errno::Errno::last();
-                        if err == nix::errno::Errno::EAGAIN {
+                        0 => break, // EOF
+                        _ => {
+                            let err = nix::errno::Errno::last();
+                            if err == nix::errno::Errno::EAGAIN {
+                                break;
+                            }
+                            log::error!("recv from unixstream failed: {err:?}");
                             break;
                         }
-                        log::error!("readv from unixstream failed: {err:?}");
-                        break;
                     }
                 }
-            }
-        });
+            });
 
-        if finished > 0 {
+            total_finished += finished;
+            if finished == 0 {
+                break;
+            }
+        }
+
+        let frames_this_call = self.rx_total_frames + total_finished as u64 - frames_before;
+        self.rx_total_frames += total_finished as u64;
+        if frames_this_call > 0 {
+            self.rx_total_time_us += call_start.elapsed().as_micros() as u64;
+            self.rx_productive_calls += 1;
+        }
+        if self.rx_calls % 10000 == 0 {
+            let avg_call_us = if self.rx_productive_calls > 0 {
+                self.rx_total_time_us / self.rx_productive_calls
+            } else {
+                0
+            };
+            let avg_us_per_frame = if self.rx_total_frames > 0 {
+                self.rx_total_time_us as f64 / self.rx_total_frames as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "RX stats: calls={} productive={} frames={} avg_call={}µs avg_frame={:.2}µs/f empty_calls={}",
+                self.rx_calls,
+                self.rx_productive_calls,
+                self.rx_total_frames,
+                avg_call_us,
+                avg_us_per_frame,
+                self.rx_calls - self.rx_productive_calls,
+            );
+        }
+
+        if total_finished > 0 && self.rx_producer.needs_notification() {
             self.interrupt.signal_used_queue();
         }
 

@@ -97,26 +97,34 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     /// If `reserve` returns `false` (ring full), return `None` to stop feeding.
     /// On success, return `Some((max_bytes, state))` where `max_bytes` is the
     /// total byte capacity of the original (pre-transform) chain.
+    /// Disable guest notifications for the RX queue.
+    pub fn disable_notification(&mut self) {
+        if let Err(e) = self.queue.disable_notification(&self.mem) {
+            warn!("Failed to disable queue notifications: {e:?}");
+        }
+    }
+
+    /// Re-enable guest notifications. Returns `true` if new descriptors
+    /// appeared while notifications were disabled (caller should re-feed).
+    pub fn enable_notification(&mut self) -> bool {
+        match self.queue.enable_notification(&self.mem) {
+            Ok(has_more) => has_more,
+            Err(e) => {
+                error!("Failed to re-enable queue notifications: {e:?}");
+                false
+            }
+        }
+    }
+
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
         F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> Option<(usize, T)>,
     {
         let mut added = 0;
 
-        if let Err(e) = self.queue.disable_notification(&self.mem) {
-            warn!("Failed to disable queue notifications: {e:?}");
-        }
-
         'next_chain: loop {
             let Some(head) = self.queue.pop(&self.mem) else {
-                match self.queue.enable_notification(&self.mem) {
-                    Ok(true) => continue 'next_chain,
-                    Ok(false) => break 'next_chain,
-                    Err(e) => {
-                        error!("Failed to re-enable queue notifications: {e:?}");
-                        break 'next_chain;
-                    }
-                }
+                break 'next_chain;
             };
 
             let head_index = head.index;
@@ -147,9 +155,25 @@ impl<T: WorkItemState> RxQueueProducer<T> {
         self.work_items.len()
     }
 
+    /// Number of descriptors available in the avail ring (not yet popped).
+    pub fn queue_len(&self) -> u16 {
+        self.queue.len(&self.mem)
+    }
+
+    /// Negotiated queue size.
+    pub fn queue_size(&self) -> u16 {
+        self.queue.actual_size()
+    }
+
     /// Check if there are any pending chains.
     pub fn has_pending(&self) -> bool {
         !self.work_items.is_empty()
+    }
+
+    /// Check whether the guest needs an interrupt after `add_used` calls.
+    /// Uses EVENT_IDX when negotiated to coalesce interrupts.
+    pub fn needs_notification(&mut self) -> bool {
+        self.queue.needs_notification(&self.mem).unwrap_or(true)
     }
 
     /// Produce frames by calling the callback with a batch.

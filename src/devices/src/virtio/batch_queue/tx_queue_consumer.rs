@@ -95,26 +95,31 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
     /// an [`IovecAppender`]. It must call [`IovecAppender::reserve`] before
     /// pushing iovecs. If `reserve` returns `false` (ring full), the callback
     /// should return `None` to stop feeding.
+    pub fn disable_notification(&mut self) {
+        if let Err(e) = self.queue.disable_notification(&self.mem) {
+            warn!("Failed to disable queue notifications: {e:?}");
+        }
+    }
+
+    pub fn enable_notification(&mut self) -> bool {
+        match self.queue.enable_notification(&self.mem) {
+            Ok(has_more) => has_more,
+            Err(e) => {
+                error!("Failed to re-enable queue notifications: {e:?}");
+                false
+            }
+        }
+    }
+
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
         F: for<'a, 'b> FnMut(ReadableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> Option<T>,
     {
         let mut added = 0;
 
-        if let Err(e) = self.queue.disable_notification(&self.mem) {
-            warn!("Failed to disable queue notifications: {e:?}");
-        }
-
         'next_chain: loop {
             let Some(head) = self.queue.pop(&self.mem) else {
-                match self.queue.enable_notification(&self.mem) {
-                    Ok(true) => continue 'next_chain,
-                    Ok(false) => break 'next_chain,
-                    Err(e) => {
-                        error!("Failed to re-enable queue notifications: {e:?}");
-                        break 'next_chain;
-                    }
-                }
+                break 'next_chain;
             };
 
             let head_index = head.index;
@@ -147,6 +152,12 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
     /// Check if there are any pending chains.
     pub fn has_pending(&self) -> bool {
         !self.work_items.is_empty()
+    }
+
+    /// Check whether the guest needs an interrupt after `add_used` calls.
+    /// Uses EVENT_IDX when negotiated to coalesce interrupts.
+    pub fn needs_notification(&mut self) -> bool {
+        self.queue.needs_notification(&self.mem).unwrap_or(true)
     }
 
     /// Consume pending chains using a callback that performs the actual I/O.

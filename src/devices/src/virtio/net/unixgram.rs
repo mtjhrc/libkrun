@@ -209,8 +209,11 @@ impl NetBackend for Unixgram {
             0
         };
 
+        let mut total_sent = 0;
+
+        self.tx_consumer.disable_notification();
+
         loop {
-            // Feed frames from queue, skipping vnet header
             let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
                 if !out.reserve(iovecs.len()) {
                     return None;
@@ -220,7 +223,11 @@ impl NetBackend for Unixgram {
             });
 
             if !self.tx_consumer.has_pending() {
-                return Ok(());
+                if self.tx_consumer.enable_notification() {
+                    self.tx_consumer.disable_notification();
+                    continue;
+                }
+                break;
             }
 
             self.tx_send_calls += 1;
@@ -232,10 +239,7 @@ impl NetBackend for Unixgram {
             #[cfg(target_os = "macos")]
             let sent = self.send_macos()?;
 
-            if sent > 0 {
-                self.interrupt.signal_used_queue();
-            }
-
+            total_sent += sent;
             self.tx_total_sent += sent as u64;
 
             if self.tx_send_calls % 10000 == 0 {
@@ -249,9 +253,15 @@ impl NetBackend for Unixgram {
 
             // Socket blocked (EAGAIN/ENOBUFS) or partial send — wait for EPOLLOUT.
             if sent == 0 || self.tx_consumer.has_pending() {
-                return Ok(());
+                break;
             }
         }
+
+        if total_sent > 0 && self.tx_consumer.needs_notification() {
+            self.interrupt.signal_used_queue();
+        }
+
+        Ok(())
     }
 
     fn recv(&mut self) -> Result<(), ReadError> {
@@ -260,40 +270,44 @@ impl NetBackend for Unixgram {
         } else {
             0
         };
-        log::info!(
-            "recv: include_vnet_header={} vnet_offset={}",
-            self.include_vnet_header,
-            vnet_offset
-        );
+        let mut total_finished = 0;
 
-        // Feed chains from queue, writing vnet header and advancing iovecs during feed
-        let rx_fed = self.rx_producer.feed_with_transform(|iovecs, out| {
-            if !out.reserve(iovecs.len()) {
-                return None;
+        self.rx_producer.disable_notification();
+
+        loop {
+            self.rx_producer.feed_with_transform(|iovecs, out| {
+                if !out.reserve(iovecs.len()) {
+                    return None;
+                }
+                out.extend(AliasedIoSliceMut::write_prefix(
+                    iovecs,
+                    &super::DEFAULT_VNET_HDR[..vnet_offset],
+                ));
+                let max_bytes = out.total_bytes() + vnet_offset;
+                Some((max_bytes, MsgHdrItem::default()))
+            });
+
+            if !self.rx_producer.has_pending() {
+                if self.rx_producer.enable_notification() {
+                    self.rx_producer.disable_notification();
+                    continue;
+                }
+                break;
             }
-            out.extend(AliasedIoSliceMut::write_prefix(
-                iovecs,
-                &super::DEFAULT_VNET_HDR[..vnet_offset],
-            ));
-            // max_bytes = transformed_bytes + vnet_offset (the prefix we wrote)
-            let max_bytes = out.total_bytes() + vnet_offset;
-            Some((max_bytes, MsgHdrItem::default()))
-        });
-        if rx_fed > 0 {
-            log::info!(
-                "RX: fed {} chains, pending={}",
-                rx_fed,
-                self.rx_producer.pending_count()
-            );
+
+            #[cfg(target_os = "linux")]
+            let finished = self.recv_linux();
+
+            #[cfg(target_os = "macos")]
+            let finished = self.recv_macos();
+
+            total_finished += finished;
+            if finished == 0 {
+                break;
+            }
         }
 
-        #[cfg(target_os = "linux")]
-        let finished = self.recv_linux();
-
-        #[cfg(target_os = "macos")]
-        let finished = self.recv_macos();
-
-        if finished > 0 {
+        if total_finished > 0 && self.rx_producer.needs_notification() {
             self.interrupt.signal_used_queue();
         }
 

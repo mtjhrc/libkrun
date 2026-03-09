@@ -109,36 +109,53 @@ impl Tap {
 impl NetBackend for Tap {
     fn send(&mut self) -> Result<(), WriteError> {
         let raw_fd = self.fd.as_raw_fd();
+        let mut total_finished = 0;
 
-        self.tx_consumer.feed();
+        self.tx_consumer.disable_notification();
 
-        // Each descriptor chain is one packet. TAP's writev combines iovecs into
-        // a single packet, so we can use it directly without flattening.
-        // One writev syscall per packet.
-        let finished = self.tx_consumer.consume(|batch| {
-            for i in 0..batch.len() {
-                let chain = batch.io_slices(i);
-                if chain.is_empty() {
+        loop {
+            self.tx_consumer.feed();
+
+            if !self.tx_consumer.has_pending() {
+                if self.tx_consumer.enable_notification() {
+                    self.tx_consumer.disable_notification();
                     continue;
                 }
-                let ret = unsafe {
-                    libc::writev(raw_fd, AliasedIoSlice::as_iovec_ptr(chain), chain.len() as c_int)
-                };
-                match ret {
-                    n if n >= 0 => batch.finish(i),
-                    _ => {
-                        let err = nix::errno::Errno::last();
-                        if err == nix::errno::Errno::EAGAIN {
+                break;
+            }
+
+            // Each descriptor chain is one packet. TAP's writev combines iovecs into
+            // a single packet, so we can use it directly without flattening.
+            let finished = self.tx_consumer.consume(|batch| {
+                for i in 0..batch.len() {
+                    let chain = batch.io_slices(i);
+                    if chain.is_empty() {
+                        continue;
+                    }
+                    let ret = unsafe {
+                        libc::writev(raw_fd, AliasedIoSlice::as_iovec_ptr(chain), chain.len() as c_int)
+                    };
+                    match ret {
+                        n if n >= 0 => batch.finish(i),
+                        _ => {
+                            let err = nix::errno::Errno::last();
+                            if err == nix::errno::Errno::EAGAIN {
+                                break;
+                            }
+                            log::error!("writev to tap failed: {err:?}");
                             break;
                         }
-                        log::error!("writev to tap failed: {err:?}");
-                        break;
                     }
                 }
-            }
-        });
+            });
 
-        if finished > 0 {
+            total_finished += finished;
+            if finished == 0 || self.tx_consumer.has_pending() {
+                break;
+            }
+        }
+
+        if total_finished > 0 && self.tx_consumer.needs_notification() {
             self.interrupt.signal_used_queue();
         }
 
@@ -147,35 +164,53 @@ impl NetBackend for Tap {
 
     fn recv(&mut self) -> Result<(), ReadError> {
         let raw_fd = self.fd.as_raw_fd();
+        let mut total_finished = 0;
 
-        self.rx_producer.feed();
+        self.rx_producer.disable_notification();
 
-        let finished = self.rx_producer.produce(|batch| {
-            for i in 0..batch.len() {
-                let iovecs = batch.io_slices_mut(i);
-                if iovecs.is_empty() {
-                    log::warn!("Chain {i} was empty");
-                    break;
+        loop {
+            self.rx_producer.feed();
+
+            if !self.rx_producer.has_pending() {
+                if self.rx_producer.enable_notification() {
+                    self.rx_producer.disable_notification();
+                    continue;
                 }
+                break;
+            }
 
-                let ret = unsafe {
-                    libc::readv(raw_fd, AliasedIoSliceMut::as_iovec_ptr(iovecs), iovecs.len() as c_int)
-                };
-                match ret {
-                    n if n > 0 => batch.complete(i, n as usize),
-                    0 => break, // EOF
-                    _ => {
-                        let err = nix::errno::Errno::last();
-                        if err == nix::errno::Errno::EAGAIN {
-                            break;
+            let finished = self.rx_producer.produce(|batch| {
+                for i in 0..batch.len() {
+                    let iovecs = batch.io_slices_mut(i);
+                    if iovecs.is_empty() {
+                        log::warn!("Chain {i} was empty");
+                        break;
+                    }
+
+                    let ret = unsafe {
+                        libc::readv(raw_fd, AliasedIoSliceMut::as_iovec_ptr(iovecs), iovecs.len() as c_int)
+                    };
+                    match ret {
+                        n if n > 0 => batch.complete(i, n as usize),
+                        0 => break, // EOF
+                        _ => {
+                            let err = nix::errno::Errno::last();
+                            if err == nix::errno::Errno::EAGAIN {
+                                break;
+                            }
+                            log::error!("readv from tap failed: {err:?}");
                         }
-                        log::error!("readv from tap failed: {err:?}");
                     }
                 }
-            }
-        });
+            });
 
-        if finished > 0 {
+            total_finished += finished;
+            if finished == 0 {
+                break;
+            }
+        }
+
+        if total_finished > 0 && self.rx_producer.needs_notification() {
             self.interrupt.signal_used_queue();
         }
 
