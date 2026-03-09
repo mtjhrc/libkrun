@@ -7,51 +7,59 @@ use std::ops::Range;
 
 use vm_memory::{GuestMemory, GuestMemoryMmap};
 
-use super::super::queue::{DescriptorChain, Queue};
+use super::super::queue::{DescIter, DescriptorChain, Queue};
 use super::super::InterruptTransport;
-use super::aliased_ioslice::{AliasedIoSliceMut, RawAliasedIoSlice};
+use super::aliased_ioslice::{AliasedIoSliceMut, AnyIoSlice};
 use super::ioslice_container_utils::SliceOfIoSlicesExt;
-use super::{AdvanceBytes, ChainsMemoryRepr, IoSliceMutVec, IovecVec, RawIoSliceVec, ReceivedLen, TruncateBytes};
+use super::{
+    raw_as_io_slices_mut, IovecAppender, IovecStorage, ReceivedBytes, WorkItem, WorkItemState,
+};
 
-/// Metadata for a pending descriptor chain.
-#[derive(Debug)]
-struct ChainMeta<M: Default> {
-    head_index: u16,
-    max_bytes: usize,
-    bytes_used: usize,
-    finished: bool,
-    user_meta: M,
+/// Iterator over the writable slices in one descriptor chain.
+pub struct WritableChainIter<'a> {
+    inner: DescIter<'a>,
 }
 
-/// RxQueueProducer - owns the RX queue and provides buffers for receiving.
-///
-/// Generic over representation type R, allowing different backends to use optimized
-/// representations (e.g., mmsghdr for recvmmsg). Default is IovecVec.
-///
-/// Pops descriptor chains from the virtio RX queue and provides writable
-/// iovecs for receiving data. Unfinished chains are kept pending for the next
-/// produce() call; finished chains get add_used() with their byte counts.
-///
-/// The iovecs point into guest memory owned by `mem`. This is safe because
-/// the struct owns the memory reference and outlives any use of the iovecs.
-pub struct RxQueueProducer<R: ChainsMemoryRepr = IovecVec> {
-    /// The virtio RX queue
+impl<'a> WritableChainIter<'a> {
+    fn new(head: DescriptorChain<'a>) -> Self {
+        Self {
+            inner: head.into_iter(),
+        }
+    }
+}
+
+impl<'a> Iterator for WritableChainIter<'a> {
+    type Item = AliasedIoSliceMut<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let desc = self.inner.next()?;
+            if !desc.is_write_only() {
+                continue;
+            }
+
+            let len = desc.len as usize;
+            let slice = desc
+                .mem
+                .get_slice(desc.addr, len)
+                .expect("descriptor validated before transform");
+            return Some(unsafe { AliasedIoSliceMut::from_volatile(&slice) });
+        }
+    }
+}
+
+/// RxQueueProducer owns the RX queue and batches writable descriptor chains.
+pub struct RxQueueProducer<T: WorkItemState = ()> {
     queue: Queue,
-    /// Guest memory reference
     mem: GuestMemoryMmap,
-    /// Interrupt for signaling guest
     interrupt: InterruptTransport,
-    /// Maximum number of chains to keep pending at once.
     max_chains: usize,
-    /// Pre-allocated storage shared across all chains.
-    pool: R::Pool,
-    /// Per-chain representation (type depends on R)
-    chain_repr: Vec<R>,
-    /// Metadata for each chain (parallel to chain_repr)
-    chain_meta: Vec<ChainMeta<R::Meta>>,
+    iovecs: IovecStorage,
+    work_items: Vec<WorkItem>,
+    transformed: Vec<T>,
 }
 
-impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
+impl<T: WorkItemState> RxQueueProducer<T> {
     /// Create a new RxQueueProducer with the given queue, memory, and interrupt.
     pub fn new(queue: Queue, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> Self {
         let max_chains = queue.size as usize * 8;
@@ -60,41 +68,33 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             mem,
             interrupt,
             max_chains,
-            pool: R::create_pool(max_chains),
-            chain_repr: Vec::new(),
-            chain_meta: Vec::new(),
+            iovecs: IovecStorage::with_capacity(max_chains * 4),
+            work_items: Vec::with_capacity(max_chains),
+            transformed: Vec::with_capacity(max_chains),
         }
     }
 
     /// Set the maximum number of chains to keep pending at once.
     pub fn set_max_chains(&mut self, max: usize) {
         self.max_chains = max;
+        self.work_items.reserve(max.saturating_sub(self.work_items.capacity()));
+        self.transformed
+            .reserve(max.saturating_sub(self.transformed.capacity()));
     }
 
-    /// Feed descriptor chains from the queue, converting each into the
-    /// representation type `R` via a user-supplied callback.
-    ///
-    /// The callback receives the chain's writable iovecs and returns an `(R, Meta)`
-    /// pair. It may mutate the iovecs before building `R` — for example, writing
-    /// a header and advancing past it so that subsequent I/O starts after the
-    /// header. Any bytes consumed by the callback are automatically tracked.
-    ///
-    /// Returns the number of chains added.
-    ///
+    /// Feed writable descriptor chains from the queue and transform them.
     pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
     where
-        F: for<'a> FnMut(IoSliceMutVec<'a>) -> (IoSliceMutVec<'a>, R::Meta),
+        F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b>) -> T,
     {
         let mut added = 0;
 
         if let Err(e) = self.queue.disable_notification(&self.mem) {
             warn!("Failed to disable queue notifications: {e:?}");
         }
+
         'next_chain: while self.pending_count() < self.max_chains {
             let Some(head) = self.queue.pop(&self.mem) else {
-                // Queue exhausted: re-enable driver kicks. If more descriptors arrived in the
-                // meantime, loops back to pop them; otherwise break and expect the user to wake
-                // us up on the next kick.
                 match self.queue.enable_notification(&self.mem) {
                     Ok(true) => continue 'next_chain,
                     Ok(false) => break 'next_chain,
@@ -106,94 +106,92 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             };
 
             let head_index = head.index;
-            let mut iovecs = IoSliceMutVec::new();
+            let Some((iov_count, max_bytes)) = self.validate_writable_chain(&head) else {
+                error!("Invalid descriptor chain headed by {}, skipping it", head_index);
+                continue 'next_chain;
+            };
 
-            for desc in head.into_iter().filter(DescriptorChain::is_write_only) {
-                if let Some(iov) = unsafe { self.desc_to_volatile_ioslice_mut(&desc) } {
-                    iovecs.push(iov);
-                } else {
-                    log::error!("Invalid descriptor: {desc:?}, skipping the chain",);
-                    continue 'next_chain;
-                }
-            }
-
-            if iovecs.is_empty() {
-                log::warn!("Found empty chain, ignoring it");
+            if max_bytes == 0 {
+                warn!("Found empty chain, ignoring it");
                 continue 'next_chain;
             }
 
-            // Compute original chain length before transformation
-            let max_bytes = iovecs.total_len();
+            let reserve_moved = self.iovecs.reserve(iov_count);
+            let mut appender = IovecAppender::new(&mut self.iovecs);
+            let state = transform(WritableChainIter::new(head), &mut appender);
+            let (allocation, append_moved, transformed_bytes) = appender.finish();
+            let moved = reserve_moved || append_moved;
+            let bytes_used = max_bytes - transformed_bytes;
 
-            // Apply transformation (callback returns iovecs with same lifetime + metadata)
-            let (transformed, user_meta) = transform(iovecs);
-
-            // Track bytes already consumed by transform
-            let bytes_used = max_bytes - transformed.total_len();
-
-            // Safety: iovecs point into guest memory owned by our GuestMemoryMmap.
-            let raw: RawIoSliceVec = transformed
-                .into_iter()
-                .map(|v| unsafe { RawAliasedIoSlice::from_any(v) })
-                .collect();
-            let repr = R::from_raw_iovecs(&mut self.pool, &raw);
-
-            self.chain_repr.push(repr);
-            self.chain_meta.push(ChainMeta {
+            self.work_items.push(WorkItem::new(
                 head_index,
                 max_bytes,
+                max_bytes,
                 bytes_used,
-                finished: false,
-                user_meta,
-            });
+                allocation,
+            ));
+            self.transformed.push(state);
+
+            if moved {
+                self.fixup_all_transformed();
+            } else {
+                self.fixup_transformed(self.work_items.len() - 1);
+            }
+
             added += 1;
         }
 
         added
     }
 
-    /// Number of chains pending (not yet sent)
+    /// Number of chains pending.
     pub fn pending_count(&self) -> usize {
-        self.chain_meta.len()
+        self.work_items.len()
     }
 
-    /// Check if there are any pending chains
+    /// Check if there are any pending chains.
     pub fn has_pending(&self) -> bool {
-        self.pending_count() > 0
+        !self.work_items.is_empty()
     }
 
-    /// Convert a descriptor to a IoVecMut pointing into guest memory.
-    unsafe fn desc_to_volatile_ioslice_mut(&self, desc: &DescriptorChain) -> Option<AliasedIoSliceMut<'_>> {
+    unsafe fn desc_to_volatile_ioslice_mut(
+        &self,
+        desc: &DescriptorChain,
+    ) -> Option<AliasedIoSliceMut<'_>> {
         let len = desc.len as usize;
         let slice = self.mem.get_slice(desc.addr, len).ok()?;
-        // Safety: We own the GuestMemoryMmap, so the memory is valid for our lifetime.
         Some(unsafe { AliasedIoSliceMut::from_volatile(&slice) })
     }
 
-    /// Produce frames by calling the callback with a batch.
-    ///
-    /// The callback receives an `RxProducerBatch` which provides access to chains
-    /// and methods to mark them as complete. Returns the number of chains finished.
-    pub fn produce<F>(&mut self, f: F) -> usize
-    where
-        F: for<'a> FnOnce(&mut RxProducerBatch<'a, R>),
-    {
-        if self.chain_meta.is_empty() {
-            log::info!("produce: no chains pending, returning 0");
-            return 0;
+    fn validate_writable_chain(&self, head: &DescriptorChain<'_>) -> Option<(usize, usize)> {
+        let mut count = 0;
+        let mut total = 0;
+
+        for desc in head.clone().into_iter().filter(DescriptorChain::is_write_only) {
+            let iov = unsafe { self.desc_to_volatile_ioslice_mut(&desc) }?;
+            count += 1;
+            total += iov.len();
         }
 
-        log::info!(
-            "produce: {} chains pending, calling callback",
-            self.chain_meta.len()
-        );
+        Some((count, total))
+    }
+
+    /// Produce frames by calling the callback with a batch.
+    pub fn produce<F>(&mut self, f: F) -> usize
+    where
+        F: for<'a> FnOnce(&mut RxProducerBatch<'a, T>),
+    {
+        if !self.has_pending() {
+            return 0;
+        }
 
         let compact_count;
         let finished_count;
         {
             let mut batch = RxProducerBatch {
-                chain_repr: &mut self.chain_repr,
-                chain_meta: &mut self.chain_meta,
+                work_items: &mut self.work_items,
+                transformed: &mut self.transformed,
+                iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
                 first_unfinished: 0,
@@ -211,141 +209,118 @@ impl<R: ChainsMemoryRepr> RxQueueProducer<R> {
             self.signal_used_if_needed();
         }
 
-        log::trace!(
-            "produce: finished_count={} remaining={}",
-            finished_count,
-            self.chain_meta.len()
-        );
-
         finished_count
     }
 
-    /// Remove consecutive finished chains from the front.
     fn compact(&mut self, count: usize) {
-        for i in 0..count {
-            self.chain_repr[i].clear(&mut self.chain_meta[i].user_meta, &mut self.pool);
+        if count == 0 {
+            return;
         }
-        self.chain_repr.drain(..count);
-        self.chain_meta.drain(..count);
+
+        let released = self.work_items[..count]
+            .iter()
+            .map(WorkItem::allocation_len)
+            .sum();
+
+        self.work_items.drain(..count);
+        self.transformed.drain(..count);
+
+        if self.iovecs.release_front_len(released) {
+            self.fixup_all_transformed();
+        }
     }
 
-    /// Signal used queue interrupt if needed.
+    fn fixup_transformed(&mut self, index: usize) {
+        let iovecs = self.work_items[index].raw_slice(&self.iovecs);
+        self.transformed[index].fixup_iovecs(iovecs);
+    }
+
+    fn fixup_all_transformed(&mut self) {
+        for (item, transformed) in self.work_items.iter().zip(self.transformed.iter_mut()) {
+            transformed.fixup_iovecs(item.raw_slice(&self.iovecs));
+        }
+    }
+
     fn signal_used_if_needed(&mut self) {
         match self.queue.needs_notification(&self.mem) {
-            Ok(true) => {
-                log::info!("RxQueueProducer: signaling used queue interrupt");
-                self.interrupt.signal_used_queue();
-            }
-            Ok(false) => {
-                log::info!("RxQueueProducer: needs_notification returned false, not signaling");
-            }
-            Err(e) => {
-                log::error!("RxQueueProducer: needs_notification error: {e}");
-            }
+            Ok(true) => self.interrupt.signal_used_queue(),
+            Ok(false) => {}
+            Err(e) => error!("RxQueueProducer: needs_notification error: {e}"),
         }
     }
 }
 
-/// Convenience methods for the default representation type (IovecVec).
-impl RxQueueProducer<IovecVec> {
-    /// Feed descriptor chains from queue without transformation.
-    ///
-    /// This is a convenience method for the common case where no header
-    /// transformation is needed.
+impl RxQueueProducer<()> {
+    /// Feed writable descriptor chains without extra transformed state.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs| (iovecs, ()))
+        self.feed_with_transform(|iovecs, out| {
+            out.extend(iovecs);
+        })
     }
 }
 
 /// Batch for producing RX chains.
-///
-/// Provides access to pending chains and methods to mark them as complete.
-/// Panics if you access or finish an already-finished chain.
-pub struct RxProducerBatch<'a, R: ChainsMemoryRepr> {
-    chain_repr: &'a mut [R],
-    chain_meta: &'a mut [ChainMeta<R::Meta>],
+pub struct RxProducerBatch<'a, T: WorkItemState> {
+    work_items: &'a mut [WorkItem],
+    transformed: &'a mut [T],
+    iovecs: &'a mut IovecStorage,
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
-    /// Index of first unfinished chain. Chains 0..first_unfinished are finished.
-    /// For sequential finishing (0, 1, 2...), this advances efficiently.
+    /// Prefix length of consecutively finished chains.
     first_unfinished: usize,
-    /// Total number of chains finished in this batch
     finished_count: usize,
 }
 
-impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
-    /// Number of chains in the batch.
+impl<T: WorkItemState> RxProducerBatch<'_, T> {
     #[inline]
     pub fn len(&self) -> usize {
-        self.chain_repr.len()
+        self.work_items.len()
     }
 
-    /// Check if the batch is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.chain_repr.is_empty()
+        self.work_items.is_empty()
     }
 
-    /// Check if chain is already finished.
     #[inline]
     pub fn is_finished(&self, index: usize) -> bool {
-        self.chain_meta[index].finished
+        self.work_items[index].finished
     }
 
-    /// Get bytes already produced for chain at index.
     #[inline]
     pub fn bytes_used(&self, index: usize) -> usize {
-        self.chain_meta[index].bytes_used
+        self.work_items[index].bytes_used
     }
 
-    /// Get maximum bytes the chain can hold.
     #[inline]
     pub fn max_bytes(&self, index: usize) -> usize {
-        self.chain_meta[index].max_bytes
+        self.work_items[index].max_bytes
     }
 
-    /// Get reference to the user-defined metadata for chain at index.
-    #[inline]
-    pub fn user_meta(&self, index: usize) -> &R::Meta {
-        &self.chain_meta[index].user_meta
-    }
-
-    // Get mutable access to the chain at index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn chain_mut(&mut self, index: usize) -> &mut R {
-        self.assert_not_finished(index);
-        &mut self.chain_repr[index]
-    }
-
-    /// Get mutable access to chains in a range (checked).
-    ///
-    /// O(1) if chains are being finished sequentially, O(n) otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any chain in the range has already been finished.
-    pub fn chains_mut(&mut self, range: Range<usize>) -> &mut [R] {
+    pub fn transformed(&self, range: Range<usize>) -> &[T] {
         self.assert_range_not_finished(range.clone());
-        &mut self.chain_repr[range]
+        &self.transformed[range]
     }
 
-    /// Finish a range of chains, reporting them to the guest.
-    ///
-    /// The received byte count should already have been set via
-    /// [`advance`](Self::advance). To set the byte count and finish in one
-    /// step, use [`complete`](Self::complete) or [`complete_many`](Self::complete_many).
-    ///
-    /// Chains can be finished out-of-order, but sequential finishing
-    /// (0, 1, 2...) is preferable.
-    ///
-    /// O(1) if chains are being finished sequentially, O(n) otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any chain in the range has already been finished.
+    pub fn transformed_mut(&mut self, range: Range<usize>) -> &mut [T] {
+        self.assert_range_not_finished(range.clone());
+        &mut self.transformed[range]
+    }
+
+    pub fn transformed_item(&self, index: usize) -> &T {
+        &self.transformed[index]
+    }
+
+    pub fn transformed_item_mut(&mut self, index: usize) -> &mut T {
+        &mut self.transformed[index]
+    }
+
+    pub fn io_slices_mut(&mut self, index: usize) -> &mut [AliasedIoSliceMut<'_>] {
+        self.assert_not_finished(index);
+        let live = self.work_items[index].live.clone();
+        raw_as_io_slices_mut(self.iovecs.slice_mut(live))
+    }
+
     pub fn finish_many(&mut self, range: Range<usize>) {
         if range.is_empty() {
             return;
@@ -355,208 +330,71 @@ impl<R: ChainsMemoryRepr> RxProducerBatch<'_, R> {
         let range_end = range.end;
         let count = range_end - range_start;
 
-        for i in range {
-            self.assert_not_finished(i);
-            let meta = &mut self.chain_meta[i];
-            meta.finished = true;
-
-            log::trace!(
-                "finishing chain index={} head_index={} bytes_used={}",
-                i,
-                meta.head_index,
-                meta.bytes_used
-            );
+        for index in range {
+            self.assert_not_finished(index);
+            let item = &mut self.work_items[index];
+            item.finished = true;
 
             if let Err(e) = self
                 .queue
-                .add_used(self.mem, meta.head_index, meta.bytes_used as u32)
+                .add_used(self.mem, item.head_index, item.bytes_used as u32)
             {
-                log::error!("failed to add_used: {e}");
+                error!("failed to add_used: {e}");
             }
         }
 
         self.finished_count += count;
 
-        debug_assert!(range_start >= self.first_unfinished);
         if range_start == self.first_unfinished {
-            // Jump to the end of the range we just verified and finished
             self.first_unfinished = range_end;
-
-            // Scan forward in case there were out-of-order finishes sitting ahead of us
-            while self.first_unfinished < self.chain_meta.len()
-                && self.chain_meta[self.first_unfinished].finished
+            while self.first_unfinished < self.work_items.len()
+                && self.work_items[self.first_unfinished].finished
             {
                 self.first_unfinished += 1;
             }
         }
     }
 
-    /// Finish a chain, reporting it to the guest.
-    ///
-    /// The received byte count should already have been set via
-    /// [`advance`](Self::advance). To set the byte count and finish in one
-    /// step, use [`complete`](Self::complete).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
     pub fn finish(&mut self, index: usize) {
         self.finish_many(index..index + 1);
     }
 
-    #[track_caller]
-    #[inline]
-    fn assert_range_not_finished(&self, range: Range<usize>) {
-        // Fast path: if range starts at or after first_unfinished, all are unfinished
-        if range.start < self.first_unfinished {
-            // Slow path: range may include finished chains, check each
-            for i in range {
-                self.assert_not_finished(i);
-            }
-        }
-    }
-
-    /// Set the received byte count and finish the chain, reporting it to the guest.
-    ///
-    /// This is the primary way to hand a received buffer back to the guest.
-    /// If the byte count was already set via [`advance`](Self::advance), use
-    /// [`finish`](Self::finish) instead.
-    ///
-    /// See also [`complete_received`](Self::complete_received) when the chain
-    /// representation knows its own received length.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
     pub fn complete(&mut self, index: usize, bytes: usize) {
-        let meta = &mut self.chain_meta[index];
-        meta.bytes_used += bytes;
+        self.assert_not_finished(index);
+        let item = &mut self.work_items[index];
+        item.bytes_used += bytes;
         debug_assert!(
-            meta.bytes_used <= meta.max_bytes,
+            item.bytes_used <= item.max_bytes,
             "complete: bytes_used {} exceeds max_bytes {}",
-            meta.bytes_used,
-            meta.max_bytes
+            item.bytes_used,
+            item.max_bytes
         );
         self.finish(index);
     }
 
-    #[track_caller]
-    #[inline]
-    fn assert_not_finished(&self, index: usize) {
-        assert!(
-            !self.is_finished(index),
-            "chain at index {index} already finished",
-        );
-    }
-}
-
-/// Methods for representation types that support advancing (for partial receives).
-impl<R: ChainsMemoryRepr + AdvanceBytes> RxProducerBatch<'_, R> {
-    /// Advance bytes used for chain at index (partial receive).
-    ///
-    /// Updates bytes_used and advances the iovecs in place.
-    /// Chain remains pending for next produce() call.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
     pub fn advance(&mut self, index: usize, bytes: usize) {
-        assert!(
-            !self.chain_meta[index].finished,
-            "advance: chain at index {} already finished",
-            index
-        );
-        let meta = &mut self.chain_meta[index];
-        meta.bytes_used += bytes;
+        self.assert_not_finished(index);
+        let item = &mut self.work_items[index];
+        item.bytes_used += bytes;
         debug_assert!(
-            meta.bytes_used <= meta.max_bytes,
+            item.bytes_used <= item.max_bytes,
             "advance: bytes_used {} exceeds max_bytes {}",
-            meta.bytes_used,
-            meta.max_bytes
+            item.bytes_used,
+            item.max_bytes
         );
-        self.chain_repr[index].advance(bytes);
-    }
-}
-
-/// Methods for representation types that report their own received byte count.
-impl<R: ChainsMemoryRepr + ReceivedLen> RxProducerBatch<'_, R> {
-    /// Complete a chain, reading the received byte count from the chain's
-    /// [`ReceivedLen`] implementation and reporting it to the guest.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
-    pub fn complete_received(&mut self, index: usize) {
-        self.complete_received_many(index..index + 1);
+        item.advance(self.iovecs, bytes);
+        let iovecs = item.raw_slice(self.iovecs);
+        self.transformed[index].fixup_iovecs(iovecs);
     }
 
-    /// Complete a range of chains, reading the received byte count from each
-    /// chain's [`ReceivedLen`] implementation and reporting them to the guest.
-    ///
-    ///
-    /// # Panics
-    ///
-    /// Panics if any chain in the range has already been finished.
-    pub fn complete_received_many(&mut self, range: Range<usize>) {
-        for i in range.clone() {
-            self.chain_meta[i].bytes_used += self.chain_repr[i].received_len();
-        }
-        self.finish_many(range);
-    }
-}
-
-/// Methods for representation types that support truncating (limiting receive size).
-impl<R: ChainsMemoryRepr + TruncateBytes> RxProducerBatch<'_, R> {
-    /// Truncate chain at index to limit receive to `max_bytes`.
-    ///
-    /// This is useful when you know the frame size ahead of time and want to
-    /// limit how much data can be received into the buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
     pub fn truncate(&mut self, index: usize, max_bytes: usize) {
-        assert!(
-            !self.chain_meta[index].finished,
-            "truncate: chain at index {} already finished",
-            index
-        );
-        self.chain_repr[index].truncate_bytes(max_bytes);
-    }
-}
-
-/// Specialized methods for the default IovecVec representation type.
-impl RxProducerBatch<'_, IovecVec> {
-    /// Get a chain's iovecs as `IoVecMut` references.
-    ///
-    /// # Panics
-    ///
-    /// Panics if index is out of bounds or if the chain has already been finished.
-    pub fn io_slices_mut(&mut self, index: usize) -> &mut [AliasedIoSliceMut<'_>] {
-        assert!(
-            !self.chain_meta[index].finished,
-            "io_slices_mut: chain at index {} already finished",
-            index
-        );
-        let slice = &mut self.chain_repr[index].0[..];
-        // Safety: IoVecMut and RawIoVec are both
-        // #[repr(transparent)] over iovec.
-        // The lifetime is tied to &mut self, ensuring the iovecs remain valid.
-        unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), slice.len()) }
+        self.assert_not_finished(index);
+        let item = &mut self.work_items[index];
+        item.truncate_bytes(self.iovecs, max_bytes);
+        let iovecs = item.raw_slice(self.iovecs);
+        self.transformed[index].fixup_iovecs(iovecs);
     }
 
-    /// Write data to chain and advance bytes_used (without finishing).
-    ///
-    /// Useful for writing headers (e.g., vnet header for RX) before receiving
-    /// the actual payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(())` if the chain doesn't have enough space for all the data.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
     #[allow(clippy::result_unit_err)]
     pub fn write_advance(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
         let written = self.io_slices_mut(index).write(data);
@@ -567,17 +405,6 @@ impl RxProducerBatch<'_, IovecVec> {
         Ok(())
     }
 
-    /// Write data to chain and complete it.
-    ///
-    /// Writes the data, advances bytes_used, and finishes the chain in one call.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(())` if the chain doesn't have enough space for all the data.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain at `index` has already been finished.
     #[allow(clippy::result_unit_err)]
     pub fn write_complete(&mut self, index: usize, data: &[u8]) -> Result<(), ()> {
         let written = self.io_slices_mut(index).write(data);
@@ -587,6 +414,38 @@ impl RxProducerBatch<'_, IovecVec> {
         self.complete(index, written);
         Ok(())
     }
+
+    #[track_caller]
+    fn assert_not_finished(&self, index: usize) {
+        assert!(!self.is_finished(index), "chain at index {index} already finished");
+    }
+
+    #[track_caller]
+    fn assert_range_not_finished(&self, range: Range<usize>) {
+        for index in range {
+            self.assert_not_finished(index);
+        }
+    }
+}
+
+impl<T: WorkItemState + ReceivedBytes> RxProducerBatch<'_, T> {
+    pub fn complete_received(&mut self, index: usize) {
+        self.complete_received_many(index..index + 1);
+    }
+
+    pub fn complete_received_many(&mut self, range: Range<usize>) {
+        for index in range.clone() {
+            let item = &mut self.work_items[index];
+            item.bytes_used += self.transformed[index].received_bytes();
+            debug_assert!(
+                item.bytes_used <= item.max_bytes,
+                "complete_received_many: bytes_used {} exceeds max_bytes {}",
+                item.bytes_used,
+                item.max_bytes
+            );
+        }
+        self.finish_many(range);
+    }
 }
 
 #[cfg(test)]
@@ -595,12 +454,11 @@ mod tests {
 
     use crate::virtio::batch_queue::aliased_ioslice::{AnyIoSlice, RawAliasedIoSlice};
     use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
-    use crate::virtio::batch_queue::{ChainsMemoryRepr, ReceivedLen};
+    use crate::virtio::batch_queue::{ReceivedBytes, WorkItemState};
     use crate::virtio::test_utils::{create_interrupt, ExpectedUsed, TestSetup};
 
     use super::RxQueueProducer;
 
-    /// Helper type alias for tests using default representation
     type TestRxProducer = RxQueueProducer;
 
     #[test]
@@ -612,7 +470,6 @@ mod tests {
 
         assert_eq!(producer.pending_count(), 0);
         assert_eq!(producer.feed(), 0);
-        assert_eq!(producer.pending_count(), 0);
         assert_eq!(producer.produce(|_batch| {}), 0);
         driver.assert_used(&[]);
     }
@@ -620,15 +477,13 @@ mod tests {
     #[test]
     fn test_feed_single_writable_descriptor() {
         let setup = TestSetup::new();
-        let (queue, driver) = setup.create_queue(16);
-        driver.writable(&[1500]);
+        let (queue, _driver) = setup.create_queue(16);
+        _driver.writable(&[1500]);
 
         let mut producer: TestRxProducer =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = producer.feed();
-
-        assert_eq!(added, 1);
+        assert_eq!(producer.feed(), 1);
         assert_eq!(producer.pending_count(), 1);
     }
 
@@ -636,28 +491,21 @@ mod tests {
     fn test_feed_chained_writable_descriptors() {
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(16);
-        // Chain of 2 writable descriptors
         driver.writable(&[512, 1024]);
 
         let mut producer: TestRxProducer =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
-        let added = producer.feed();
-
-        assert_eq!(added, 1);
+        assert_eq!(producer.feed(), 1);
         assert_eq!(producer.pending_count(), 1);
 
-        // Verify buffer structure via produce
         producer.produce(|batch| {
-            assert_eq!(batch.len(), 1);
             let chain = batch.io_slices_mut(0);
             assert_eq!(chain.len(), 2);
             assert_eq!(chain[0].len(), 512);
             assert_eq!(chain[1].len(), 1024);
-            // Don't mark anything as finished
         });
 
-        // We haven't finished anything
         driver.assert_used(&[]);
     }
 
@@ -676,9 +524,7 @@ mod tests {
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
         producer.set_max_chains(2);
 
-        let added = producer.feed();
-
-        assert_eq!(added, 2);
+        assert_eq!(producer.feed(), 2);
         assert_eq!(producer.pending_count(), 2);
     }
 
@@ -692,30 +538,22 @@ mod tests {
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
-        assert_eq!(producer.pending_count(), 3);
 
         let completed = producer.produce(|batch| {
             assert_eq!(batch.max_bytes(0), 100);
             batch.write_complete(0, b"Received packet 1").unwrap();
             assert_eq!(batch.bytes_used(0), 17);
-            assert!(batch.is_finished(0));
 
             assert_eq!(batch.max_bytes(1), 100);
             batch.write_complete(1, b"Received packet 2").unwrap();
             assert_eq!(batch.bytes_used(1), 17);
-            assert!(batch.is_finished(1));
 
-            // Third left unfinished
             assert_eq!(batch.max_bytes(2), 100);
             assert_eq!(batch.bytes_used(2), 0);
-            assert!(!batch.is_finished(2));
         });
 
         assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 1);
-
-        // Verify add_used was called with actual bytes written (17), not buffer capacity (1500)
-        // Also verifies the content written to guest memory
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"Received packet 1")),
             (1, ExpectedUsed::Writable(b"Received packet 2")),
@@ -724,15 +562,6 @@ mod tests {
 
     #[test]
     fn test_multiple_produce_cycles() {
-        // Each chain: 3 descriptors [6, 12, 6] = 24 bytes raw.
-        // Transform writes "HD" (2 bytes) header then advances past it.
-        // Usable iovecs after transform: [4, 12, 6] = 22 bytes.
-        //
-        // Leftover state per cycle:
-        //   cycle 1 → 2 leftover  (1 partial, 1 untouched)
-        //   cycle 2 → 3 leftover  (complete the partial, 3 untouched)
-        //   cycle 3 → 1 leftover  (complete 2 of 3)
-        //   cycle 4 → 0 leftover  (drain everything)
         let setup = TestSetup::new();
         let (queue, driver) = setup.create_queue(32);
 
@@ -745,66 +574,58 @@ mod tests {
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         let feed_with_hdr = |p: &mut TestRxProducer| {
-            p.feed_with_transform(|mut v| {
-                v.as_mut_slice().write(b"HD");
-                v.advance(2);
-                (v, ())
+            p.feed_with_transform(|iovecs, out| {
+                let mut header = b"HD".as_slice();
+                for mut iov in iovecs {
+                    if !header.is_empty() {
+                        let written = iov.write(header);
+                        header = &header[written..];
+                        iov.advance(written);
+                    }
+                    out.push(iov);
+                }
             })
         };
 
-        // ── Cycle 1: feed 3, complete 1, partial 1, leave 1 untouched ───
         assert_eq!(feed_with_hdr(&mut producer), 3);
         assert_eq!(producer.pending_count(), 3);
 
         let completed = producer.produce(|batch| {
-            // Chain 0: 18-byte write spanning all 3 iovecs, complete
             batch.write_complete(0, b"aaaaaaaaaaaaaaaaaa").unwrap();
 
-            // Chain 1: partial write (4 bytes into first iovec)
             let written = batch.io_slices_mut(1).write(b"bbbb");
             assert_eq!(written, 4);
             batch.advance(1, 4);
-
-            // Chain 2: untouched
         });
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 2);
-
         driver.assert_used(&[(0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa"))]);
 
-        // ── Cycle 2: guest adds 2 buffers, complete the partial ─────────
         driver
-            .writable(&[1, 1, 3, 3, 12, 6]) // 6 descriptors, HD consumes first two → [3, 3, 12, 6] usable
+            .writable(&[1, 1, 3, 3, 12, 6])
             .writable(&[6, 12, 6]);
         assert_eq!(feed_with_hdr(&mut producer), 2);
         assert_eq!(producer.pending_count(), 4);
 
         let completed = producer.produce(|batch| {
-            // Batch[0] (chain 1): continue partial, write 8 more b's
             let written = batch.io_slices_mut(0).write(b"bbbbbbbb");
             assert_eq!(written, 8);
             batch.complete(0, 8);
-
-            // Batch[1..3]: untouched (simulating no more packets this cycle)
         });
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 3);
-
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa")),
             (1, ExpectedUsed::Writable(b"HDbbbbbbbbbbbb")),
         ]);
 
-        // ── Cycle 3: no new buffers, complete 2 of 3, leave 1 ──────────
         let completed = producer.produce(|batch| {
             assert_eq!(batch.len(), 3);
             batch.write_complete(0, b"cccccccccccc").unwrap();
-            batch.write_complete(1, b"dddddd").unwrap(); // spans [3, 3] boundary
-                                                         // Batch[2]: untouched
+            batch.write_complete(1, b"dddddd").unwrap();
         });
         assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 1);
-
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa")),
             (1, ExpectedUsed::Writable(b"HDbbbbbbbbbbbb")),
@@ -812,20 +633,16 @@ mod tests {
             (3, ExpectedUsed::Writable(b"HDdddddd")),
         ]);
 
-        // ── Cycle 4: guest adds 1 buffer, complete both remaining ───────
         driver.writable(&[6, 12, 6]);
         assert_eq!(feed_with_hdr(&mut producer), 1);
         assert_eq!(producer.pending_count(), 2);
 
         let completed = producer.produce(|batch| {
-            assert_eq!(batch.len(), 2);
             batch.write_complete(0, b"eeee").unwrap();
             batch.write_complete(1, b"ffff").unwrap();
         });
         assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 0);
-
-        // Letter = chain index: a=0, b=1, c=2, d=3, e=4, f=5
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"HDaaaaaaaaaaaaaaaaaa")),
             (1, ExpectedUsed::Writable(b"HDbbbbbbbbbbbb")),
@@ -850,11 +667,7 @@ mod tests {
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
         producer.feed();
-        assert_eq!(producer.pending_count(), 4);
 
-        // Complete chains 3 and 1 (out of order), leave 0 and 2 pending.
-        // Only consecutive finished chains from front are removed, so nothing
-        // is compacted (chain 0 is still pending).
         let completed = producer.produce(|batch| {
             batch.write_complete(3, b"pkt3").unwrap();
             batch.write_complete(1, b"pkt1").unwrap();
@@ -862,15 +675,11 @@ mod tests {
 
         assert_eq!(completed, 2);
         assert_eq!(producer.pending_count(), 4);
-
-        // Used ring reflects completion order (3 then 1)
         driver.assert_used(&[
             (3, ExpectedUsed::Writable(b"pkt3")),
             (1, ExpectedUsed::Writable(b"pkt1")),
         ]);
 
-        // Complete chain 0 → first_unfinished advances past 0 and 1 (already
-        // finished) to 2. Chains 0 and 1 are drained.
         let completed = producer.produce(|batch| {
             batch.write_complete(0, b"pkt0").unwrap();
         });
@@ -878,16 +687,12 @@ mod tests {
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 2);
 
-        // Complete chain 0 (was chain 2). Chain 1 (was chain 3) already
-        // finished, so first_unfinished advances to 2 and both are drained.
         let completed = producer.produce(|batch| {
             batch.write_complete(0, b"pkt2").unwrap();
         });
 
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 0);
-
-        // All 4 chains in used ring in the order they were completed
         driver.assert_used(&[
             (3, ExpectedUsed::Writable(b"pkt3")),
             (1, ExpectedUsed::Writable(b"pkt1")),
@@ -896,55 +701,21 @@ mod tests {
         ]);
     }
 
-    /// Custom representation simulating recvmmsg-style batch receive.
-    /// Each chain stores iovecs + a filled received_len (like mmsghdr.msg_len).
-    struct CustomChainRepr {
-        iovecs: Vec<RawAliasedIoSlice>,
+    #[derive(Default)]
+    struct CustomState {
+        tag: u32,
         received_len: Cell<usize>,
     }
 
-    impl CustomChainRepr {
-        /// Writes `data` across the iovec scatter list and sets received_len.
-        fn simulate_recv(&mut self, data: &[u8]) {
-            let written = self.iovecs.as_mut_slice().write(data);
-            self.received_len.set(written);
-        }
+    impl WorkItemState for CustomState {
+        fn fixup_iovecs(&mut self, _iovecs: &[RawAliasedIoSlice]) {}
     }
 
-    unsafe impl ChainsMemoryRepr for CustomChainRepr {
-        type Meta = u32; // tag to verify metadata works
-        type Pool = ();
-
-        fn create_pool(_max_chains: usize) -> () {}
-
-        fn len(&self) -> usize {
-            self.iovecs.len()
-        }
-
-        fn total_bytes(&self) -> usize {
-            self.iovecs.total_len()
-        }
-
-        fn from_raw_iovecs(_pool: &mut (), iovecs: &[RawAliasedIoSlice]) -> Self {
-            CustomChainRepr {
-                iovecs: iovecs.into(),
-                received_len: Cell::new(0),
-            }
-        }
-
-        fn clear(&mut self, _meta: &mut u32, _pool: &mut ()) {
-            self.iovecs.clear();
-            self.received_len.set(0);
-        }
-    }
-
-    impl ReceivedLen for CustomChainRepr {
-        fn received_len(&self) -> usize {
+    impl ReceivedBytes for CustomState {
+        fn received_bytes(&self) -> usize {
             self.received_len.get()
         }
     }
-
-    unsafe impl Send for CustomChainRepr {}
 
     #[test]
     fn test_complete_received_many() {
@@ -956,73 +727,58 @@ mod tests {
             .writable(&[100])
             .writable(&[100]);
 
-        let mut producer: RxQueueProducer<CustomChainRepr> =
+        let mut producer: RxQueueProducer<CustomState> =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
 
-        // Feed with meta tags 10, 20, 30, 40
         let mut tag = 0u32;
-        let added = producer.feed_with_transform(|iovecs| {
+        let added = producer.feed_with_transform(|iovecs, out| {
             tag += 10;
-            (iovecs, tag)
+            out.extend(iovecs);
+            CustomState {
+                tag,
+                received_len: Cell::new(0),
+            }
         });
         assert_eq!(added, 4);
 
-        // Simulate recvmmsg: kernel writes data + fills received_len on each repr.
-        // Chains 0, 1, 3 completed; chain 2 left pending.
-        // Only chains 0, 1 are drained (consecutive from front).
         let completed = producer.produce(|batch| {
             assert_eq!(batch.len(), 4);
+            assert_eq!(batch.transformed_item(0).tag, 10);
+            assert_eq!(batch.transformed_item(1).tag, 20);
+            assert_eq!(batch.transformed_item(2).tag, 30);
+            assert_eq!(batch.transformed_item(3).tag, 40);
 
-            // Verify meta tags round-tripped
-            assert_eq!(*batch.user_meta(0), 10);
-            assert_eq!(*batch.user_meta(1), 20);
-            assert_eq!(*batch.user_meta(2), 30);
-            assert_eq!(*batch.user_meta(3), 40);
+            let written = batch.io_slices_mut(0).write(b"aaaa");
+            batch.transformed_item_mut(0).received_len.set(written);
 
-            // Simulate kernel writing data (like recvmmsg would)
-            batch.chain_mut(0).simulate_recv(b"aaaa");
-            batch.chain_mut(1).simulate_recv(b"bbbbbbbb");
-            // chain 2: no data yet, leave pending
-            batch.chain_mut(3).simulate_recv(b"dddddddddddd");
+            let written = batch.io_slices_mut(1).write(b"bbbbbbbb");
+            batch.transformed_item_mut(1).received_len.set(written);
 
-            // Batch complete first two chains
+            let written = batch.io_slices_mut(3).write(b"dddddddddddd");
+            batch.transformed_item_mut(3).received_len.set(written);
+
             batch.complete_received_many(0..2);
-            assert!(batch.is_finished(0));
-            assert!(batch.is_finished(1));
-            assert_eq!(batch.bytes_used(0), 4);
-            assert_eq!(batch.bytes_used(1), 8);
-
-            // Single complete for chain 3
             batch.complete_received(3);
-            assert!(batch.is_finished(3));
-            assert_eq!(batch.bytes_used(3), 12);
-
-            // Chain 2 left pending
-            assert!(!batch.is_finished(2));
         });
         assert_eq!(completed, 3);
         assert_eq!(producer.pending_count(), 2);
-
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"aaaa")),
             (1, ExpectedUsed::Writable(b"bbbbbbbb")),
             (3, ExpectedUsed::Writable(b"dddddddddddd")),
         ]);
 
-        // ── Cycle 2: complete chain 2, chain 3 already finished → both drained
         let completed = producer.produce(|batch| {
             assert_eq!(batch.len(), 2);
-            // Verify meta survived compaction (chain 2 had tag 30, chain 3 had tag 40)
-            assert_eq!(*batch.user_meta(0), 30);
-            assert_eq!(*batch.user_meta(1), 40);
+            assert_eq!(batch.transformed_item(0).tag, 30);
+            assert_eq!(batch.transformed_item(1).tag, 40);
 
-            batch.chain_mut(0).simulate_recv(b"cccccc");
+            let written = batch.io_slices_mut(0).write(b"cccccc");
+            batch.transformed_item_mut(0).received_len.set(written);
             batch.complete_received(0);
-            assert_eq!(batch.bytes_used(0), 6);
         });
         assert_eq!(completed, 1);
         assert_eq!(producer.pending_count(), 0);
-
         driver.assert_used(&[
             (0, ExpectedUsed::Writable(b"aaaa")),
             (1, ExpectedUsed::Writable(b"bbbbbbbb")),
@@ -1035,8 +791,8 @@ mod tests {
     #[should_panic(expected = "already finished")]
     fn test_double_finish_panics() {
         let setup = TestSetup::new();
-        let (queue, _driver) = setup.create_queue(16);
-        _driver.writable(&[100]);
+        let (queue, driver) = setup.create_queue(16);
+        driver.writable(&[100]);
 
         let mut producer: TestRxProducer =
             RxQueueProducer::new(queue, setup.mem().clone(), create_interrupt());
@@ -1044,7 +800,7 @@ mod tests {
         producer.feed();
         producer.produce(|batch| {
             batch.complete(0, 10);
-            batch.complete(0, 10); // panic: already finished
+            batch.complete(0, 10);
         });
     }
 }

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use utils::fd::SetNonblockingExt;
 use vm_memory::GuestMemoryMmap;
 
-use crate::virtio::batch_queue::aliased_ioslice::AliasedIoSlice;
-use crate::virtio::batch_queue::ioslice_container_utils::{SliceOfIoSlicesExt, VecOfIoSlicesExt};
+use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AnyIoSlice};
+use crate::virtio::batch_queue::ioslice_container_utils::SliceOfIoSlicesExt;
 use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::net::backend::ConnectError;
 use crate::virtio::queue::Queue;
@@ -160,10 +160,18 @@ impl NetBackend for Unixstream {
         // Prepend a header iovec pointing to our shared tx_frame_header buffer.
         // The actual length value is written before each writev in consume().
         let header_ptr = self.tx_frame_header.as_ptr();
-        let fed = self.tx_consumer.feed_with_transform(|mut v| {
-            v.advance(skip);
-            v.insert(0, unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
-            (v, ())
+        let fed = self.tx_consumer.feed_with_transform(|iovecs, out| {
+            out.push(unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
+
+            let mut remaining_skip = skip;
+            for mut iov in iovecs {
+                if remaining_skip != 0 {
+                    let advance = remaining_skip.min(iov.len());
+                    iov.advance(advance);
+                    remaining_skip -= advance;
+                }
+                out.push(iov);
+            }
         });
         log::trace!(
             "Unixstream::send() fed {} frames, pending={}",

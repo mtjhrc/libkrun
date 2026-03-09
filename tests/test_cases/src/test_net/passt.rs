@@ -22,7 +22,7 @@ fn get_krun_add_net_unixstream() -> KrunAddNetUnixstreamFn {
     unsafe { std::mem::transmute(ptr) }
 }
 
-fn passt_available() -> bool {
+pub(crate) fn passt_available() -> bool {
     std::process::Command::new("which")
         .arg("passt")
         .output()
@@ -30,7 +30,7 @@ fn passt_available() -> bool {
         .unwrap_or(false)
 }
 
-fn start_passt() -> std::io::Result<RawFd> {
+pub(crate) fn start_passt() -> std::io::Result<RawFd> {
     let mut fds = [0 as libc::c_int; 2];
     if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) } < 0 {
         return Err(std::io::Error::last_os_error());

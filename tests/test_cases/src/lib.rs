@@ -70,6 +70,7 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("net-passt", Box::new(TestNet::new_passt())),
         TestCase::new("net-tap", Box::new(TestNet::new_tap())),
+        TestCase::new("net-unixgram-passt", Box::new(TestNet::new_unixgram_passt())),
         TestCase::new("net-gvproxy", Box::new(TestNet::new_gvproxy())),
         TestCase::new("net-vmnet-helper", Box::new(TestNet::new_vmnet_helper())),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),

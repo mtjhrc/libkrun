@@ -18,6 +18,8 @@ pub(crate) mod passt;
 #[cfg(feature = "host")]
 pub(crate) mod tap;
 #[cfg(feature = "host")]
+pub(crate) mod unixgram_passt;
+#[cfg(feature = "host")]
 pub(crate) mod vmnet_helper;
 
 /// Virtio-net test with configurable backend
@@ -71,6 +73,24 @@ impl TestNet {
             setup_backend: tap::setup_backend,
             #[cfg(feature = "host")]
             cleanup: Some(tap::cleanup),
+        }
+    }
+
+    pub fn new_unixgram_passt() -> Self {
+        Self {
+            #[cfg(feature = "guest")]
+            guest_ip: [169, 254, 2, 1],
+            #[cfg(feature = "guest")]
+            netmask: [255, 255, 0, 0],
+            #[cfg(feature = "guest")]
+            gateway: None,
+            tcp_tester: TcpTester::new(9004, [169, 254, 2, 2].into()),
+            #[cfg(feature = "host")]
+            should_run: unixgram_passt::should_run,
+            #[cfg(feature = "host")]
+            setup_backend: unixgram_passt::setup_backend,
+            #[cfg(feature = "host")]
+            cleanup: None,
         }
     }
 
