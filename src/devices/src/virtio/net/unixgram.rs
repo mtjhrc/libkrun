@@ -433,6 +433,7 @@ impl Unixgram {
                         nix::errno::Errno::EAGAIN | nix::errno::Errno::ENOBUFS => {}
                         _ => log::error!("recvmsg_x failed: {err}"),
                     }
+                    return;
                 }
             }
         })

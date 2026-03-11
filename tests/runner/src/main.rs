@@ -28,6 +28,10 @@ fn get_test(name: &str) -> anyhow::Result<Box<dyn Test>> {
 }
 
 fn start_vm(test_setup: TestSetup) -> anyhow::Result<()> {
+    // Clear profiler preload env so child processes (tar, vmnet-helper, etc.)
+    // that are arm64e system binaries don't fail to load arm64-only dylibs.
+    std::env::remove_var("DYLD_INSERT_LIBRARIES");
+
     // Raise soft fd limit up to the hard limit
     let (_soft_limit, hard_limit) =
         getrlimit(Resource::RLIMIT_NOFILE).context("getrlimit RLIMIT_NOFILE")?;
@@ -119,6 +123,9 @@ fn run_single_test(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(log_file)
+        // Prevent profiler preload dylibs (e.g. samply) from being injected
+        // into child processes — arm64e system binaries can't load them.
+        .env_remove("DYLD_INSERT_LIBRARIES")
         .spawn()
         .context("Failed to start subprocess for test")?;
 

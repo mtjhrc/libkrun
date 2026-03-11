@@ -348,6 +348,13 @@ mod host {
             ShouldRun::Yes
         }
 
+        fn timeout_secs(&self) -> u64 {
+            let duration: u64 = option_env!("IPERF_DURATION")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
+            duration + 5
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             // Start iperf3 server on host (one-off, exits after first client)
             let mut iperf_server = start_iperf_server(self.port)?;
@@ -436,6 +443,12 @@ mod guest {
 
                 if self.reverse {
                     cmd.arg("-R");
+                }
+
+                if let Some(extra) = option_env!("IPERF_EXTRA_ARGS") {
+                    for arg in extra.split_whitespace() {
+                        cmd.arg(arg);
+                    }
                 }
 
                 let output = cmd.output().expect("Failed to run iperf3");

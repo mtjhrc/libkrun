@@ -44,6 +44,8 @@ if [ "$OS" = "Darwin" ]; then
 <dict>
     <key>com.apple.security.hypervisor</key>
     <true/>
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
 </dict>
 </plist>
 EOF

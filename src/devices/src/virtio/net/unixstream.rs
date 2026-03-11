@@ -96,8 +96,8 @@ impl Unixstream {
         mem: GuestMemoryMmap,
         interrupt: InterruptTransport,
     ) -> Self {
-        // Blocking socket — we use MSG_DONTWAIT for header reads and MSG_WAITALL
-        // for body reads, so we don't need O_NONBLOCK.
+        // Blocking socket — MSG_WAITALL for body reads ensures we get full
+        // frames without short reads. Header reads use MSG_DONTWAIT.
 
         if let Err(e) = setsockopt(&fd, sockopt::SndBuf, &(16 * 1024 * 1024)) {
             log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
@@ -272,61 +272,54 @@ impl NetBackend for Unixstream {
             0
         };
 
-        let mut total_finished = 0;
         self.rx_calls += 1;
         let frames_before = self.rx_total_frames;
         let call_start = Instant::now();
 
-        self.rx_producer.disable_notification();
+        let header_buf = &mut self.rx_header_buf;
+        let header_pos = &mut self.rx_header_pos;
+        let expecting = &mut self.expecting_frame_length;
 
-        loop {
-            self.rx_producer.feed();
+        let total_finished = self.rx_producer.produce(|batch| {
+            batch.disable_notification();
+            let mut next = 0;
 
-            if !self.rx_producer.has_pending() {
-                if self.rx_producer.enable_notification() {
-                    self.rx_producer.disable_notification();
-                    continue;
+            loop {
+                batch.feed();
+
+                if batch.len() == next {
+                    if batch.enable_notification() {
+                        batch.disable_notification();
+                        continue;
+                    }
+                    break;
                 }
-                break;
-            }
 
-            let header_buf = &mut self.rx_header_buf;
-            let header_pos = &mut self.rx_header_pos;
-            let expecting = &mut self.expecting_frame_length;
+                for i in next..batch.len() {
+                    next = i + 1;
 
-            let finished = self.rx_producer.produce(|batch| {
-                for i in 0..batch.len() {
                     // Read frame header (non-blocking)
                     let frame_len =
                         match try_read_frame_header(raw_fd, header_buf, header_pos, expecting) {
                             Some(len) => len,
-                            None => break,
+                            None => return,
                         };
-
-                    let total_len = vnet_offset + frame_len;
 
                     // Write vnet header at start of new frame
                     if batch.bytes_used(i) == 0 && vnet_offset > 0 {
                         let _ = batch.write_advance(i, &super::DEFAULT_VNET_HDR);
                     }
 
-                    // Fast path: if the first iovec is large enough for the whole
-                    // frame body, use plain recv (avoids recvmsg/msghdr overhead).
                     let iovecs = batch.io_slices_mut(i);
                     let ret = if !iovecs.is_empty() && iovecs[0].len() >= frame_len {
+                        // Fast path: frame fits in first iovec — use recv directly
                         let iov = iovecs[0].into_iovec();
                         unsafe {
-                            libc::recv(
-                                raw_fd,
-                                iov.iov_base,
-                                frame_len,
-                                libc::MSG_WAITALL,
-                            )
+                            libc::recv(raw_fd, iov.iov_base, frame_len, libc::MSG_WAITALL)
                         }
                     } else {
-                        // Slow path: scatter-gather read across multiple iovecs
-                        let iovecs =
-                            AliasedIoSliceMut::truncate_slices(iovecs, frame_len);
+                        // Slow path: frame spans multiple iovecs
+                        let iovecs = AliasedIoSliceMut::truncate_slices(iovecs, frame_len);
                         unsafe {
                             recvmsg_waitall(
                                 raw_fd,
@@ -336,28 +329,29 @@ impl NetBackend for Unixstream {
                         }
                     };
                     match ret {
-                        n if n > 0 => {
+                        n if n > 0 && n as usize >= frame_len => {
                             batch.complete(i, n as usize);
                             *expecting = None;
                         }
-                        0 => break, // EOF
+                        n if n > 0 => {
+                            // Short read — advance iovecs, track remaining
+                            batch.advance(i, n as usize);
+                            *expecting = Some((frame_len - n as usize) as u32);
+                            return;
+                        }
+                        0 => return, // EOF
                         _ => {
                             let err = nix::errno::Errno::last();
                             if err == nix::errno::Errno::EAGAIN {
-                                break;
+                                return;
                             }
                             log::error!("recv from unixstream failed: {err:?}");
-                            break;
+                            return;
                         }
                     }
                 }
-            });
-
-            total_finished += finished;
-            if finished == 0 {
-                break;
             }
-        }
+        });
 
         let frames_this_call = self.rx_total_frames + total_finished as u64 - frames_before;
         self.rx_total_frames += total_finished as u64;

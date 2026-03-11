@@ -99,55 +99,44 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     /// total byte capacity of the original (pre-transform) chain.
     /// Disable guest notifications for the RX queue.
     pub fn disable_notification(&mut self) {
-        if let Err(e) = self.queue.disable_notification(&self.mem) {
-            warn!("Failed to disable queue notifications: {e:?}");
-        }
+        let mut batch = RxProducerBatch {
+            work_items: &mut self.work_items,
+            transformed: &mut self.transformed,
+            iovecs: &mut self.iovecs,
+            queue: &mut self.queue,
+            mem: &self.mem,
+            next_finish_idx: 0,
+        };
+        batch.disable_notification();
     }
 
     /// Re-enable guest notifications. Returns `true` if new descriptors
     /// appeared while notifications were disabled (caller should re-feed).
     pub fn enable_notification(&mut self) -> bool {
-        match self.queue.enable_notification(&self.mem) {
-            Ok(has_more) => has_more,
-            Err(e) => {
-                error!("Failed to re-enable queue notifications: {e:?}");
-                false
-            }
-        }
+        let mut batch = RxProducerBatch {
+            work_items: &mut self.work_items,
+            transformed: &mut self.transformed,
+            iovecs: &mut self.iovecs,
+            queue: &mut self.queue,
+            mem: &self.mem,
+            next_finish_idx: 0,
+        };
+        batch.enable_notification()
     }
 
-    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
+    pub fn feed_with_transform<F>(&mut self, transform: F) -> usize
     where
         F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> Option<(usize, T)>,
     {
-        let mut added = 0;
-
-        'next_chain: loop {
-            let Some(head) = self.queue.pop(&self.mem) else {
-                break 'next_chain;
-            };
-
-            let head_index = head.index;
-
-            let mut appender = IovecAppender::new(&mut self.iovecs);
-            let Some((max_bytes, state)) = transform(WritableChainIter::new(head), &mut appender) else {
-                self.queue.undo_pop();
-                break 'next_chain;
-            };
-            let (alloc_start, live, transformed_bytes) = appender.finish();
-            let bytes_used = max_bytes - transformed_bytes;
-            let allocation = alloc_start..live.end;
-
-            let item = WorkItem::new(head_index, max_bytes, bytes_used, allocation, live);
-            let mut state = state;
-            state.set_iovecs(item.raw_slice(&self.iovecs));
-            self.work_items.push(item);
-            self.transformed.push(state);
-
-            added += 1;
-        }
-
-        added
+        let mut batch = RxProducerBatch {
+            work_items: &mut self.work_items,
+            transformed: &mut self.transformed,
+            iovecs: &mut self.iovecs,
+            queue: &mut self.queue,
+            mem: &self.mem,
+            next_finish_idx: 0,
+        };
+        batch.feed_with_transform(transform)
     }
 
     /// Number of chains pending.
@@ -184,10 +173,6 @@ impl<T: WorkItemState> RxQueueProducer<T> {
     where
         F: for<'a> FnOnce(&mut RxProducerBatch<'a, T>),
     {
-        if !self.has_pending() {
-            return 0;
-        }
-
         let finished_count;
         {
             let mut batch = RxProducerBatch {
@@ -196,11 +181,11 @@ impl<T: WorkItemState> RxQueueProducer<T> {
                 iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
-                finished_count: 0,
+                next_finish_idx: 0,
             };
 
             f(&mut batch);
-            finished_count = batch.finished_count;
+            finished_count = batch.next_finish_idx;
         }
 
         self.release(finished_count);
@@ -239,16 +224,70 @@ impl RxQueueProducer<()> {
 
 /// Batch for producing RX chains.
 pub struct RxProducerBatch<'a, T: WorkItemState> {
-    work_items: &'a mut [WorkItem],
-    transformed: &'a mut [T],
+    work_items: &'a mut Vec<WorkItem>,
+    transformed: &'a mut Vec<T>,
     iovecs: &'a mut IovecStorage,
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
     /// Number of chains finished so far (must be finished sequentially from 0).
-    finished_count: usize,
+    next_finish_idx: usize,
 }
 
 impl<T: WorkItemState> RxProducerBatch<'_, T> {
+    /// Disable guest notifications for the RX queue.
+    pub fn disable_notification(&mut self) {
+        if let Err(e) = self.queue.disable_notification(self.mem) {
+            warn!("Failed to disable queue notifications: {e:?}");
+        }
+    }
+
+    /// Re-enable guest notifications. Returns `true` if new descriptors
+    /// appeared while notifications were disabled (caller should re-feed).
+    pub fn enable_notification(&mut self) -> bool {
+        match self.queue.enable_notification(self.mem) {
+            Ok(has_more) => has_more,
+            Err(e) => {
+                error!("Failed to re-enable queue notifications: {e:?}");
+                false
+            }
+        }
+    }
+
+    /// Feed writable descriptor chains from the queue into this batch.
+    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
+    where
+        F: for<'a, 'b> FnMut(WritableChainIter<'a>, &mut IovecAppender<'b, 'a>) -> Option<(usize, T)>,
+    {
+        let mut added = 0;
+
+        'next_chain: loop {
+            let Some(head) = self.queue.pop(self.mem) else {
+                break 'next_chain;
+            };
+
+            let head_index = head.index;
+
+            let mut appender = IovecAppender::new(self.iovecs);
+            let Some((max_bytes, state)) = transform(WritableChainIter::new(head), &mut appender) else {
+                self.queue.undo_pop();
+                break 'next_chain;
+            };
+            let (alloc_start, live, transformed_bytes) = appender.finish();
+            let bytes_used = max_bytes - transformed_bytes;
+            let allocation = alloc_start..live.end;
+
+            let item = WorkItem::new(head_index, max_bytes, bytes_used, allocation, live);
+            let mut state = state;
+            state.set_iovecs(item.raw_slice(self.iovecs));
+            self.work_items.push(item);
+            self.transformed.push(state);
+
+            added += 1;
+        }
+
+        added
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.work_items.len()
@@ -261,7 +300,7 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     #[inline]
     pub fn is_finished(&self, index: usize) -> bool {
-        index < self.finished_count
+        index < self.next_finish_idx
     }
 
     #[inline]
@@ -308,9 +347,9 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
         }
 
         assert!(
-            range.start == self.finished_count,
+            range.start == self.next_finish_idx,
             "chains must be finished sequentially: expected start {}, got {}",
-            self.finished_count,
+            self.next_finish_idx,
             range.start
         );
 
@@ -324,7 +363,7 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
                 error!("failed to add_used: {e}");
             }
 
-            self.finished_count += 1;
+            self.next_finish_idx += 1;
         }
     }
 
@@ -397,9 +436,20 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     #[track_caller]
     fn assert_range_not_finished(&self, range: Range<usize>) {
-        for index in range {
-            self.assert_not_finished(index);
-        }
+        self.assert_not_finished(range.start);
+    }
+}
+
+impl RxProducerBatch<'_, ()> {
+    /// Feed writable descriptor chains without extra transformed state.
+    pub fn feed(&mut self) -> usize {
+        self.feed_with_transform(|iovecs, out| {
+            if !out.reserve(iovecs.len()) {
+                return None;
+            }
+            let total_bytes: usize = iovecs.map(|iov| { let n = iov.len(); out.push(iov); n }).sum();
+            Some((total_bytes, ()))
+        })
     }
 }
 

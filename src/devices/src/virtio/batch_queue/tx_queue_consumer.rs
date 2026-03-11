@@ -180,11 +180,11 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
                 iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
-                finished_count: 0,
+                next_finish_idx: 0,
             };
 
             f(&mut batch);
-            finished_count = batch.finished_count;
+            finished_count = batch.next_finish_idx;
         }
 
         self.release(finished_count);
@@ -229,7 +229,7 @@ pub struct TxConsumerBatch<'a, T: WorkItemState> {
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
     /// Number of chains finished so far (must be finished sequentially from 0).
-    finished_count: usize,
+    next_finish_idx: usize,
 }
 
 impl<T: WorkItemState> TxConsumerBatch<'_, T> {
@@ -245,7 +245,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
 
     #[inline]
     pub fn is_finished(&self, index: usize) -> bool {
-        index < self.finished_count
+        index < self.next_finish_idx
     }
 
     #[inline]
@@ -282,7 +282,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
     }
 
     pub fn total_bytes(&self) -> usize {
-        self.work_items[self.finished_count..]
+        self.work_items[self.next_finish_idx..]
             .iter()
             .map(|item| item.max_bytes.saturating_sub(item.bytes_used))
             .sum()
@@ -294,9 +294,9 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
     /// may be added in the future if needed.
     pub fn finish(&mut self, index: usize) {
         assert!(
-            index == self.finished_count,
+            index == self.next_finish_idx,
             "chains must be finished sequentially: expected index {}, got {index}",
-            self.finished_count
+            self.next_finish_idx
         );
         let item = &self.work_items[index];
 
@@ -306,7 +306,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
             error!("TxConsumerBatch: failed to add_used: {e}");
         }
 
-        self.finished_count += 1;
+        self.next_finish_idx += 1;
     }
 
     pub fn finish_many(&mut self, range: Range<usize>) {
@@ -337,9 +337,7 @@ impl<T: WorkItemState> TxConsumerBatch<'_, T> {
 
     #[track_caller]
     fn assert_range_not_finished(&self, range: Range<usize>) {
-        for index in range {
-            self.assert_not_finished(index);
-        }
+        self.assert_not_finished(range.start);
     }
 }
 
