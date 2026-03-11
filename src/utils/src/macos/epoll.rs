@@ -33,6 +33,9 @@ bitflags! {
 #[derive(Clone, Copy)]
 pub struct Kevent(libc::kevent);
 
+// Safety: udata is used as an integer tag (cast from u64), never dereferenced.
+unsafe impl Send for Kevent {}
+
 impl std::fmt::Debug for Kevent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{{ ident: {}, data: {} }}", self.ident(), self.data())
@@ -122,6 +125,7 @@ impl EpollEvent {
 #[derive(Clone, Debug)]
 pub struct Epoll {
     queue: RawFd,
+    kevs: Box<[Kevent; 32]>,
 }
 
 impl Epoll {
@@ -130,7 +134,10 @@ impl Epoll {
         if queue == -1 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(Epoll { queue })
+            Ok(Epoll {
+                queue,
+                kevs: Box::new([Kevent::default(); 32]),
+            })
         }
     }
 
@@ -232,7 +239,7 @@ impl Epoll {
     }
 
     pub fn wait(
-        &self,
+        &mut self,
         max_events: usize,
         timeout: i32,
         events: &mut [EpollEvent],
@@ -248,7 +255,8 @@ impl Epoll {
             tv_nsec: 0,
         };
 
-        let mut kevs = vec![Kevent::default(); events.len()];
+        let max_events = max_events.min(self.kevs.len());
+        let kevs = &mut *self.kevs;
         debug!("kevs len: {}", kevs.len());
         let ret = unsafe {
             libc::kevent(
@@ -326,7 +334,7 @@ mod tests {
         const EVENT_BUFFER_SIZE: usize = 128;
         const MAX_EVENTS: usize = 10;
 
-        let epoll = Epoll::new().unwrap();
+        let mut epoll = Epoll::new().unwrap();
         assert_eq!(epoll.queue, epoll.as_raw_fd());
 
         // Let's test different scenarios for `epoll_ctl()` and `epoll_wait()` functionality.
