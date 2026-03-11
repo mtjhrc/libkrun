@@ -68,6 +68,7 @@ pub struct TxQueueConsumer<T: WorkItemState = ()> {
     iovecs: IovecStorage,
     work_items: Vec<WorkItem>,
     transformed: Vec<T>,
+    head: usize,
 }
 
 impl<T: WorkItemState> TxQueueConsumer<T> {
@@ -86,6 +87,7 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             iovecs: IovecStorage::with_capacity(iovec_capacity),
             work_items: Vec::new(),
             transformed: Vec::new(),
+            head: 0,
         }
     }
 
@@ -146,12 +148,12 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
 
     /// Number of chains pending.
     pub fn pending_count(&self) -> usize {
-        self.work_items.len()
+        self.work_items.len() - self.head
     }
 
     /// Check if there are any pending chains.
     pub fn has_pending(&self) -> bool {
-        !self.work_items.is_empty()
+        self.head < self.work_items.len()
     }
 
     /// Check whether the guest needs an interrupt after `add_used` calls.
@@ -175,8 +177,8 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
         let finished_count;
         {
             let mut batch = TxConsumerBatch {
-                work_items: &mut self.work_items,
-                transformed: &mut self.transformed,
+                work_items: &mut self.work_items[self.head..],
+                transformed: &mut self.transformed[self.head..],
                 iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
@@ -196,14 +198,19 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             return;
         }
 
-        let released: usize = self.work_items[..count]
+        let released: usize = self.work_items[self.head..self.head + count]
             .iter()
             .map(WorkItem::allocation_len)
             .sum();
 
-        self.work_items.drain(..count);
-        self.transformed.drain(..count);
+        self.head += count;
         self.iovecs.release_front_len(released);
+
+        if self.head == self.work_items.len() {
+            self.work_items.clear();
+            self.transformed.clear();
+            self.head = 0;
+        }
     }
 
 }

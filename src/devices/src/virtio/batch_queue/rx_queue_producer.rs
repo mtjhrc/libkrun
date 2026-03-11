@@ -70,6 +70,7 @@ pub struct RxQueueProducer<T: WorkItemState = ()> {
     iovecs: IovecStorage,
     work_items: Vec<WorkItem>,
     transformed: Vec<T>,
+    head: usize,
 }
 
 impl<T: WorkItemState> RxQueueProducer<T> {
@@ -88,6 +89,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             iovecs: IovecStorage::with_capacity(iovec_capacity),
             work_items: Vec::new(),
             transformed: Vec::new(),
+            head: 0,
         }
     }
 
@@ -105,6 +107,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             iovecs: &mut self.iovecs,
             queue: &mut self.queue,
             mem: &self.mem,
+            head: self.head,
             next_finish_idx: 0,
         };
         batch.disable_notification();
@@ -119,6 +122,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             iovecs: &mut self.iovecs,
             queue: &mut self.queue,
             mem: &self.mem,
+            head: self.head,
             next_finish_idx: 0,
         };
         batch.enable_notification()
@@ -134,6 +138,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             iovecs: &mut self.iovecs,
             queue: &mut self.queue,
             mem: &self.mem,
+            head: self.head,
             next_finish_idx: 0,
         };
         batch.feed_with_transform(transform)
@@ -141,7 +146,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
 
     /// Number of chains pending.
     pub fn pending_count(&self) -> usize {
-        self.work_items.len()
+        self.work_items.len() - self.head
     }
 
     /// Number of descriptors available in the avail ring (not yet popped).
@@ -156,7 +161,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
 
     /// Check if there are any pending chains.
     pub fn has_pending(&self) -> bool {
-        !self.work_items.is_empty()
+        self.head < self.work_items.len()
     }
 
     /// Check whether the guest needs an interrupt after `add_used` calls.
@@ -181,6 +186,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
                 iovecs: &mut self.iovecs,
                 queue: &mut self.queue,
                 mem: &self.mem,
+                head: self.head,
                 next_finish_idx: 0,
             };
 
@@ -197,14 +203,19 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             return;
         }
 
-        let released: usize = self.work_items[..count]
+        let released: usize = self.work_items[self.head..self.head + count]
             .iter()
             .map(WorkItem::allocation_len)
             .sum();
 
-        self.work_items.drain(..count);
-        self.transformed.drain(..count);
+        self.head += count;
         self.iovecs.release_front_len(released);
+
+        if self.head == self.work_items.len() {
+            self.work_items.clear();
+            self.transformed.clear();
+            self.head = 0;
+        }
     }
 
 }
@@ -229,11 +240,22 @@ pub struct RxProducerBatch<'a, T: WorkItemState> {
     iovecs: &'a mut IovecStorage,
     queue: &'a mut Queue,
     mem: &'a GuestMemoryMmap,
+    head: usize,
     /// Number of chains finished so far (must be finished sequentially from 0).
     next_finish_idx: usize,
 }
 
 impl<T: WorkItemState> RxProducerBatch<'_, T> {
+    #[inline]
+    fn offset(&self, index: usize) -> usize {
+        self.head + index
+    }
+
+    #[inline]
+    fn offset_range(&self, range: Range<usize>) -> Range<usize> {
+        self.head + range.start..self.head + range.end
+    }
+
     /// Disable guest notifications for the RX queue.
     pub fn disable_notification(&mut self) {
         if let Err(e) = self.queue.disable_notification(self.mem) {
@@ -290,12 +312,12 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.work_items.len()
+        self.work_items.len() - self.head
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.work_items.is_empty()
+        self.head >= self.work_items.len()
     }
 
     #[inline]
@@ -305,35 +327,37 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     #[inline]
     pub fn bytes_used(&self, index: usize) -> usize {
-        self.work_items[index].bytes_used
+        self.work_items[self.offset(index)].bytes_used
     }
 
     #[inline]
     pub fn max_bytes(&self, index: usize) -> usize {
-        self.work_items[index].max_bytes
+        self.work_items[self.offset(index)].max_bytes
     }
 
     pub fn transformed(&self, range: Range<usize>) -> &[T] {
         self.assert_range_not_finished(range.clone());
-        &self.transformed[range]
+        &self.transformed[self.offset_range(range)]
     }
 
     pub fn transformed_mut(&mut self, range: Range<usize>) -> &mut [T] {
         self.assert_range_not_finished(range.clone());
-        &mut self.transformed[range]
+        let r = self.offset_range(range);
+        &mut self.transformed[r]
     }
 
     pub fn transformed_item(&self, index: usize) -> &T {
-        &self.transformed[index]
+        &self.transformed[self.offset(index)]
     }
 
     pub fn transformed_item_mut(&mut self, index: usize) -> &mut T {
-        &mut self.transformed[index]
+        let idx = self.head + index;
+        &mut self.transformed[idx]
     }
 
     pub fn io_slices_mut(&mut self, index: usize) -> &mut [AliasedIoSliceMut<'_>] {
         self.assert_not_finished(index);
-        let live = self.work_items[index].live.clone();
+        let live = self.work_items[self.offset(index)].live.clone();
         raw_as_io_slices_mut(self.iovecs.slice_mut(live))
     }
 
@@ -354,7 +378,7 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
         );
 
         for index in range {
-            let item = &self.work_items[index];
+            let item = &self.work_items[self.offset(index)];
 
             if let Err(e) = self
                 .queue
@@ -373,7 +397,8 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     pub fn complete(&mut self, index: usize, bytes: usize) {
         self.assert_not_finished(index);
-        let item = &mut self.work_items[index];
+        let idx = self.head + index;
+        let item = &mut self.work_items[idx];
         item.bytes_used += bytes;
         debug_assert!(
             item.bytes_used <= item.max_bytes,
@@ -386,7 +411,8 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 
     pub fn advance(&mut self, index: usize, bytes: usize) {
         self.assert_not_finished(index);
-        let item = &mut self.work_items[index];
+        let idx = self.offset(index);
+        let item = &mut self.work_items[idx];
         item.bytes_used += bytes;
         debug_assert!(
             item.bytes_used <= item.max_bytes,
@@ -396,15 +422,16 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
         );
         item.advance(self.iovecs, bytes);
         let iovecs = item.raw_slice(self.iovecs);
-        self.transformed[index].set_iovecs(iovecs);
+        self.transformed[idx].set_iovecs(iovecs);
     }
 
     pub fn truncate(&mut self, index: usize, max_bytes: usize) {
         self.assert_not_finished(index);
-        let item = &mut self.work_items[index];
+        let idx = self.offset(index);
+        let item = &mut self.work_items[idx];
         item.truncate_bytes(self.iovecs, max_bytes);
         let iovecs = item.raw_slice(self.iovecs);
-        self.transformed[index].set_iovecs(iovecs);
+        self.transformed[idx].set_iovecs(iovecs);
     }
 
     #[allow(clippy::result_unit_err)]
@@ -460,8 +487,9 @@ impl<T: WorkItemState + ReceivedBytes> RxProducerBatch<'_, T> {
 
     pub fn complete_received_many(&mut self, range: Range<usize>) {
         for index in range.clone() {
-            let item = &mut self.work_items[index];
-            item.bytes_used += self.transformed[index].received_bytes();
+            let idx = self.offset(index);
+            let item = &mut self.work_items[idx];
+            item.bytes_used += self.transformed[idx].received_bytes();
             debug_assert!(
                 item.bytes_used <= item.max_bytes,
                 "complete_received_many: bytes_used {} exceeds max_bytes {}",
