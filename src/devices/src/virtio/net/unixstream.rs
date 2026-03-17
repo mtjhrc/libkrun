@@ -61,7 +61,7 @@ unsafe fn recvmsg_waitall(raw_fd: RawFd, iov_ptr: *mut libc::iovec, iov_len: usi
     hdr.msg_iov = iov_ptr;
     hdr.msg_iovlen = iov_len as _;
 
-    libc::recvmsg(raw_fd, &mut hdr, libc::MSG_WAITALL)
+    libc::recvmsg(raw_fd, &mut hdr, libc::MSG_DONTWAIT)
 }
 
 pub struct Unixstream {
@@ -315,7 +315,7 @@ impl NetBackend for Unixstream {
                         // Fast path: frame fits in first iovec — use recv directly
                         let iov = iovecs[0].into_iovec();
                         unsafe {
-                            libc::recv(raw_fd, iov.iov_base, frame_len, libc::MSG_WAITALL)
+                            libc::recv(raw_fd, iov.iov_base, frame_len, libc::MSG_DONTWAIT)
                         }
                     } else {
                         // Slow path: frame spans multiple iovecs
@@ -390,5 +390,9 @@ impl NetBackend for Unixstream {
 
     fn raw_socket_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+
+    fn queue_avail(&self) -> (u16, u16) {
+        (self.tx_consumer.queue_avail(), self.rx_producer.queue_avail())
     }
 }

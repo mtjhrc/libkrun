@@ -368,8 +368,9 @@ mod host {
             }
 
             unsafe {
+                krun_call!(krun_set_log_level(KRUN_LOG_LEVEL_OFF))?;
                 let ctx = krun_call_u32!(krun_create_ctx())?;
-                krun_call!(krun_set_vm_config(ctx, 1, 512))?;
+                krun_call!(krun_set_vm_config(ctx, 2, 4096))?;
 
                 // Backend-specific setup
                 (self.setup_backend)(ctx, &test_setup)?;
@@ -418,13 +419,20 @@ mod guest {
                 self.host_ip[0], self.host_ip[1], self.host_ip[2], self.host_ip[3]
             );
 
+            // Raise BQL limit_min so BQL never throttles TX descriptors in flight
+            std::fs::write(
+                "/sys/class/net/eth0/queues/tx-0/byte_queue_limits/limit_min",
+                "1879048192", // DQL_MAX_LIMIT = (UINT_MAX / 2) - (UINT_MAX / 16)
+            )
+            .expect("Failed to set BQL limit_min");
+
             // Give the network a moment to come up
             std::thread::sleep(Duration::from_secs(2));
 
             let Some(iperf_duration) = option_env!("IPERF_DURATION") else {
                 unreachable!()
             };
-
+            
             // Run iperf3 client with JSON output, retry up to 5 times
             let mut last_output = None;
             for attempt in 0..5 {

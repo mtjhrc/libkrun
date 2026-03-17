@@ -249,4 +249,4 @@ EXTRA_LIBPATH_Linux =
 EXTRA_LIBPATH_Darwin = /opt/homebrew/opt/libkrunfw/lib:/opt/homebrew/opt/llvm/lib
 
 test: test-prefix
-	cd tests; RUST_LOG=trace $(LIBPATH_VAR_$(OS))="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/):$(EXTRA_LIBPATH_$(OS)):$${$(LIBPATH_VAR_$(OS))}" PKG_CONFIG_PATH="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/pkgconfig/)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
+	cd tests; $(LIBPATH_VAR_$(OS))="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/):$(EXTRA_LIBPATH_$(OS)):$${$(LIBPATH_VAR_$(OS))}" PKG_CONFIG_PATH="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/pkgconfig/)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)

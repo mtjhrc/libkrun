@@ -220,4 +220,8 @@ impl NetBackend for Tap {
     fn raw_socket_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
+
+    fn queue_avail(&self) -> (u16, u16) {
+        (self.tx_consumer.queue_avail(), self.rx_producer.queue_avail())
+    }
 }

@@ -1,0 +1,462 @@
+[2026-03-16T14:20:00Z DEBUG devices::legacy::x86_64::cmos] cmos: mem_below_4g=1073741824 mem_above_4g=0
+[2026-03-16T14:20:00Z DEBUG devices::virtio::mmio[balloon]] set_irq_line: 5
+[2026-03-16T14:20:00Z DEBUG devices::virtio::mmio[rng]] set_irq_line: 6
+[2026-03-16T14:20:00Z DEBUG devices::virtio::mmio[console]] set_irq_line: 7
+[2026-03-16T14:20:00Z DEBUG devices::virtio::mmio[fs]] set_irq_line: 8
+[2026-03-16T14:20:00Z DEBUG devices::virtio::mmio[vsock]] set_irq_line: 9
+[2026-03-16T14:20:01Z DEBUG devices::virtio::balloon::event_handler] balloon: activate event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::balloon::event_handler] balloon: stats queue event (ignored)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::console::event_handler] console: activate event
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 4294967295, event: 0, value: 1 }
+[2026-03-16T14:20:01Z DEBUG devices::virtio::console::device] Device is ready: initialization ok
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::rng::event_handler] rng: activate event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::rng::event_handler] rng: request queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::rng::device] rng: process_req()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[rng]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 0: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 0: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 0: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 0, event: 3, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Port ready 0: 
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 12
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 4: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 1, event: 3, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Port ready 1: krun-stdin
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 18
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 6: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 2, event: 3, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Port ready 2: krun-stdout
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 19
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 8: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify rx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 3, event: 3, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Port ready 3: krun-stderr
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 8
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_rx wrote 19
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::rng::event_handler] rng: request queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::rng::device] rng: process_req()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[rng]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 0, event: 6, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Starting port io for port 0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 2: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] activate event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] RX queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_rx()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_rx before while
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_rx inside while
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] recv_stream_pkt
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 26
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "dev"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "init.krun"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 14
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 22
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "proc"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "dev"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 9
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: dev, inode: 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "proc"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 9
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: proc, inode: 4
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "sys"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 9
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: sys, inode: 5
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: ".krun_config.json"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] TX queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx() is DGRAM
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] send_dgram_pkt: src_port=1877930072 dst_port=1031
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] DGRAM release request: src=1877930072
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] DGRAM release request: id=620 local_port=620 peer_port=0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] release without proxy: id=620, proxies=0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] DGRAM release request: proxies=0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] raising IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 2, event: 6, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Starting port io for port 2
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 3, event: 6, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Starting port io for port 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 1, event: 6, value: 1 }
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Starting port io for port 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: "guest-agent"
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_lookup: guest-agent, inode: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 14
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_open: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 22
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] TX queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 15
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] read: 6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx() is STREAM
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] send_pkt: src_port=1877930073 dst_port=1234, op=1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] OP_REQUEST
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] connect: Connected
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] push_connect_rsp: id: 8065648247709893842, control_port: 1877930073, result: 0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] confirm_connect: local_port=1234 peer_port=1877930073, src_port=1234, dst_port=0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] update_polling id=8065648247709893842 fd=73 evset=IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] raising IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] Event: ev.data=8065648247709893842 ev.fd=1234
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] process_event: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_to_pkt: peer_avail_credit=262144, buf.len=3732, max_len=3732
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv cnt=5
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv rx_cnt=0
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] init_data_pkt: id=8065648247709893842, local_port=1234, peer_port=1877930073
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_pkt: pushing packet with 49 bytes, push_cnt=49
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_to_pkt: peer_avail_credit=262139, buf.len=3732, max_len=3732
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_pkt: recv error: EAGAIN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_pkt: have_used=true
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] signal IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] TX queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx() is STREAM
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] send_pkt: src_port=1877930073 dst_port=1234, op=6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] OP_CREDIT_UPDATE
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] update_credit: buf_alloc=262144 rx_cnt=5 fwd_cnt=5
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] update_polling id=8065648247709893842 fd=73 evset=IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx() is STREAM
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] send_pkt: src_port=1877930073 dst_port=1234, op=5
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] OP_RW
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] allowing OP_RW: src=1877930073 dst=1234
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] sendmsg ret=5
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] raising IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] Event: ev.data=8065648247709893842 ev.fd=1234
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] process_event: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_to_pkt: peer_avail_credit=262144, buf.len=3732, max_len=3732
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv cnt=4
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv rx_cnt=5
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] init_data_pkt: id=8065648247709893842, local_port=1234, peer_port=1877930073
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_pkt: pushing packet with 48 bytes, push_cnt=97
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_to_pkt: peer_avail_credit=262140, buf.len=3732, max_len=3732
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_pkt: recv error: EAGAIN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] recv_pkt: have_used=true
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] signal IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] TX queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx() is STREAM
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] send_pkt: src_port=1877930073 dst_port=1234, op=6
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] OP_CREDIT_UPDATE
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] update_credit: buf_alloc=262144 rx_cnt=9 fwd_cnt=9
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] update_polling id=8065648247709893842 fd=73 evset=IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx() is STREAM
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] send_pkt: src_port=1877930073 dst_port=1234, op=4
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer] OP_SHUTDOWN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] raising IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] Event: ev.data=8065648247709893842 ev.fd=1234
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] process_event: HANG_UP
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::event_handler] TX queue event
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::unix] push_reset: id: 8065648247709893842, peer_port: 1877930073, local_port: 1234
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::device] process_stream_tx()
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] update_polling id=8065648247709893842 fd=73 evset=(empty)
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 7: IN
+[2026-03-16T14:20:01Z WARN  devices::virtio::vsock::muxer_thread] deferring proxy removal: 8065648247709893842
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Notify tx (queue event)
+[2026-03-16T14:20:01Z DEBUG devices::virtio::vsock::muxer_thread] signal IRQ
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[vsock]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::process_tx] tx unparked, queue len 1
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::process_tx] Tx VolatileSlice { addr: 0x7f7c5a5f9588, size: 3, bitmap: (), mmap: None }, write_volatile 3 bytes
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::process_tx] Tx add used 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 3, event: 6, value: 0 }
+[2026-03-16T14:20:01Z DEBUG devices::virtio::console::device] Guest closed port 3
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 2, event: 6, value: 0 }
+[2026-03-16T14:20:01Z DEBUG devices::virtio::console::device] Guest closed port 2
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] VirtioConsoleControl cmd: VirtioConsoleControl { id: 1, event: 6, value: 0 }
+[2026-03-16T14:20:01Z DEBUG devices::virtio::console::device] Guest closed port 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[console]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::event_handler] Event on queue 3: IN
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 18
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] process_control_tx
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 17
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 27
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::linux::passthrough] do_open: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 39
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::worker] Fs: queue event: 1
+[2026-03-16T14:20:01Z DEBUG devices::virtio::fs::server] opcode: 29
+[2026-03-16T14:20:01Z DEBUG devices::virtio::mmio[fs]] interrupt: signal_used_queue
+[2026-03-16T14:20:01Z DEBUG vmm] using vmm exit code: 0
+[2026-03-16T14:20:01Z INFO  vmm] Vmm is stopping.
+[2026-03-16T14:20:01Z TRACE devices::virtio::console::device] Console on_vmm_exit finished

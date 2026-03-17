@@ -8,9 +8,12 @@ use crate::virtio::{DeviceQueue, InterruptTransport};
 use super::backend::{NetBackend, ReadError, WriteError};
 use super::device::VirtioNetBackend;
 
+#[cfg(target_os = "macos")]
+use std::os::fd::RawFd;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
@@ -19,6 +22,7 @@ pub struct NetWorker {
     rx_evt: Arc<EventFd>,
     tx_evt: Arc<EventFd>,
     backend: Box<dyn NetBackend + Send>,
+    tx_needs_retry: bool,
 }
 
 impl NetWorker {
@@ -96,6 +100,7 @@ impl NetWorker {
             rx_evt,
             tx_evt,
             backend,
+            tx_needs_retry: false,
         })
     }
 
@@ -107,6 +112,9 @@ impl NetWorker {
     }
 
     fn work(mut self) {
+        #[cfg(target_os = "macos")]
+        const TX_TIMER_FD: RawFd = -2;
+
         let virtq_rx_ev_fd = self.rx_evt.as_raw_fd();
         let virtq_tx_ev_fd = self.tx_evt.as_raw_fd();
         let backend_socket = self.backend.raw_socket_fd();
@@ -152,16 +160,73 @@ impl NetWorker {
 
         let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
         loop {
+            // Snapshot state before sleeping in epoll_wait
+            let mut sock_rx_bytes: libc::c_int = 0;
+            let mut sock_tx_bytes: libc::c_int = 0;
+            unsafe {
+                libc::ioctl(backend_socket, libc::FIONREAD, &mut sock_rx_bytes);
+                #[cfg(target_os = "linux")]
+                libc::ioctl(backend_socket, libc::TIOCOUTQ, &mut sock_tx_bytes);
+                #[cfg(target_os = "macos")]
+                {
+                    let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as _;
+                    libc::getsockopt(backend_socket, libc::SOL_SOCKET, libc::SO_NWRITE,
+                        &mut sock_tx_bytes as *mut _ as *mut libc::c_void, &mut len);
+                }
+            }
+            let (tx_avail, rx_avail) = self.backend.queue_avail();
+
+            let wait_start = Instant::now();
             match epoll.wait(epoll_events.len(), -1, epoll_events.as_mut_slice()) {
                 Ok(ev_cnt) => {
+                    let wait_ms = wait_start.elapsed().as_secs_f64() * 1000.0;
+                    if wait_ms >= 10.0 {
+                        let mut sock_rx_after: libc::c_int = 0;
+                        let mut sock_tx_after: libc::c_int = 0;
+                        unsafe {
+                            libc::ioctl(backend_socket, libc::FIONREAD, &mut sock_rx_after);
+                            #[cfg(target_os = "linux")]
+                            libc::ioctl(backend_socket, libc::TIOCOUTQ, &mut sock_tx_after);
+                            #[cfg(target_os = "macos")]
+                            {
+                                 let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as _;
+                                libc::getsockopt(backend_socket, libc::SOL_SOCKET, libc::SO_NWRITE,
+                                    &mut sock_tx_after as *mut _ as *mut libc::c_void, &mut len);
+                            }
+                        }
+                        let (tx_avail_after, rx_avail_after) = self.backend.queue_avail();
+                        eprintln!(
+                            "epoll_wait took {wait_ms:.1}ms ({ev_cnt} events) \
+                             sock_rx={sock_rx_bytes}->{sock_rx_after} \
+                             sock_tx={sock_tx_bytes}->{sock_tx_after} \
+                             vq_tx_avail={tx_avail}->{tx_avail_after} \
+                             vq_rx_avail={rx_avail}->{rx_avail_after}",
+                        );
+                        for i in 0..ev_cnt {
+                            let event = &epoll_events[i];
+                            let fd = event.fd();
+                            let name = if fd == virtq_rx_ev_fd {
+                                "rx_queue"
+                            } else if fd == virtq_tx_ev_fd {
+                                "tx_queue"
+                            } else if fd == backend_socket {
+                                "socket"
+                            } else {
+                                #[cfg(target_os = "macos")]
+                                if fd == TX_TIMER_FD { "tx_timer" } else { "unknown" }
+                                #[cfg(not(target_os = "macos"))]
+                                "unknown"
+                            };
+                            eprintln!(
+                                "  Event {i}: {name} ({:?})",
+                                event.event_set()
+                            );
+                        }
+                    }
+
                     for event in &epoll_events[0..ev_cnt] {
                         let source = event.fd();
                         let event_set = event.event_set();
-                        log::trace!(
-                            "virtio-net epoll event: fd={} event_set={:?}",
-                            source,
-                            event_set
-                        );
 
                         if source == virtq_rx_ev_fd && event_set.contains(EventSet::IN) {
                             log::trace!("virtio-net: rx queue event");
@@ -187,7 +252,29 @@ impl NetWorker {
                                 }
                             }
                         } else {
+                            #[cfg(target_os = "macos")]
+                            if event_set.is_empty() && source == TX_TIMER_FD {
+                                self.process_tx();
+                            } else {
+                                log::warn!("Received unknown event: {event_set:?} from fd: {source:?}");
+                            }
+                            #[cfg(not(target_os = "macos"))]
                             log::warn!("Received unknown event: {event_set:?} from fd: {source:?}");
+                        }
+                    }
+                    
+                    /*if ev_cnt == 0 {
+                        self.process_rx();
+                        self.process_tx();
+                    }*/
+
+                    // Arm the retry timer after processing all events, so it
+                    // reflects the final state of tx_needs_retry.
+                    #[cfg(target_os = "macos")]
+                    if self.tx_needs_retry {
+                        let delay = self.backend.write_retry_delay_us();
+                        if delay > 0 {
+                            epoll.add_oneshot_timer(delay, TX_TIMER_FD as u64);
                         }
                     }
                 }
@@ -225,14 +312,17 @@ impl NetWorker {
     }
 
     fn process_tx(&mut self) {
-        match self.backend.send() {
-            Ok(()) => {}
+        self.tx_needs_retry = match self.backend.send() {
+            Ok(()) => false,
+            Err(WriteError::NothingWritten) => true,
             Err(WriteError::ProcessNotRunning) => {
                 log::error!("TX error: backend process not running");
+                false
             }
             Err(WriteError::Internal(e)) => {
                 log::error!("TX error: {e:?}");
+                false
             }
-        }
+        };
     }
 }

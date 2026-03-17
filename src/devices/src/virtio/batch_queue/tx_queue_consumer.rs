@@ -156,6 +156,11 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
         self.head < self.work_items.len()
     }
 
+    /// Number of descriptors available in the virtqueue.
+    pub fn queue_avail(&self) -> u16 {
+        self.queue.len(&self.mem)
+    }
+
     /// Check whether the guest needs an interrupt after `add_used` calls.
     /// Uses EVENT_IDX when negotiated to coalesce interrupts.
     pub fn needs_notification(&mut self) -> bool {

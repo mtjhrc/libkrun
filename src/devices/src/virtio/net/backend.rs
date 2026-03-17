@@ -29,6 +29,8 @@ pub enum ReadError {
 pub enum WriteError {
     /// Backend process not running (EPIPE)
     ProcessNotRunning,
+    /// Nothing was written (e.g. ENOBUFS on macOS); caller should retry later.
+    NothingWritten,
     /// Internal I/O error
     Internal(nix::Error),
 }
@@ -53,4 +55,15 @@ pub trait NetBackend {
 
     /// Returns the raw socket fd for epoll registration.
     fn raw_socket_fd(&self) -> RawFd;
+
+    /// Delay in microseconds before retrying after NothingWritten.
+    /// Returns 0 if no delay-based retry is needed (e.g. on Linux where
+    /// EAGAIN + EPOLLET handles retries via writable events).
+    fn write_retry_delay_us(&self) -> u64 {
+        0
+    }
+
+    /// Returns (tx_queue_avail, rx_queue_avail) — number of descriptors
+    /// available in each virtqueue.
+    fn queue_avail(&self) -> (u16, u16);
 }

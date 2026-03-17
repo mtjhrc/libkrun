@@ -244,15 +244,21 @@ impl Epoll {
         timeout: i32,
         events: &mut [EpollEvent],
     ) -> io::Result<usize> {
-        let _tout = if timeout >= 0 {
-            Some(Duration::from_millis(timeout as u64))
-        } else {
+        let timespec_opt: Option<libc::timespec> = if timeout == -1 {
+            // A null timeout means wait indefinitely.
             None
+        } else {
+            // Convert milliseconds to seconds and nanoseconds.
+            let duration = Duration::from_millis(timeout as u64);
+            Some(libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            })
         };
 
-        let ts = libc::timespec {
-            tv_sec: 3,
-            tv_nsec: 0,
+        let timespec_ptr = match &timespec_opt {
+            Some(ts) => ts,
+            None => ptr::null(),
         };
 
         let max_events = max_events.min(self.kevs.len());
@@ -265,7 +271,7 @@ impl Epoll {
                 0,
                 kevs.as_mut_ptr() as *mut libc::kevent,
                 max_events as i32,
-                &ts as *const libc::timespec,
+                timespec_ptr,
             )
         };
 
@@ -277,8 +283,11 @@ impl Epoll {
                 events[i as usize].events = EventSet::IN.bits();
             } else if kevs[i as usize].0.filter == libc::EVFILT_WRITE {
                 events[i as usize].events = EventSet::OUT.bits();
+            } else if kevs[i as usize].0.filter == libc::EVFILT_TIMER {
+                // No epoll equivalent; caller identifies timer by udata.
+                events[i as usize].events = EventSet::empty().bits();
             }
-            if kevs[i as usize].0.flags & libc::EV_EOF != 0 {
+            if kevs[i as usize].0.filter != libc::EVFILT_TIMER && kevs[i as usize].0.flags & libc::EV_EOF != 0 {
                 events[i as usize].events |= if kevs[i as usize].0.flags & libc::EV_CLEAR != 0 {
                     EventSet::READ_HANG_UP.bits()
                 } else {
@@ -292,6 +301,22 @@ impl Epoll {
             -1 => Err(io::Error::last_os_error()),
             0 => Ok(0),
             nev => Ok(nev as usize),
+        }
+    }
+
+    /// Register a one-shot timer that fires after `delay_us` microseconds.
+    /// The resulting event will have `data` set to `udata`.
+    pub fn add_oneshot_timer(&self, delay_us: u64, udata: u64) {
+        let kev = libc::kevent {
+            ident: 0,
+            filter: libc::EVFILT_TIMER,
+            flags: libc::EV_ADD | libc::EV_ONESHOT,
+            fflags: libc::NOTE_USECONDS,
+            data: delay_us as isize,
+            udata: udata as *mut libc::c_void,
+        };
+        unsafe {
+            libc::kevent(self.queue, &kev, 1, ptr::null_mut(), 0, ptr::null());
         }
     }
 }

@@ -12,7 +12,7 @@ use super::QueueConfig;
 /// space to accommodate this header.
 const FRAME_HEADER_LEN: usize = 4;
 pub const MAX_BUFFER_SIZE: usize = 65562 + FRAME_HEADER_LEN;
-const QUEUE_SIZE: u16 = 1024;
+const QUEUE_SIZE: u16 = 4096;
 pub const NUM_QUEUES: usize = 2;
 pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
 
