@@ -2,7 +2,7 @@
 //!
 //! Each test:
 //! 1. Host: Start iperf3 server + network backend
-//! 2. Guest: Configure eth0, run iperf3 client
+//! 2. Guest: Run iperf3 client (eth0 configured via DHCP by init)
 //! 3. Host: Parse iperf3 JSON output, produce markdown report
 //!
 //! Tests are parametrized by backend and direction (TX = guest→host, RX = host→guest).
@@ -20,11 +20,7 @@ RUN dnf install -y iperf3 && dnf clean all
 /// Virtio-net performance test with configurable backend and direction
 pub struct TestNetPerf {
     #[cfg(feature = "guest")]
-    guest_ip: [u8; 4],
-    #[cfg(feature = "guest")]
     host_ip: [u8; 4],
-    #[cfg(feature = "guest")]
-    netmask: [u8; 4],
     port: u16,
     /// If true, run iperf3 with -R (reverse: server sends, client receives = RX)
     reverse: bool,
@@ -40,11 +36,7 @@ impl TestNetPerf {
     pub fn new_passt_tx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [169, 254, 2, 1],
-            #[cfg(feature = "guest")]
             host_ip: [169, 254, 2, 2],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 0, 0],
             port: 15100,
             reverse: false,
             #[cfg(feature = "host")]
@@ -59,11 +51,7 @@ impl TestNetPerf {
     pub fn new_passt_rx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [169, 254, 2, 1],
-            #[cfg(feature = "guest")]
             host_ip: [169, 254, 2, 2],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 0, 0],
             port: 15110,
             reverse: true,
             #[cfg(feature = "host")]
@@ -78,11 +66,7 @@ impl TestNetPerf {
     pub fn new_tap_tx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [10, 0, 0, 2],
-            #[cfg(feature = "guest")]
             host_ip: [10, 0, 0, 1],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             port: 15101,
             reverse: false,
             #[cfg(feature = "host")]
@@ -97,11 +81,7 @@ impl TestNetPerf {
     pub fn new_tap_rx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [10, 0, 0, 2],
-            #[cfg(feature = "guest")]
             host_ip: [10, 0, 0, 1],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             port: 15111,
             reverse: true,
             #[cfg(feature = "host")]
@@ -116,11 +96,7 @@ impl TestNetPerf {
     pub fn new_gvproxy_tx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [192, 168, 127, 2],
-            #[cfg(feature = "guest")]
             host_ip: [192, 168, 127, 254],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             port: 15102,
             reverse: false,
             #[cfg(feature = "host")]
@@ -135,11 +111,7 @@ impl TestNetPerf {
     pub fn new_gvproxy_rx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [192, 168, 127, 2],
-            #[cfg(feature = "guest")]
             host_ip: [192, 168, 127, 254],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             port: 15112,
             reverse: true,
             #[cfg(feature = "host")]
@@ -154,11 +126,7 @@ impl TestNetPerf {
     pub fn new_vmnet_helper_tx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [192, 168, 105, 2],
-            #[cfg(feature = "guest")]
             host_ip: [192, 168, 105, 1],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             port: 15103,
             reverse: false,
             #[cfg(feature = "host")]
@@ -173,11 +141,7 @@ impl TestNetPerf {
     pub fn new_vmnet_helper_rx() -> Self {
         Self {
             #[cfg(feature = "guest")]
-            guest_ip: [192, 168, 105, 2],
-            #[cfg(feature = "guest")]
             host_ip: [192, 168, 105, 1],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             port: 15113,
             reverse: true,
             #[cfg(feature = "host")]
@@ -406,25 +370,16 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
-    use crate::net_config::configure_interface;
     use crate::Test;
     use std::process::Command;
     use std::time::Duration;
 
     impl Test for TestNetPerf {
         fn in_guest(self: Box<Self>) {
-            // Configure eth0 with static IP
-            configure_interface("eth0", self.guest_ip, self.netmask)
-                .expect("Failed to configure eth0");
-
             let host_ip = format!(
                 "{}.{}.{}.{}",
                 self.host_ip[0], self.host_ip[1], self.host_ip[2], self.host_ip[3]
             );
-
-            // Give the network a moment to come up
-            // FIXME: this is dumb!
-            std::thread::sleep(Duration::from_secs(2));
 
             let Some(iperf_duration) = option_env!("IPERF_DURATION") else {
                 unreachable!()

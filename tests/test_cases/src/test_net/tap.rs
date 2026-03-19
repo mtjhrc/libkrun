@@ -6,7 +6,9 @@ use nix::libc;
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
 use std::ffi::CString;
 use std::fs::OpenOptions;
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::os::fd::AsRawFd;
+use std::process::{Command, Stdio};
 
 const DEFAULT_TAP_NAME: &str = "tap0";
 const HOST_IP: [u8; 4] = [10, 0, 0, 1];
@@ -117,6 +119,14 @@ fn configure_host_interface(name: &str, ip: [u8; 4], netmask: [u8; 4]) -> nix::R
     Ok(())
 }
 
+fn dnsmasq_available() -> bool {
+    Command::new("which")
+        .arg("dnsmasq")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 pub(crate) fn should_run() -> ShouldRun {
     if cfg!(target_os = "macos") {
         return ShouldRun::No("TAP not supported on macOS");
@@ -127,6 +137,9 @@ pub(crate) fn should_run() -> ShouldRun {
         }
     } else if !std::path::Path::new("/dev/net/tun").exists() {
         return ShouldRun::No("/dev/net/tun not available");
+    }
+    if !dnsmasq_available() {
+        return ShouldRun::No("dnsmasq not installed");
     }
     ShouldRun::Yes
 }
@@ -146,13 +159,52 @@ pub(crate) fn cleanup() {
     }
 }
 
-pub(crate) fn setup_backend(ctx: u32, _test_setup: &TestSetup) -> anyhow::Result<()> {
+fn disable_rp_filter(tap_name: &str) {
+    let path = format!("/proc/sys/net/ipv4/conf/{tap_name}/rp_filter");
+    let _ = std::fs::write(&path, "0");
+    let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/rp_filter", "0");
+}
+
+fn start_dhcp_server(tap_name: &str, test_setup: &TestSetup) -> anyhow::Result<()> {
+    let lease_file = test_setup.tmp_dir.join("dnsmasq.leases");
+    let child = Command::new("dnsmasq")
+        .arg("--no-daemon")
+        .arg(format!("--interface={tap_name}"))
+        .arg("--dhcp-range=10.0.0.2,10.0.0.10,255.255.255.0")
+        .arg("--dhcp-option=3,10.0.0.1") // gateway
+        .arg("--dhcp-rapid-commit") // init's DHCP client uses Rapid Commit
+        .arg("--no-ping") // skip ARP probe delay before assigning
+        .arg(format!("--dhcp-leasefile={}", lease_file.display()))
+        .arg("--bind-dynamic")
+        .arg("--except-interface=lo")
+        .arg("--port=0") // disable DNS, we only need DHCP
+        .arg("--no-resolv")
+        .arg("--no-hosts")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to start dnsmasq: {e}"))?;
+    test_setup.register_cleanup_pid(child.id());
+
+    // Wait for dnsmasq to bind port 67 before proceeding
+    for _ in 0..50 {
+        if UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 67)).is_err() {
+            return Ok(()); // port 67 is taken — dnsmasq is ready
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    anyhow::bail!("dnsmasq did not start in time");
+}
+
+pub(crate) fn setup_backend(ctx: u32, test_setup: &TestSetup) -> anyhow::Result<()> {
     let tap_name = if let Ok(name) = std::env::var("LIBKRUN_TAP_NAME") {
         name
     } else {
         create_tap(DEFAULT_TAP_NAME)?;
         configure_host_interface(DEFAULT_TAP_NAME, HOST_IP, NETMASK)
             .map_err(|e| anyhow::anyhow!("Failed to configure TAP: {}", e))?;
+        disable_rp_filter(DEFAULT_TAP_NAME);
+        start_dhcp_server(DEFAULT_TAP_NAME, test_setup)?;
         DEFAULT_TAP_NAME.to_string()
     };
 

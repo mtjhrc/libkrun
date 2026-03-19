@@ -163,9 +163,6 @@ mod krun;
 #[cfg(feature = "host")]
 pub mod rootfs;
 
-#[cfg(feature = "guest")]
-mod net_config;
-
 mod tcp_tester;
 
 #[host]

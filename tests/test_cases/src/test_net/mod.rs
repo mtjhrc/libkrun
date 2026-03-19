@@ -2,8 +2,7 @@
 //!
 //! All tests follow the same pattern:
 //! 1. Host: Start backend + TCP server
-//! 2. Guest: Configure eth0 with static IP
-//! 3. Guest: Connect to host TCP server
+//! 2. Guest: Connect to host TCP server (eth0 configured via DHCP by init)
 
 use crate::tcp_tester::TcpTester;
 use macros::{guest, host};
@@ -22,10 +21,6 @@ pub(crate) mod vmnet_helper;
 
 /// Virtio-net test with configurable backend
 pub struct TestNet {
-    #[cfg(feature = "guest")]
-    guest_ip: [u8; 4],
-    #[cfg(feature = "guest")]
-    netmask: [u8; 4],
     tcp_tester: TcpTester,
     #[cfg(feature = "host")]
     should_run: fn() -> ShouldRun,
@@ -38,10 +33,6 @@ pub struct TestNet {
 impl TestNet {
     pub fn new_passt() -> Self {
         Self {
-            #[cfg(feature = "guest")]
-            guest_ip: [169, 254, 2, 1],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 0, 0],
             tcp_tester: TcpTester::new([169, 254, 2, 2].into(), 9000),
             #[cfg(feature = "host")]
             should_run: passt::should_run,
@@ -54,10 +45,6 @@ impl TestNet {
 
     pub fn new_tap() -> Self {
         Self {
-            #[cfg(feature = "guest")]
-            guest_ip: [10, 0, 0, 2],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             tcp_tester: TcpTester::new([10, 0, 0, 1].into(), 9001),
             #[cfg(feature = "host")]
             should_run: tap::should_run,
@@ -70,10 +57,6 @@ impl TestNet {
 
     pub fn new_gvproxy() -> Self {
         Self {
-            #[cfg(feature = "guest")]
-            guest_ip: [192, 168, 127, 2],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             tcp_tester: TcpTester::new([192, 168, 127, 254].into(), 9002),
             #[cfg(feature = "host")]
             should_run: gvproxy::should_run,
@@ -86,10 +69,6 @@ impl TestNet {
 
     pub fn new_vmnet_helper() -> Self {
         Self {
-            #[cfg(feature = "guest")]
-            guest_ip: [192, 168, 105, 2],
-            #[cfg(feature = "guest")]
-            netmask: [255, 255, 255, 0],
             tcp_tester: TcpTester::new([192, 168, 105, 1].into(), 9003),
             #[cfg(feature = "host")]
             should_run: vmnet_helper::should_run,
@@ -154,14 +133,10 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
-    use crate::net_config::configure_interface;
     use crate::Test;
 
     impl Test for TestNet {
         fn in_guest(self: Box<Self>) {
-            configure_interface("eth0", self.guest_ip, self.netmask)
-                .expect("Failed to configure eth0");
-            
             self.tcp_tester.run_client();
 
             println!("OK");
