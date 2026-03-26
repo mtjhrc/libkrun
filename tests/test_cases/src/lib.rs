@@ -106,8 +106,6 @@ impl<T: ReportImpl + ?Sized> std::fmt::Display for ReportGhMarkdown<'_, T> {
 use macros::{guest, host};
 #[host]
 use std::path::PathBuf;
-#[host]
-use std::process::Child;
 
 #[cfg(all(feature = "guest", feature = "host"))]
 compile_error!("Cannot enable both guest and host in the same binary!");
@@ -155,9 +153,8 @@ pub trait Test {
     fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()>;
 
     /// Checks the output of the (host) process which started the VM
-    fn check(self: Box<Self>, child: Child) -> TestOutcome {
-        let output = child.wait_with_output().unwrap();
-        if String::from_utf8(output.stdout).unwrap() == "OK\n" {
+    fn check(self: Box<Self>, stdout: Vec<u8>) -> TestOutcome {
+        if String::from_utf8(stdout).unwrap() == "OK\n" {
             TestOutcome::Pass
         } else {
             TestOutcome::Fail
