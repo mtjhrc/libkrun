@@ -519,6 +519,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffier"
+version = "0.1.0"
+dependencies = [
+ "ffier-macros",
+ "paste",
+]
+
+[[package]]
+name = "ffier-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -886,11 +903,14 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 name = "libkrun"
 version = "1.17.3"
 dependencies = [
+ "arch",
  "aws-nitro",
  "crossbeam-channel",
  "devices",
  "env_logger",
+ "ffier",
  "hvf",
+ "kernel",
  "krun_display",
  "krun_input",
  "kvm-bindings",
@@ -905,6 +925,14 @@ dependencies = [
  "utils",
  "vm-memory",
  "vmm",
+]
+
+[[package]]
+name = "libkrun-cdylib"
+version = "2.0.0"
+dependencies = [
+ "ffier",
+ "libkrun",
 ]
 
 [[package]]
@@ -1141,6 +1169,12 @@ dependencies = [
  "libc",
  "winapi",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pin-project-lite"

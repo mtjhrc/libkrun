@@ -17,6 +17,7 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/statfs.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -908,8 +909,50 @@ int reopen_fd(int fd, char *path, int flags)
     return 0;
 }
 
+// Open a virtio port by its identifier (e.g. "vport2p1").
+// Console-marked ports return ENXIO on /dev/vportNpM — for those,
+// construct the hvc device directly from major 229 + port number.
+#define HVC_MAJOR 229
+
+int open_virtio_port(const char *port_identifier, int flags)
+{
+    char path[256];
+
+    // Try the vport device first (works for non-console ports)
+    snprintf(path, sizeof(path), "/dev/%s", port_identifier);
+    int fd = open(path, flags);
+    if (fd >= 0)
+        return fd;
+
+    if (errno != ENXIO)
+        return -1;
+
+    // Console port — extract port number from "vportNpM" and open /dev/hvcM.
+    // If /dev/hvcM doesn't exist, create it from major:minor.
+    const char *p = strrchr(port_identifier, 'p');
+    if (p == NULL)
+        return -1;
+    int port_num = atoi(p + 1);
+
+    snprintf(path, sizeof(path), "/dev/hvc%d", port_num);
+    fd = open(path, flags);
+    if (fd >= 0)
+        return fd;
+
+    // devtmpfs might not have it yet — create it ourselves
+    dev_t dev = makedev(HVC_MAJOR, port_num);
+    mknod(path, S_IFCHR | 0600, dev);
+    return open(path, flags);
+}
+
 int setup_redirects()
 {
+    // Dump hvc and vport device nodes
+    printf("init.krun: /dev/hvc* and /dev/vport*:\n");
+    system("ls -la /dev/hvc* /dev/vport* 2>&1");
+    printf("init.krun: /dev/console:\n");
+    system("ls -la /dev/console 2>&1");
+
     DIR *ports_dir = opendir("/sys/class/virtio-ports");
     if (ports_dir == NULL) {
         printf("Unable to open ports directory!\n");
@@ -940,18 +983,38 @@ int setup_redirects()
         char *port_name = fgets(name_buf, sizeof(name_buf), port_name_file);
         fclose(port_name_file);
 
-        if (port_name != NULL && strcmp(port_name, "krun-stdin\n") == 0) {
-            // if previous snprintf didn't fail, this one cannot fail either
-            snprintf(path, sizeof(path), "/dev/%s", port_identifier);
-            reopen_fd(STDIN_FILENO, path, O_RDONLY);
-        } else if (port_name != NULL &&
-                   strcmp(port_name, "krun-stdout\n") == 0) {
-            snprintf(path, sizeof(path), "/dev/%s", port_identifier);
-            reopen_fd(STDOUT_FILENO, path, O_WRONLY);
-        } else if (port_name != NULL &&
-                   strcmp(port_name, "krun-stderr\n") == 0) {
-            snprintf(path, sizeof(path), "/dev/%s", port_identifier);
-            reopen_fd(STDERR_FILENO, path, O_WRONLY);
+        // Log every port we find
+        if (port_name != NULL) {
+            printf("init.krun: port %s name=%s", port_identifier, port_name);
+        } else {
+            printf("init.krun: port %s (no name)\n", port_identifier);
+        }
+
+        // Check if the device node exists
+        snprintf(path, sizeof(path), "/dev/%s", port_identifier);
+        if (access(path, F_OK) == 0) {
+            printf("init.krun:   -> %s exists\n", path);
+        } else {
+            printf("init.krun:   -> %s MISSING\n", path);
+        }
+
+        if (port_name != NULL && strcmp(port_name, "krun-payload-tty\n") == 0) {
+            int port_fd = open_virtio_port(port_identifier, O_RDWR);
+            if (port_fd >= 0) {
+                dup2(port_fd, STDIN_FILENO);
+                dup2(port_fd, STDOUT_FILENO);
+                dup2(port_fd, STDERR_FILENO);
+                close(port_fd);
+            }
+        } else if (port_name != NULL && strcmp(port_name, "krun-payload-stdin\n") == 0) {
+            int port_fd = open_virtio_port(port_identifier, O_RDONLY);
+            if (port_fd >= 0) { dup2(port_fd, STDIN_FILENO); close(port_fd); }
+        } else if (port_name != NULL && strcmp(port_name, "krun-payload-stdout\n") == 0) {
+            int port_fd = open_virtio_port(port_identifier, O_WRONLY);
+            if (port_fd >= 0) { dup2(port_fd, STDOUT_FILENO); close(port_fd); }
+        } else if (port_name != NULL && strcmp(port_name, "krun-payload-stderr\n") == 0) {
+            int port_fd = open_virtio_port(port_identifier, O_WRONLY);
+            if (port_fd >= 0) { dup2(port_fd, STDERR_FILENO); close(port_fd); }
         }
     }
 
