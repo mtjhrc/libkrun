@@ -1,31 +1,109 @@
 use nix::sys::socket::{
-    connect, getsockopt, recv, send, setsockopt, socket, sockopt, AddressFamily, MsgFlags,
-    SockFlag, SockType, UnixAddr,
+    connect, getsockopt, setsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
 };
-use std::{
-    os::fd::{AsRawFd, OwnedFd, RawFd},
-    path::PathBuf,
-};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
+use std::time::Instant;
+use vm_memory::GuestMemoryMmap;
 
+use crate::virtio::batch_queue::aliased_ioslice::{AliasedIoSlice, AliasedIoSliceMut, AnyIoSlice};
+use crate::virtio::batch_queue::{RxQueueProducer, TxQueueConsumer};
 use crate::virtio::net::backend::ConnectError;
+use crate::virtio::queue::Queue;
+use crate::virtio::InterruptTransport;
 
 use super::backend::{NetBackend, ReadError, WriteError};
-use super::{write_virtio_net_hdr, FRAME_HEADER_LEN};
+use super::FRAME_HEADER_LEN;
+
+/// Try to read/complete the frame length header using non-blocking recv.
+/// Returns Some(frame_len) when complete, None if incomplete or EAGAIN.
+fn try_read_frame_header(
+    raw_fd: RawFd,
+    header_buf: &mut [u8; FRAME_HEADER_LEN],
+    header_pos: &mut usize,
+    expecting: &mut Option<u32>,
+) -> Option<usize> {
+    if let Some(len) = *expecting {
+        return Some(len as usize);
+    }
+
+    let remaining = &mut header_buf[*header_pos..];
+    let ret = unsafe {
+        libc::recv(
+            raw_fd,
+            remaining.as_mut_ptr() as *mut libc::c_void,
+            remaining.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    match ret {
+        n if n > 0 => {
+            *header_pos += n as usize;
+            if *header_pos == FRAME_HEADER_LEN {
+                let len = u32::from_be_bytes(*header_buf);
+                *expecting = Some(len);
+                *header_pos = 0;
+                Some(len as usize)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Read body using recvmsg with MSG_WAITALL into scatter-gather iovecs.
+///
+/// # Safety
+/// The iovec pointer must be valid and the iovecs must describe writable memory.
+unsafe fn recvmsg_waitall(raw_fd: RawFd, iov_ptr: *mut libc::iovec, iov_len: usize) -> isize {
+    let mut hdr: libc::msghdr = std::mem::zeroed();
+    hdr.msg_iov = iov_ptr;
+    hdr.msg_iovlen = iov_len as _;
+
+    libc::recvmsg(raw_fd, &mut hdr, libc::MSG_DONTWAIT)
+}
 
 pub struct Unixstream {
     fd: OwnedFd,
-    // 0 when a frame length has not been read
-    expecting_frame_length: u32,
-    // 0 if last write is fully complete, otherwise the length that was written
-    last_partial_write_length: usize,
-    include_vnet_header: bool,
+    backend_handles_vnet_hdr: bool,
+    interrupt: InterruptTransport,
+    tx_consumer: TxQueueConsumer,
+    rx_producer: RxQueueProducer,
+    /// Shared frame-length header buffer for TX. Written before each writev
+    /// when the chain hasn't been partially sent yet.
+    tx_frame_header: Box<[u8; FRAME_HEADER_LEN]>,
+    /// For RX: partial frame length header buffer
+    rx_header_buf: [u8; FRAME_HEADER_LEN],
+    /// For RX: bytes read into rx_header_buf so far
+    rx_header_pos: usize,
+    /// For RX: expected frame length (None when header not yet complete)
+    expecting_frame_length: Option<u32>,
+    // Timing/stats counters
+    rx_calls: u64,
+    rx_total_frames: u64,
+    rx_total_time_us: u64,
+    rx_productive_calls: u64,
 }
 
 impl Unixstream {
     /// Create the backend with a pre-established connection to the userspace network proxy.
-    pub fn new(fd: OwnedFd, include_vnet_header: bool) -> Self {
+    pub fn new(
+        fd: OwnedFd,
+        backend_handles_vnet_hdr: bool,
+        tx_queue: Queue,
+        rx_queue: Queue,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+    ) -> Self {
+        // Blocking socket — MSG_WAITALL for body reads ensures we get full
+        // frames without short reads. Header reads use MSG_DONTWAIT.
+
         if let Err(e) = setsockopt(&fd, sockopt::SndBuf, &(16 * 1024 * 1024)) {
             log::warn!("Failed to increase SO_SNDBUF (performance may be decreased): {e}");
+        }
+        if let Err(e) = setsockopt(&fd, sockopt::RcvBuf, &(16 * 1024 * 1024)) {
+            log::warn!("Failed to increase SO_RCVBUF (performance may be decreased): {e}");
         }
 
         log::debug!(
@@ -34,23 +112,44 @@ impl Unixstream {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
+        let iovec_capacity = tx_queue.size as usize * 2;
+        let tx_consumer = TxQueueConsumer::new(tx_queue, mem.clone(), iovec_capacity);
+        let rx_producer = RxQueueProducer::new(rx_queue, mem, iovec_capacity);
+
         Self {
             fd,
-            expecting_frame_length: 0,
-            last_partial_write_length: 0,
-            include_vnet_header,
+            backend_handles_vnet_hdr,
+            interrupt,
+            tx_consumer,
+            rx_producer,
+            tx_frame_header: Box::new([0u8; FRAME_HEADER_LEN]),
+            rx_header_buf: [0u8; FRAME_HEADER_LEN],
+            rx_header_pos: 0,
+            expecting_frame_length: None,
+            rx_calls: 0,
+            rx_total_frames: 0,
+            rx_total_time_us: 0,
+            rx_productive_calls: 0,
         }
     }
 
     /// Create the backend opening a connection to the userspace network proxy.
-    pub fn open(path: PathBuf, include_vnet_header: bool) -> Result<Self, ConnectError> {
-        let fd = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::empty(),
-            None,
-        )
-        .map_err(ConnectError::CreateSocket)?;
+    pub fn open(
+        path: PathBuf,
+        include_vnet_header: bool,
+        tx_queue: Queue,
+        rx_queue: Queue,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+    ) -> Result<Self, ConnectError> {
+        #[cfg(target_os = "linux")]
+        let flags = SockFlag::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let flags = SockFlag::empty();
+
+        let fd = socket(AddressFamily::Unix, SockType::Stream, flags, None)
+            .map_err(ConnectError::CreateSocket)?;
+
         let peer_addr = UnixAddr::new(&path).map_err(ConnectError::InvalidAddress)?;
         connect(fd.as_raw_fd(), &peer_addr).map_err(ConnectError::Binding)?;
 
@@ -64,164 +163,224 @@ impl Unixstream {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        Ok(Self {
+        Ok(Self::new(
             fd,
-            expecting_frame_length: 0,
-            last_partial_write_length: 0,
             include_vnet_header,
-        })
-    }
-
-    /// Try to read until filling the whole slice.
-    fn read_loop(&self, buf: &mut [u8], block_until_has_data: bool) -> Result<(), ReadError> {
-        let mut bytes_read = 0;
-        #[cfg(target_os = "linux")]
-        let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::MSG_DONTWAIT;
-
-        if !block_until_has_data {
-            match recv(self.fd.as_raw_fd(), buf, flags) {
-                Ok(size) => bytes_read += size,
-                #[allow(unreachable_patterns)]
-                Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
-                    return Err(ReadError::NothingRead)
-                }
-                Err(e) => return Err(ReadError::Internal(e)),
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        let flags = MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL;
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::MSG_WAITALL;
-
-        while bytes_read < buf.len() {
-            match recv(self.fd.as_raw_fd(), &mut buf[bytes_read..], flags) {
-                #[allow(unreachable_patterns)]
-                Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
-                    log::warn!("read_loop: unexpected EAGAIN/EWOULDBLOCK on blocking socket");
-                    continue;
-                }
-                Err(e) => return Err(ReadError::Internal(e)),
-                Ok(size) => {
-                    bytes_read += size;
-                    //log::trace!("proxy recv {}/{}", bytes_read, buf.len());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn write_loop(&mut self, buf: &[u8]) -> Result<(), WriteError> {
-        let mut bytes_send = 0;
-
-        #[cfg(target_os = "linux")]
-        let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::MSG_DONTWAIT;
-
-        while bytes_send < buf.len() {
-            match send(self.fd.as_raw_fd(), &buf[bytes_send..], flags) {
-                Ok(size) => bytes_send += size,
-                #[allow(unreachable_patterns)]
-                Err(nix::Error::EAGAIN | nix::Error::EWOULDBLOCK) => {
-                    if bytes_send == 0 {
-                        return Err(WriteError::NothingWritten);
-                    } else {
-                        log::trace!(
-                            "Wrote {bytes_send} bytes, but socket blocked, will need try_finish_write() to finish"
-                        );
-
-                        self.last_partial_write_length += bytes_send;
-                        return Err(WriteError::PartialWrite);
-                    }
-                }
-                Err(nix::Error::EPIPE) => return Err(WriteError::ProcessNotRunning),
-                Err(e) => return Err(WriteError::Internal(e)),
-            }
-        }
-        self.last_partial_write_length = 0;
-        Ok(())
+            tx_queue,
+            rx_queue,
+            mem,
+            interrupt,
+        ))
     }
 }
 
 impl NetBackend for Unixstream {
-    /// Try to read a frame from the proxy. If no bytes are available reports ReadError::NothingRead
-    fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
-        if self.expecting_frame_length == 0 {
-            self.expecting_frame_length = {
-                let mut frame_length_buf = [0u8; FRAME_HEADER_LEN];
-                self.read_loop(&mut frame_length_buf, false)?;
-                u32::from_be_bytes(frame_length_buf)
-            };
-        }
-
-        let buf_offset = if !self.include_vnet_header {
-            write_virtio_net_hdr(buf)
-        } else {
-            0
-        };
-        let buf = &mut buf[buf_offset..];
-        let frame_length = self.expecting_frame_length as usize;
-        self.read_loop(&mut buf[..frame_length], false)?;
-        self.expecting_frame_length = 0;
-        log::trace!("Read eth frame from network proxy: {frame_length} bytes");
-        Ok(buf_offset + frame_length)
-    }
-
-    /// Try to write a frame to the proxy.
-    /// (Will mutate and override parts of buf, with a frame header!)
-    ///
-    /// * `hdr_len` - specifies the size of any existing headers encapsulating the ethernet frame,
-    ///   (such as vnet header), that can be overwritten. Must be >= FRAME_HEADER_LEN.
-    /// * `buf` - the buffer to write to the proxy, `buf[..hdr_len]` may be overwritten
-    ///
-    /// If this function returns WriteError::PartialWrite, you have to finish the write using
-    /// try_finish_write.
-    fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
-        if self.last_partial_write_length != 0 {
-            panic!("Cannot write a frame to the proxy, while a partial write is not resolved.");
-        }
-        assert!(
-            hdr_len >= FRAME_HEADER_LEN,
-            "Not enough space to write the frame header"
-        );
-        assert!(buf.len() > hdr_len);
-        let frame_length = buf.len() - hdr_len;
-
-        // If the vnet header is not included, overwrite it with the frame length, otherwise
-        // write the frame length before the vnet header.
-        let buf_offset = if !self.include_vnet_header {
-            hdr_len - FRAME_HEADER_LEN
+    fn send(&mut self) -> Result<(), WriteError> {
+        log::trace!("Unixstream::send() called");
+        let skip = if !self.backend_handles_vnet_hdr {
+            super::vnet_hdr_len()
         } else {
             0
         };
 
-        buf[buf_offset..buf_offset + FRAME_HEADER_LEN]
-            .copy_from_slice(&(frame_length as u32).to_be_bytes());
+        let mut total_finished = 0;
 
-        self.write_loop(&buf[buf_offset..buf_offset + frame_length])?;
+        self.tx_consumer.disable_notification();
+
+        loop {
+            // Prepend a header iovec pointing to our shared tx_frame_header buffer.
+            // The actual length value is written before each writev in consume().
+            let header_ptr = self.tx_frame_header.as_ptr();
+            self.tx_consumer.feed_with_transform(|iovecs, out| {
+                if !out.reserve(iovecs.len() + 1) {
+                    return None;
+                }
+                out.push(unsafe { AliasedIoSlice::from_raw(header_ptr, FRAME_HEADER_LEN) });
+                out.extend(AliasedIoSlice::skip_bytes(iovecs, skip));
+                Some(())
+            });
+
+            if !self.tx_consumer.has_pending() {
+                if self.tx_consumer.enable_notification() {
+                    self.tx_consumer.disable_notification();
+                    continue;
+                }
+                break;
+            }
+
+            let raw_fd = self.fd.as_raw_fd();
+            let header_ptr = self.tx_frame_header.as_mut_ptr() as *mut u32;
+
+            // Chains have header iovec prepended; fill in the length before each writev.
+            let finished = self.tx_consumer.consume(|batch| {
+                for i in 0..batch.len() {
+                    let chain = batch.io_slices(i);
+                    if chain.is_empty() {
+                        continue;
+                    }
+
+                    // On first attempt (nothing sent yet), write the payload length
+                    // into the shared header buffer via raw pointer (the iovecs
+                    // alias this memory, so we must not create a &mut reference).
+                    if batch.bytes_used(i) == 0 {
+                        let payload_len: usize =
+                            AliasedIoSlice::total_len(chain[1..].iter().copied());
+                        unsafe {
+                            std::ptr::write_volatile(header_ptr, (payload_len as u32).to_be())
+                        };
+                    }
+
+                    let ret = unsafe {
+                        libc::writev(
+                            raw_fd,
+                            AliasedIoSlice::as_iovec_ptr(chain),
+                            chain.len() as libc::c_int,
+                        )
+                    };
+                    match ret {
+                        n if n >= 0 => batch.finish(i),
+                        _ => {
+                            let err = nix::errno::Errno::last();
+                            if err == nix::errno::Errno::EAGAIN {
+                                break;
+                            }
+                            log::error!("writev to unixstream failed: {err:?}");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            total_finished += finished;
+            if finished == 0 {
+                break;
+            }
+        }
+
+        if total_finished > 0 && self.tx_consumer.needs_notification() {
+            self.interrupt.signal_used_queue();
+        }
+
         Ok(())
     }
 
-    fn has_unfinished_write(&self) -> bool {
-        self.last_partial_write_length != 0
-    }
+    fn recv(&mut self) -> Result<(), ReadError> {
+        let raw_fd = self.fd.as_raw_fd();
+        let vnet_offset = if !self.backend_handles_vnet_hdr {
+            super::vnet_hdr_len()
+        } else {
+            0
+        };
 
-    /// Try to finish a partial write
-    ///
-    /// If no partial write is required will do nothing and return Ok(())
-    ///
-    /// * `hdr_len` - must be the same value as passed to write_frame, that caused the partial write
-    /// * `buf` - must be same buffer that was given to write_frame, that caused the partial write
-    fn try_finish_write(&mut self, hdr_len: usize, buf: &[u8]) -> Result<(), WriteError> {
-        if self.last_partial_write_length != 0 {
-            let already_written = self.last_partial_write_length;
-            log::trace!("Requested to finish partial write");
-            self.write_loop(&buf[hdr_len - FRAME_HEADER_LEN + already_written..])?;
-            log::debug!("Finished partial write ({already_written}bytes written before)")
+        self.rx_calls += 1;
+        let frames_before = self.rx_total_frames;
+        let call_start = Instant::now();
+
+        let header_buf = &mut self.rx_header_buf;
+        let header_pos = &mut self.rx_header_pos;
+        let expecting = &mut self.expecting_frame_length;
+
+        let total_finished = self.rx_producer.produce(|batch| {
+            batch.disable_notification();
+            let mut next = 0;
+
+            loop {
+                batch.feed();
+
+                if batch.len() == next {
+                    if batch.enable_notification() {
+                        batch.disable_notification();
+                        continue;
+                    }
+                    break;
+                }
+
+                for i in next..batch.len() {
+                    next = i + 1;
+
+                    // Read frame header (non-blocking)
+                    let frame_len =
+                        match try_read_frame_header(raw_fd, header_buf, header_pos, expecting) {
+                            Some(len) => len,
+                            None => return,
+                        };
+
+                    // Write vnet header at start of new frame
+                    if batch.bytes_used(i) == 0 && vnet_offset > 0 {
+                        let _ = batch.write_advance(i, &super::DEFAULT_VNET_HDR);
+                    }
+
+                    let iovecs = batch.io_slices_mut(i);
+                    let ret = if !iovecs.is_empty() && iovecs[0].len() >= frame_len {
+                        // Fast path: frame fits in first iovec — use recv directly
+                        let iov = iovecs[0].into_iovec();
+                        unsafe { libc::recv(raw_fd, iov.iov_base, frame_len, libc::MSG_DONTWAIT) }
+                    } else {
+                        // Slow path: frame spans multiple iovecs
+                        let iovecs = AliasedIoSliceMut::truncate_slices(iovecs, frame_len);
+                        unsafe {
+                            recvmsg_waitall(
+                                raw_fd,
+                                AliasedIoSliceMut::as_iovec_ptr(iovecs) as *mut libc::iovec,
+                                iovecs.len(),
+                            )
+                        }
+                    };
+                    match ret {
+                        n if n > 0 && n as usize >= frame_len => {
+                            batch.complete(i, n as usize);
+                            *expecting = None;
+                        }
+                        n if n > 0 => {
+                            // Short read — advance iovecs, track remaining
+                            batch.advance(i, n as usize);
+                            *expecting = Some((frame_len - n as usize) as u32);
+                            return;
+                        }
+                        0 => return, // EOF
+                        _ => {
+                            let err = nix::errno::Errno::last();
+                            if err == nix::errno::Errno::EAGAIN {
+                                return;
+                            }
+                            log::error!("recv from unixstream failed: {err:?}");
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        let frames_this_call = self.rx_total_frames + total_finished as u64 - frames_before;
+        self.rx_total_frames += total_finished as u64;
+        if frames_this_call > 0 {
+            self.rx_total_time_us += call_start.elapsed().as_micros() as u64;
+            self.rx_productive_calls += 1;
+        }
+        if self.rx_calls % 10000 == 0 {
+            let avg_call_us = if self.rx_productive_calls > 0 {
+                self.rx_total_time_us / self.rx_productive_calls
+            } else {
+                0
+            };
+            let avg_us_per_frame = if self.rx_total_frames > 0 {
+                self.rx_total_time_us as f64 / self.rx_total_frames as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "RX stats: calls={} productive={} frames={} avg_call={}µs avg_frame={:.2}µs/f empty_calls={}",
+                self.rx_calls,
+                self.rx_productive_calls,
+                self.rx_total_frames,
+                avg_call_us,
+                avg_us_per_frame,
+                self.rx_calls - self.rx_productive_calls,
+            );
+        }
+
+        if total_finished > 0 && self.rx_producer.needs_notification() {
+            self.interrupt.signal_used_queue();
         }
 
         Ok(())
@@ -229,5 +388,12 @@ impl NetBackend for Unixstream {
 
     fn raw_socket_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+
+    fn queue_avail(&self) -> (u16, u16) {
+        (
+            self.tx_consumer.queue_avail(),
+            self.rx_producer.queue_avail(),
+        )
     }
 }
