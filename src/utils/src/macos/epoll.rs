@@ -12,28 +12,6 @@ use std::time::Duration;
 use bitflags::bitflags;
 use log::debug;
 
-fn event_name(filter: i16, flags: u16) -> &'static str {
-    let eof = flags & libc::EV_EOF != 0;
-    match filter {
-        libc::EVFILT_READ => {
-            if eof {
-                "READ+EOF"
-            } else {
-                "READ"
-            }
-        }
-        libc::EVFILT_WRITE => {
-            if eof {
-                "WRITE+EOF"
-            } else {
-                "WRITE"
-            }
-        }
-        libc::EVFILT_TIMER => "TIMER",
-        _ => "UNKNOWN",
-    }
-}
-
 #[repr(i32)]
 pub enum ControlOperation {
     Add,
@@ -54,6 +32,9 @@ bitflags! {
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Kevent(libc::kevent);
+
+// Safety: udata is used as an integer tag (cast from u64), never dereferenced.
+unsafe impl Send for Kevent {}
 
 impl std::fmt::Debug for Kevent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,6 +125,7 @@ impl EpollEvent {
 #[derive(Clone, Debug)]
 pub struct Epoll {
     queue: RawFd,
+    kevs: Box<[Kevent; 32]>,
 }
 
 impl Epoll {
@@ -152,15 +134,13 @@ impl Epoll {
         if queue == -1 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(Epoll { queue })
+            Ok(Epoll {
+                queue,
+                kevs: Box::new([Kevent::default(); 32]),
+            })
         }
     }
 
-    /// Register, modify, or remove interest in events for a file descriptor.
-    ///
-    /// Note: `READ_HANG_UP` (`EPOLLRDHUP`) is ignored. kqueue always
-    /// reports `EV_EOF` without opt-in, so `wait()` reports
-    /// `READ_HANG_UP` on read EOF regardless of registration.
     pub fn ctl(
         &self,
         operation: ControlOperation,
@@ -259,23 +239,30 @@ impl Epoll {
     }
 
     pub fn wait(
-        &self,
+        &mut self,
         max_events: usize,
         timeout: i32,
         events: &mut [EpollEvent],
     ) -> io::Result<usize> {
-        let _tout = if timeout >= 0 {
-            Some(Duration::from_millis(timeout as u64))
-        } else {
+        let timespec_opt: Option<libc::timespec> = if timeout == -1 {
+            // A null timeout means wait indefinitely.
             None
+        } else {
+            // Convert milliseconds to seconds and nanoseconds.
+            let duration = Duration::from_millis(timeout as u64);
+            Some(libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            })
         };
 
-        let ts = libc::timespec {
-            tv_sec: 3,
-            tv_nsec: 0,
+        let timespec_ptr = match &timespec_opt {
+            Some(ts) => ts,
+            None => ptr::null(),
         };
 
-        let mut kevs = vec![Kevent::default(); events.len()];
+        let max_events = max_events.min(self.kevs.len());
+        let kevs = &mut *self.kevs;
         debug!("kevs len: {}", kevs.len());
         let ret = unsafe {
             libc::kevent(
@@ -284,44 +271,39 @@ impl Epoll {
                 0,
                 kevs.as_mut_ptr() as *mut libc::kevent,
                 max_events as i32,
-                &ts as *const libc::timespec,
+                timespec_ptr,
             )
         };
 
         debug!("ret: {ret}");
 
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let nevents = ret as usize;
-
-        for i in 0..nevents {
-            if kevs[i].0.filter == libc::EVFILT_READ {
-                events[i].events = EventSet::IN.bits();
-                if kevs[i].0.flags & libc::EV_EOF != 0 {
-                    events[i].events |= EventSet::READ_HANG_UP.bits();
-                }
-            } else if kevs[i].0.filter == libc::EVFILT_WRITE {
-                events[i].events = EventSet::OUT.bits();
-                if kevs[i].0.flags & libc::EV_EOF != 0 {
-                    events[i].events |= EventSet::HANG_UP.bits();
-                }
-            } else if kevs[i].0.filter == libc::EVFILT_TIMER {
+        for i in 0..ret {
+            debug!("kev: {:?}", kevs[i as usize]);
+            if kevs[i as usize].0.filter == libc::EVFILT_READ {
+                events[i as usize].events = EventSet::IN.bits();
+            } else if kevs[i as usize].0.filter == libc::EVFILT_WRITE {
+                events[i as usize].events = EventSet::OUT.bits();
+            } else if kevs[i as usize].0.filter == libc::EVFILT_TIMER {
                 // No epoll equivalent; caller identifies timer by udata.
-                events[i].events = EventSet::empty().bits();
+                events[i as usize].events = EventSet::empty().bits();
             }
-            events[i].u64 = kevs[i].udata();
-
-            let fd = kevs[i].0.ident;
-            let data = kevs[i].0.data;
-            debug!(
-                "kevent: {} fd={fd} data={data}",
-                event_name(kevs[i].0.filter, kevs[i].0.flags)
-            );
+            if kevs[i as usize].0.filter != libc::EVFILT_TIMER
+                && kevs[i as usize].0.flags & libc::EV_EOF != 0
+            {
+                events[i as usize].events |= if kevs[i as usize].0.flags & libc::EV_CLEAR != 0 {
+                    EventSet::READ_HANG_UP.bits()
+                } else {
+                    EventSet::HANG_UP.bits()
+                };
+            }
+            events[i as usize].u64 = kevs[i as usize].udata();
         }
 
-        Ok(nevents)
+        match ret {
+            -1 => Err(io::Error::last_os_error()),
+            0 => Ok(0),
+            nev => Ok(nev as usize),
+        }
     }
 
     /// Register a one-shot timer that fires after `delay_us` microseconds.
@@ -335,8 +317,9 @@ impl Epoll {
             data: delay_us as isize,
             udata: udata as *mut libc::c_void,
         };
-        let ret = unsafe { libc::kevent(self.queue, &kev, 1, ptr::null_mut(), 0, ptr::null()) };
-        assert_eq!(ret, 0);
+        unsafe {
+            libc::kevent(self.queue, &kev, 1, ptr::null_mut(), 0, ptr::null());
+        }
     }
 }
 
@@ -378,7 +361,7 @@ mod tests {
         const EVENT_BUFFER_SIZE: usize = 128;
         const MAX_EVENTS: usize = 10;
 
-        let epoll = Epoll::new().unwrap();
+        let mut epoll = Epoll::new().unwrap();
         assert_eq!(epoll.queue, epoll.as_raw_fd());
 
         // Let's test different scenarios for `epoll_ctl()` and `epoll_wait()` functionality.
