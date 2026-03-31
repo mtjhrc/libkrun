@@ -36,6 +36,8 @@ mod queue;
 pub mod rng;
 #[cfg(feature = "snd")]
 pub mod snd;
+#[cfg(all(feature = "batch_queue", test))]
+pub(crate) mod test_utils;
 pub mod vsock;
 
 #[cfg(not(feature = "tee"))]
