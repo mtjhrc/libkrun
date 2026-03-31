@@ -116,6 +116,10 @@ pub struct Unixgram {
     tx_empty_feeds: u64,
     tx_enobufs: u64,
     tx_fed_samples: Vec<usize>,
+    tx_syscall_requested: u64,
+    tx_syscall_sent: u64,
+    tx_syscall_partial: u64,
+    tx_syscall_count: u64,
 }
 
 impl Unixgram {
@@ -164,6 +168,10 @@ impl Unixgram {
             tx_empty_feeds: 0,
             tx_enobufs: 0,
             tx_fed_samples: Vec::new(),
+            tx_syscall_requested: 0,
+            tx_syscall_sent: 0,
+            tx_syscall_partial: 0,
+            tx_syscall_count: 0,
         }
     }
 
@@ -263,10 +271,6 @@ impl NetBackend for Unixgram {
                 self.tx_empty_feeds += 1;
             }
             
-            if !self.tx_consumer.has_pending() {
-                break
-            }
-
             #[cfg(target_os = "linux")]
             let send_result = self.send_linux();
 
@@ -291,24 +295,36 @@ impl NetBackend for Unixgram {
             if self.tx_send_calls % 10000 == 0 {
                 let empty_pct = self.tx_empty_feeds as f64 / self.tx_send_calls as f64 * 100.0;
                 let enobufs_pct = self.tx_enobufs as f64 / self.tx_send_calls as f64 * 100.0;
+                let sc_yield = if self.tx_syscall_requested > 0 {
+                    self.tx_syscall_sent as f64 / self.tx_syscall_requested as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let partial_pct = if self.tx_syscall_count > 0 {
+                    self.tx_syscall_partial as f64 / self.tx_syscall_count as f64 * 100.0
+                } else {
+                    0.0
+                };
                 self.tx_fed_samples.sort_unstable();
                 let n = self.tx_fed_samples.len();
                 if n > 0 {
                     eprintln!(
-                        "TX stats: calls={} avg_fed={:.1} avg_sent={:.1} empty={:.1}% enobufs={:.1}% fed[n={} min={} med={} max={}]",
+                        "TX stats: calls={} avg_fed={:.1} avg_sent={:.1} empty={:.1}% enobufs={:.1}% fed[n={} min={} med={} max={}] syscall[n={} req={} sent={} yield={:.1}% partial={:.1}%]",
                         self.tx_send_calls,
                         self.tx_total_fed as f64 / self.tx_send_calls as f64,
                         self.tx_total_sent as f64 / self.tx_send_calls as f64,
                         empty_pct, enobufs_pct,
                         n, self.tx_fed_samples[0], self.tx_fed_samples[n / 2], self.tx_fed_samples[n - 1],
+                        self.tx_syscall_count, self.tx_syscall_requested, self.tx_syscall_sent, sc_yield, partial_pct,
                     );
                 } else {
                     eprintln!(
-                        "TX stats: calls={} avg_fed={:.1} avg_sent={:.1} empty={:.1}% enobufs={:.1}% fed[n=0]",
+                        "TX stats: calls={} avg_fed={:.1} avg_sent={:.1} empty={:.1}% enobufs={:.1}% fed[n=0] syscall[n={} req={} sent={} yield={:.1}% partial={:.1}%]",
                         self.tx_send_calls,
                         self.tx_total_fed as f64 / self.tx_send_calls as f64,
                         self.tx_total_sent as f64 / self.tx_send_calls as f64,
                         empty_pct, enobufs_pct,
+                        self.tx_syscall_count, self.tx_syscall_requested, self.tx_syscall_sent, sc_yield, partial_pct,
                     );
                 }
                 self.tx_fed_samples.clear();
@@ -458,6 +474,10 @@ impl Unixgram {
     fn send_macos(&mut self) -> Result<usize, WriteError> {
         let fd = self.fd.as_raw_fd();
         let mut got_enobufs = false;
+        let mut sc_requested: u64 = 0;
+        let mut sc_sent: u64 = 0;
+        let mut sc_partial: u64 = 0;
+        let mut sc_count: u64 = 0;
 
         let sent = self.tx_consumer.consume(|batch| match MACOS_MODE {
             MacosSendRecvMode::Plain => {
@@ -466,6 +486,8 @@ impl Unixgram {
                     let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
                     hdr.msg_iov = AliasedIoSlice::as_iovec_ptr(slices) as *mut libc::iovec;
                     hdr.msg_iovlen = slices.len() as _;
+                    sc_count += 1;
+                    sc_requested += 1;
                     let ret = unsafe { libc::sendmsg(fd, &hdr, libc::MSG_DONTWAIT) };
                     if ret < 0 {
                         let err = nix::errno::Errno::last();
@@ -476,6 +498,7 @@ impl Unixgram {
                         }
                         return;
                     }
+                    sc_sent += 1;
                     batch.finish(i);
                     for _ in 0..FINISH_SPIN_ITERS {
                         std::hint::spin_loop();
@@ -489,6 +512,8 @@ impl Unixgram {
                     let headers = batch.transformed(i..i + chunk);
                     let ptr = headers.as_ptr() as *const super::socket_x::msghdr_x;
 
+                    sc_count += 1;
+                    sc_requested += chunk as u64;
                     let ret = unsafe {
                         super::socket_x::sendmsg_x(fd, ptr, chunk as libc::c_uint, libc::MSG_DONTWAIT)
                     };
@@ -504,6 +529,10 @@ impl Unixgram {
                     }
 
                     let sent = ret as usize;
+                    sc_sent += sent as u64;
+                    if sent < chunk {
+                        sc_partial += 1;
+                    }
                     batch.finish_many(i..i + sent);
                     for _ in 0..FINISH_SPIN_ITERS {
                         std::hint::spin_loop();
@@ -538,6 +567,11 @@ impl Unixgram {
                 }
             }
         });
+
+        self.tx_syscall_requested += sc_requested;
+        self.tx_syscall_sent += sc_sent;
+        self.tx_syscall_partial += sc_partial;
+        self.tx_syscall_count += sc_count;
 
         if sent == 0 && got_enobufs {
             return Err(WriteError::NothingWritten);

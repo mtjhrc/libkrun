@@ -252,7 +252,7 @@ impl NetBackend for Unixstream {
             });
 
             total_finished += finished;
-            if finished == 0 || self.tx_consumer.has_pending() {
+            if finished == 0 {
                 break;
             }
         }
