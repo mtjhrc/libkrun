@@ -52,24 +52,22 @@ mod host {
     // wakeups rather than coalescing into one, so they exercise the no-op guard.
     const IDEM_GAP_MS: u64 = 200;
 
-    use crate::common::setup_rootfs;
+    use crate::common::{build_init_config, setup_rootfs};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use crate::{krun_call, krun_call_u32};
     use krun_sys::*;
-    use std::ffi::{CString, c_char};
+    use std::ffi::CString;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
-    use std::ptr::null;
     use std::time::Duration;
 
     fn sleep_ms(ms: u64) {
         std::thread::sleep(Duration::from_millis(ms));
     }
 
-    unsafe fn configure_vm(ctx: u32, root: &Path, test_case: &str) -> anyhow::Result<()> {
+    unsafe fn configure_vm(ctx: u32, root: &Path) -> anyhow::Result<()> {
         let root_cstr = CString::new(root.as_os_str().as_bytes())?;
-        let test_case_cstr = CString::new(test_case.to_owned())?;
         unsafe {
             krun_call!(krun_set_vm_config(ctx, NUM_CPUS, 512))?;
             krun_call!(krun_add_virtio_console_default(
@@ -84,15 +82,6 @@ mod host {
                 root_cstr.as_ptr(),
                 0,
                 false,
-            ))?;
-            krun_call!(krun_set_workdir(ctx, c"/".as_ptr()))?;
-            let argv: [*const c_char; 2] = [test_case_cstr.as_ptr(), null()];
-            let envp: [*const c_char; 1] = [null()];
-            krun_call!(krun_set_exec(
-                ctx,
-                c"/guest-agent".as_ptr(),
-                argv.as_ptr(),
-                envp.as_ptr(),
             ))?;
         }
         Ok(())
@@ -114,7 +103,15 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let root_dir = setup_rootfs(&test_setup)?;
             let ctx = unsafe { krun_call_u32!(krun_create_ctx())? };
-            unsafe { configure_vm(ctx, &root_dir, &test_setup.test_case)? };
+            unsafe { configure_vm(ctx, &root_dir)? };
+
+            // init_config must stay alive until krun_start_enter (which never
+            // returns): apply() passes data pointers into libkrun that remain
+            // borrowed for the VM lifetime.
+            let init_config = build_init_config(&test_setup.test_case, &[]);
+            init_config
+                .apply(std::ptr::null_mut(), ctx, "/dev/root")
+                .expect("apply init config");
 
             // Pause/resume the guest several times from another thread, each pause
             // outlasting the guest's remaining run, then drop a marker. The control
