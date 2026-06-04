@@ -181,6 +181,60 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "ffier"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-builtins",
+ "ffier-impl",
+ "ffier-rt",
+]
+
+[[package]]
+name = "ffier-builtins"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-impl",
+ "ffier-rt",
+]
+
+[[package]]
+name = "ffier-gen-rust-client"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-schema",
+ "serde_json",
+]
+
+[[package]]
+name = "ffier-impl"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-schema",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "ffier-rt"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+
+[[package]]
+name = "ffier-schema"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fuchsia-cprng"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -226,6 +280,16 @@ name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+
+[[package]]
+name = "krun-init-blob-via-cdylib"
+version = "0.1.0-1.18.1"
+dependencies = [
+ "anyhow",
+ "ffier",
+ "ffier-gen-rust-client",
+ "pkg-config",
+]
 
 [[package]]
 name = "krun-sys"
@@ -497,6 +561,7 @@ name = "test_cases"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "krun-init-blob-via-cdylib",
  "krun-sys",
  "macros",
  "nix",
