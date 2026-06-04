@@ -383,6 +383,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffier"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-builtins",
+ "ffier-impl",
+ "ffier-rt",
+]
+
+[[package]]
+name = "ffier-builtins"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-impl",
+ "ffier-rt",
+]
+
+[[package]]
+name = "ffier-gen-rust-client"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-schema",
+ "serde_json",
+]
+
+[[package]]
+name = "ffier-impl"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "ffier-schema",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "ffier-rt"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+
+[[package]]
+name = "ffier-schema"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -727,6 +781,23 @@ dependencies = [
 [[package]]
 name = "krun-init-blob"
 version = "0.1.0-2.0.0-dev"
+dependencies = [
+ "ffier",
+ "libloading",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "krun-init-blob-via-cdylib"
+version = "0.1.0-1.18.1"
+dependencies = [
+ "anyhow",
+ "ffier",
+ "ffier-gen-rust-client",
+ "pkg-config",
+]
 
 [[package]]
 name = "krun-input"
@@ -881,7 +952,6 @@ dependencies = [
  "krun-devices",
  "krun-display",
  "krun-hvf",
- "krun-init-blob",
  "krun-input",
  "krun-polly",
  "krun-utils",
