@@ -6,21 +6,27 @@
 //! This module provides a wrapper around the vhost crate's Frontend,
 //! adapting it to work with libkrun's VirtioDevice trait.
 
-use std::io::{self, ErrorKind, Result as IoResult};
+use std::io::{self, ErrorKind, IoSlice, Read, Result as IoResult, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error, warn};
+use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EFD_NONBLOCK, EventFd};
-use vhost::vhost_user::message::VhostUserConfigFlags;
+use vhost::vhost_user::gpu_message::{
+    GpuBackendReq, VhostUserGpuHeaderFlag, VirtioGpuDisplayOne, VirtioGpuRect,
+    VirtioGpuRespDisplayInfo, VirtioGpuRespGetEdid,
+};
+use vhost::vhost_user::message::{FrontendReq, VhostUserConfigFlags};
 use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use vmm_sys_util::eventfd::EventFd as VhostEventFd;
 
+use crate::display::DisplayInfo;
 use crate::virtio::{
     ActivateError, ActivateResult, DeviceQueue, DeviceState, InterruptTransport, QueueConfig,
     VirtioDevice,
@@ -29,6 +35,41 @@ use crate::virtio::{
 /// VHOST_USER_F_PROTOCOL_FEATURES (bit 30) is a backend-only feature
 /// that enables vhost-user protocol extensions. It's not a virtio feature.
 const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
+
+/// Virtio device type ID for GPU
+const VIRTIO_ID_GPU: u32 = 16;
+
+/// Helper function to send GPU_SET_SOCKET message to vhost-user backend.
+/// Following QEMU's vhost_user_gpu_set_socket() pattern - sends message without waiting for ACK.
+///
+/// TODO: This should be part of vhost crate's Frontend trait:
+///   frontend.set_gpu_socket(gpu_fd) -> Result<()>
+fn send_gpu_set_socket(
+    frontend_fd: std::os::unix::io::RawFd,
+    gpu_fd: std::os::unix::io::RawFd,
+) -> IoResult<()> {
+    const VHOST_USER_VERSION: u32 = 0x1;
+
+    let header: [u32; 3] = [
+        FrontendReq::GPU_SET_SOCKET as u32,
+        VHOST_USER_VERSION,
+        0, // size = 0 (no payload, just the FD)
+    ];
+
+    // SAFETY: header is a local [u32; 3] array, valid for its entire lifetime here.
+    let header_bytes = unsafe {
+        std::slice::from_raw_parts(header.as_ptr() as *const u8, std::mem::size_of_val(&header))
+    };
+
+    let iov = [IoSlice::new(header_bytes)];
+    let fds = [gpu_fd];
+    let cmsg = [ControlMessage::ScmRights(&fds)];
+
+    sendmsg::<()>(frontend_fd, &iov, &cmsg, MsgFlags::empty(), None)
+        .map_err(|e| io::Error::other(format!("sendmsg failed: {}", e)))?;
+
+    Ok(())
+}
 
 /// Generic vhost-user device wrapper.
 ///
@@ -64,6 +105,12 @@ pub struct VhostUserDevice {
 
     /// Vring call event (backend->VMM interrupt notification)
     vring_call_event: Option<EventFd>,
+
+    /// GPU socket for receiving GPU protocol messages (GPU devices only)
+    gpu_socket: Option<UnixStream>,
+
+    /// User-configured display resolution for GPU devices (display size, not guest scanout).
+    gpu_display_info: Option<DisplayInfo>,
 }
 
 impl VhostUserDevice {
@@ -86,6 +133,7 @@ impl VhostUserDevice {
         device_name: String,
         num_queues: u16,
         queue_sizes: &[u16],
+        gpu_display: Option<DisplayInfo>,
     ) -> IoResult<Self> {
         debug!(
             "Connecting to vhost-user backend at {}",
@@ -153,6 +201,12 @@ impl VhostUserDevice {
             })
             .collect();
 
+        let gpu_display_info = if device_type == VIRTIO_ID_GPU {
+            Some(gpu_display.unwrap_or_else(|| DisplayInfo::new(1024, 768)))
+        } else {
+            None
+        };
+
         Ok(Self {
             frontend: Arc::new(Mutex::new(frontend)),
             device_type,
@@ -164,6 +218,8 @@ impl VhostUserDevice {
             device_state: DeviceState::Inactive,
             activate_evt: EventFd::new(EFD_NONBLOCK)?,
             vring_call_event: None,
+            gpu_socket: None,
+            gpu_display_info,
         })
     }
 
@@ -185,6 +241,28 @@ impl VhostUserDevice {
         };
 
         frontend.set_owner().map_err(io::Error::other)?;
+
+        // Set up the GPU socket before vhost activation - the backend uses it to send
+        // GPU protocol messages (GET_DISPLAY_INFO, GET_EDID, SCANOUT, etc.)
+        if self.device_type == VIRTIO_ID_GPU {
+            let (our_end, backend_end) = UnixStream::pair().map_err(|e| {
+                error!(
+                    "{}: failed to create GPU socketpair: {}",
+                    self.device_name, e
+                );
+                io::Error::other(e)
+            })?;
+
+            // GPU_SET_SOCKET is a one-way message - no ACK expected from backend
+            send_gpu_set_socket(frontend.as_raw_fd(), backend_end.as_raw_fd()).map_err(|e| {
+                error!("{}: failed to send GPU_SET_SOCKET: {}", self.device_name, e);
+                e
+            })?;
+            drop(backend_end);
+            self.gpu_socket = Some(our_end);
+
+            debug!("{}: GPU socket configured", self.device_name);
+        }
 
         // Only share memory regions that have file backing (memfd)
         let regions: Vec<VhostUserMemoryRegionInfo> = mem
@@ -468,17 +546,170 @@ impl VirtioDevice for VhostUserDevice {
         }
 
         self.vring_call_event = None;
+        self.gpu_socket = None;
         self.device_state = DeviceState::Inactive;
         true
     }
 }
 
 impl VhostUserDevice {
+    fn handle_gpu_socket_event(&mut self, event: &EpollEvent) {
+        let event_set = event.event_set();
+
+        if event_set.contains(EventSet::HANG_UP) || event_set.contains(EventSet::ERROR) {
+            warn!(
+                "{}: GPU backend disconnected, closing socket",
+                self.device_name
+            );
+            self.gpu_socket = None;
+            return;
+        }
+
+        if !event_set.contains(EventSet::IN) {
+            warn!(
+                "{}: GPU socket unexpected event {event_set:?}",
+                self.device_name
+            );
+            return;
+        }
+
+        if let Some(ref mut gpu_socket) = self.gpu_socket {
+            // TODO: vhost crate should provide GpuSocket::read_message() API
+            // VhostUserGpuMsgHeader exists internally but isn't exposed
+            let mut header = [0u32; 3];
+            // SAFETY: header is a local [u32; 3] array, valid for the duration of this block.
+            let header_bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    header.as_mut_ptr() as *mut u8,
+                    std::mem::size_of_val(&header),
+                )
+            };
+
+            if let Err(e) = gpu_socket.read_exact(header_bytes) {
+                error!(
+                    "{}: failed to read GPU message header: {}",
+                    self.device_name, e
+                );
+                self.gpu_socket = None;
+                return;
+            }
+
+            let request = header[0];
+            let flags = header[1];
+            let size = header[2];
+
+            let mut payload = vec![0u8; size as usize];
+            if size > 0
+                && let Err(e) = gpu_socket.read_exact(&mut payload)
+            {
+                error!(
+                    "{}: failed to read GPU message payload: {}",
+                    self.device_name, e
+                );
+                self.gpu_socket = None;
+                return;
+            }
+
+            self.handle_gpu_message(request, flags, &payload);
+        }
+    }
+
+    fn handle_gpu_message(&mut self, request: u32, _flags: u32, payload: &[u8]) {
+        match GpuBackendReq::try_from(request) {
+            Ok(GpuBackendReq::GET_DISPLAY_INFO) => self.send_gpu_display_info(request),
+            Ok(GpuBackendReq::GET_EDID) => self.send_gpu_edid(request, payload),
+            _ => {
+                warn!("{}: unhandled GPU message: {}", self.device_name, request);
+            }
+        }
+    }
+
+    /// Helper to send GPU protocol responses
+    /// TODO: This should be part of vhost crate's GPU message handling
+    fn send_gpu_response<T>(&mut self, request: u32, response: &T) -> IoResult<()> {
+        if self.gpu_socket.is_none() {
+            return Ok(());
+        }
+
+        let msg_header = [
+            request,
+            VhostUserGpuHeaderFlag::REPLY.bits(),
+            std::mem::size_of::<T>() as u32,
+        ];
+        // SAFETY: msg_header is a local [u32; 3] array, valid for the duration of this block.
+        let header_bytes = unsafe {
+            std::slice::from_raw_parts(
+                msg_header.as_ptr() as *const u8,
+                std::mem::size_of_val(&msg_header),
+            )
+        };
+        // SAFETY: response is a reference to a POD type T, valid and aligned for size_of::<T>() bytes.
+        let response_bytes = unsafe {
+            std::slice::from_raw_parts(response as *const T as *const u8, std::mem::size_of::<T>())
+        };
+
+        let result = self
+            .gpu_socket
+            .as_mut()
+            .unwrap()
+            .write_all(header_bytes)
+            .and_then(|_| self.gpu_socket.as_mut().unwrap().write_all(response_bytes));
+
+        if result.is_err() {
+            self.gpu_socket = None;
+        }
+        result
+    }
+
+    fn send_gpu_display_info(&mut self, request: u32) {
+        const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+
+        let mut display_info = VirtioGpuRespDisplayInfo::default();
+        display_info.hdr.type_ = VIRTIO_GPU_RESP_OK_DISPLAY_INFO;
+
+        display_info.pmodes[0] = VirtioGpuDisplayOne {
+            r: VirtioGpuRect {
+                x: 0,
+                y: 0,
+                width: self.gpu_display_info.as_ref().map_or(0, |d| d.width),
+                height: self.gpu_display_info.as_ref().map_or(0, |d| d.height),
+            },
+            enabled: 1,
+            flags: 0,
+        };
+
+        if let Err(e) = self.send_gpu_response(request, &display_info) {
+            error!("{}: failed to send DISPLAY_INFO: {}", self.device_name, e);
+        }
+    }
+
+    fn send_gpu_edid(&mut self, request: u32, _payload: &[u8]) {
+        const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1104;
+
+        // EDID reflects the display (monitor) capabilities, not the current guest scanout.
+        // The same EDID is returned for all scanout IDs the backend queries.
+        let Some(ref display_info) = self.gpu_display_info else {
+            return;
+        };
+        let edid_bytes = display_info.edid_bytes();
+
+        let mut edid_resp = VirtioGpuRespGetEdid::default();
+        edid_resp.hdr.type_ = VIRTIO_GPU_RESP_OK_EDID;
+        edid_resp.size = edid_bytes.len() as u32;
+
+        let copy_len = edid_bytes.len().min(edid_resp.edid.len());
+        edid_resp.edid[..copy_len].copy_from_slice(&edid_bytes[..copy_len]);
+
+        if let Err(e) = self.send_gpu_response(request, &edid_resp) {
+            error!("{}: failed to send EDID: {}", self.device_name, e);
+        }
+    }
+
     fn handle_vring_call_event(&mut self, event: &EpollEvent) {
         debug!("{}: vring call event received", self.device_name);
 
         let event_set = event.event_set();
-        if event_set != EventSet::IN {
+        if !event_set.contains(EventSet::IN) {
             warn!(
                 "{}: vring call unexpected event {event_set:?}",
                 self.device_name
@@ -535,6 +766,26 @@ impl VhostUserDevice {
                         self.device_name
                     );
                 });
+
+            // Register GPU socket for receiving backend messages
+            if let Some(ref gpu_socket) = self.gpu_socket {
+                event_manager
+                    .register(
+                        gpu_socket.as_raw_fd(),
+                        EpollEvent::new(EventSet::IN, gpu_socket.as_raw_fd() as u64),
+                        self_subscriber.clone(),
+                    )
+                    .unwrap_or_else(|e| {
+                        error!(
+                            "{}: failed to register GPU socket with event manager: {e:?}",
+                            self.device_name
+                        );
+                    });
+                debug!(
+                    "{}: GPU socket registered with event manager",
+                    self.device_name
+                );
+            }
         } else {
             error!(
                 "{}: vring_call_event is None during activation",
@@ -563,10 +814,16 @@ impl Subscriber for VhostUserDevice {
             .as_ref()
             .map(|e| e.as_raw_fd())
             .unwrap_or(-1);
+        let gpu_socket_fd = self
+            .gpu_socket
+            .as_ref()
+            .map(|s| s.as_raw_fd())
+            .unwrap_or(-1);
 
         if self.is_activated() {
             match source {
                 _ if source == vring_call_fd => self.handle_vring_call_event(event),
+                _ if source == gpu_socket_fd => self.handle_gpu_socket_event(event),
                 _ if source == activate_evt_fd => self.handle_activate_event(event_manager),
                 _ => warn!(
                     "{}: unexpected event received: {source:?}",

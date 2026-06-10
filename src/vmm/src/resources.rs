@@ -32,7 +32,7 @@ use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
 use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::DisplayInfo;
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -210,7 +210,7 @@ pub struct VmResources {
     pub gpu_shm_size: Option<usize>,
     #[cfg(feature = "gpu")]
     pub display_backend: Option<DisplayBackend<'static>>,
-    #[cfg(feature = "gpu")]
+    #[cfg(any(feature = "gpu", feature = "vhost-user"))]
     pub displays: Vec<DisplayInfo>,
     #[cfg(feature = "input")]
     pub input_backends: Vec<(
@@ -455,7 +455,7 @@ mod tests {
             gpu_shm_size: None,
             #[cfg(feature = "gpu")]
             display_backend: None,
-            #[cfg(feature = "gpu")]
+            #[cfg(any(feature = "gpu", feature = "vhost-user"))]
             displays: Vec::new(),
             #[cfg(feature = "input")]
             input_backends: Vec::new(),

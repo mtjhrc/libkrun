@@ -85,7 +85,7 @@ use crate::vstate::MeasuredRegion;
 use crate::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
 use arch::{ArchMemoryInfo, InitrdConfig};
 use device_manager::shm::ShmManager;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::DisplayInfo;
 #[cfg(feature = "gpu")]
 use devices::display::NoopDisplayBackend;
@@ -1028,7 +1028,13 @@ pub fn build_microvm(
         {
             const VIRTIO_ID_RNG: u32 = 4;
             for device_config in &vm_resources.vhost_user_devices {
-                attach_vhost_user_device(&mut vmm, event_manager, intc.clone(), device_config)?;
+                attach_vhost_user_device(
+                    &mut vmm,
+                    event_manager,
+                    intc.clone(),
+                    device_config,
+                    vm_resources.displays.first().cloned(),
+                )?;
             }
 
             let has_vhost_user_rng = vm_resources
@@ -2675,6 +2681,7 @@ fn attach_vhost_user_device(
     event_manager: &mut EventManager,
     intc: IrqChip,
     device_config: &VhostUserDeviceConfig,
+    gpu_display: Option<DisplayInfo>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
@@ -2690,6 +2697,7 @@ fn attach_vhost_user_device(
             device_name.clone(),
             device_config.num_queues,
             &device_config.queue_sizes,
+            gpu_display,
         )
         .map_err(|e| RegisterVhostUserDevice(device_manager::mmio::Error::VhostUserDevice(e)))?,
     ));

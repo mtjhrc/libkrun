@@ -2,7 +2,7 @@
 extern crate log;
 
 use crossbeam_channel::unbounded;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::DisplayInfo;
 #[cfg(feature = "blk")]
 use devices::virtio::CacheType;
@@ -71,7 +71,7 @@ use vmm::vmm_config::vsock::VsockDeviceConfig;
 #[cfg(feature = "aws-nitro")]
 use aws_nitro::enclave::NitroEnclave;
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::{DisplayInfoEdid, MAX_DISPLAYS, PhysicalSize};
 #[cfg(feature = "input")]
 use krun_input::{InputConfigBackend, InputEventProviderBackend};
@@ -1494,7 +1494,7 @@ pub unsafe extern "C" fn krun_add_input_device_fd(_ctx_id: u32, _input_fd: i32) 
     -libc::ENOTSUP
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn krun_add_display(ctx_id: u32, width: u32, height: u32) -> i32 {
@@ -1512,14 +1512,14 @@ pub unsafe extern "C" fn krun_add_display(ctx_id: u32, width: u32, height: u32) 
     }
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "vhost-user")))]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn krun_add_display(_ctx_id: u32, _width: u32, _height: u32) -> i32 {
     -libc::ENOTSUP
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn krun_display_set_refresh_rate(
     ctx_id: u32,
@@ -1540,7 +1540,7 @@ pub extern "C" fn krun_display_set_refresh_rate(
     })
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "vhost-user")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn krun_display_set_refresh_rate(
     _ctx_id: u32,
@@ -1550,7 +1550,7 @@ pub extern "C" fn krun_display_set_refresh_rate(
     -libc::ENOTSUP
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 #[unsafe(no_mangle)]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn krun_display_set_edid(
@@ -1575,7 +1575,7 @@ pub unsafe extern "C" fn krun_display_set_edid(
     })
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "vhost-user")))]
 #[unsafe(no_mangle)]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn krun_display_set_edid(
@@ -1587,7 +1587,7 @@ pub unsafe extern "C" fn krun_display_set_edid(
     -libc::ENOTSUP
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn krun_display_set_physical_size(
     ctx_id: u32,
@@ -1607,7 +1607,7 @@ pub extern "C" fn krun_display_set_physical_size(
     })
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "vhost-user")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn krun_display_set_physical_size(
     _ctx_id: u32,
@@ -1618,7 +1618,7 @@ pub extern "C" fn krun_display_set_physical_size(
     -libc::ENOTSUP
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
 #[unsafe(no_mangle)]
 #[allow(clippy::missing_safety_doc)]
 pub extern "C" fn krun_display_set_dpi(ctx_id: u32, display_id: u32, dpi: u32) -> i32 {
@@ -1634,7 +1634,7 @@ pub extern "C" fn krun_display_set_dpi(ctx_id: u32, display_id: u32, dpi: u32) -
     })
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "vhost-user")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn krun_display_set_dpi(_ctx_id: u32, _display_id: u32, _dpi: u32) -> i32 {
     -libc::ENOTSUP
