@@ -20,7 +20,7 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Set up Homebrew (macOS)
       if: runner.os == 'macOS'
