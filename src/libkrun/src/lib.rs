@@ -93,9 +93,6 @@ const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
 #[cfg(feature = "aws-nitro")]
 static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
 
-// Path to the init binary to be executed inside the VM.
-const INIT_PATH: &str = "/init.krun";
-
 static KRUNFW: LazyLock<Option<libloading::Library>> =
     LazyLock::new(|| unsafe { libloading::Library::new(KRUNFW_NAME).ok() });
 
@@ -2815,7 +2812,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         return -libc::EINVAL;
     }
 
-    let mut prolog = format!("{DEFAULT_KERNEL_CMDLINE} init={INIT_PATH}");
+    let mut prolog = DEFAULT_KERNEL_CMDLINE.to_string();
     #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     for arg in &ctx_cfg.extra_kernel_cmdline {
         prolog.push(' ');
