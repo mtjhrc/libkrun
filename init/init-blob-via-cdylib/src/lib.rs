@@ -121,10 +121,10 @@ impl<T: FfiHandle + 'static> FfiType for &T {
     const C_TYPE_NAME: &'static str = T::C_HANDLE_NAME;
     const IS_HANDLE: bool = true;
     fn into_c(self) -> *mut core::ffi::c_void {
-        unsafe { self.as_handle() }
+        unsafe { FfiHandle::as_handle(self) }
     }
     unsafe fn from_c(_: *mut core::ffi::c_void) -> Self {
-        unimplemented!("client-side &T from_c")
+        unimplemented!("&T from_c")
     }
 }
 impl<T: FfiHandle + 'static> FfiType for &mut T {
@@ -132,10 +132,10 @@ impl<T: FfiHandle + 'static> FfiType for &mut T {
     const C_TYPE_NAME: &'static str = T::C_HANDLE_NAME;
     const IS_HANDLE: bool = true;
     fn into_c(self) -> *mut core::ffi::c_void {
-        unsafe { self.as_handle() }
+        unsafe { FfiHandle::as_handle(self) }
     }
     unsafe fn from_c(_: *mut core::ffi::c_void) -> Self {
-        unimplemented!("client-side &mut T from_c")
+        unimplemented!("&mut T from_c")
     }
 }
 
@@ -440,7 +440,7 @@ impl Config {
 }
 
 impl FfiHandle for Config {
-    const C_HANDLE_NAME: &'static str = "Config";
+    const C_HANDLE_NAME: &'static str = "KrunInitConfig";
     const TYPE_TAG: u32 = 33554436u32;
     unsafe fn as_handle(&self) -> *mut core::ffi::c_void {
         self.0
@@ -583,7 +583,7 @@ impl Builder {
 }
 
 impl FfiHandle for Builder {
-    const C_HANDLE_NAME: &'static str = "Builder";
+    const C_HANDLE_NAME: &'static str = "KrunInitBuilder";
     const TYPE_TAG: u32 = 33554437u32;
     unsafe fn as_handle(&self) -> *mut core::ffi::c_void {
         self.0
