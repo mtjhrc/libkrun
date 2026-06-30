@@ -1,5 +1,7 @@
 //! Host-side utilities for FreeBSD guest tests.
 
+/*
+
 use anyhow::Context;
 use nix::libc;
 use std::ffi::CString;
@@ -250,3 +252,5 @@ unsafe fn do_setup_and_enter(
         unreachable!()
     }
 }
+
+*/

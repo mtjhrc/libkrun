@@ -4,6 +4,7 @@ members = [
     "src/libkrun",
     "init/init-blob",
     "init/init-blob-via-cdylib",
+    "src/libkrun-via-cdylib-weak",
     "src/input",
     "src/display",
     "src/utils",
