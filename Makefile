@@ -271,9 +271,6 @@ install: libkrun.pc libkrun_init.pc
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
 	install -d $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER) $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER_DISPLAY) $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER_INPUT) $(DESTDIR)$(PREFIX)/include
 	install -m 644 $(LIBRARY_HEADER_INIT) $(DESTDIR)$(PREFIX)/include
 	install -m 644 libkrun.pc $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
 	install -m 644 libkrun_init.pc $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
