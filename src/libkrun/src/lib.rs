@@ -22,6 +22,7 @@ use polly::event_manager::EventManager;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::convert::TryInto;
+#[cfg(target_os = "linux")]
 use std::env;
 use std::ffi::CString;
 use std::ffi::{CStr, c_void};
@@ -129,15 +130,27 @@ impl KrunfwBindings {
     }
 }
 
+/// AWS Nitro enclave-specific configuration.
+///
+/// These fields are only used by the aws-nitro path, which delivers
+/// exec_path/argv/envp over vsock to the enclave initramfs.
+#[cfg(feature = "aws-nitro")]
 #[derive(Default)]
-struct ContextConfig {
-    krunfw: Option<KrunfwBindings>,
-    vmr: VmResources,
+struct NitroConfig {
     workdir: Option<String>,
     exec_path: Option<String>,
     env: Option<String>,
     args: Option<String>,
     rlimits: Option<String>,
+    console_output: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct ContextConfig {
+    krunfw: Option<KrunfwBindings>,
+    vmr: VmResources,
+    #[cfg(feature = "aws-nitro")]
+    nitro: NitroConfig,
     net_index: u8,
     tsi_port_map: Option<HashMap<u16, u16>>,
     vsock_config: VsockConfig,
@@ -151,18 +164,15 @@ struct ContextConfig {
     shutdown_efd: Option<EventFd>,
     gpu_virgl_flags: Option<u32>,
     gpu_shm_size: Option<usize>,
-    /// Console output path, only used by the aws-nitro TryFrom path.
-    #[cfg(feature = "aws-nitro")]
-    nitro_console_output: Option<PathBuf>,
     vmm_uid: Option<libc::uid_t>,
     vmm_gid: Option<libc::gid_t>,
 
     /// Extra kernel command-line arguments appended via `krun_append_kernel_cmdline`.
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     extra_kernel_cmdline: Vec<String>,
 }
 
-impl ContextConfig {
+#[cfg(feature = "aws-nitro")]
+impl NitroConfig {
     fn set_workdir(&mut self, workdir: String) {
         self.workdir = Some(workdir);
     }
@@ -183,34 +193,6 @@ impl ContextConfig {
             Some(exec_path) => format!("KRUN_INIT={exec_path}"),
             None => "".to_string(),
         }
-    }
-
-    #[cfg(all(feature = "blk", not(feature = "tee")))]
-    fn set_block_root(&mut self, device: String, fstype: Option<String>, options: Option<String>) {
-        self.block_root = Some(BlockRootConfig {
-            device,
-            fstype,
-            options,
-        });
-    }
-
-    fn get_block_root(&self) -> String {
-        #[cfg(feature = "blk")]
-        match &self.block_root {
-            Some(block_root) => {
-                let mut res = format!("KRUN_BLOCK_ROOT_DEVICE={}", block_root.device);
-                if let Some(fstype) = &block_root.fstype {
-                    res += &format!(" KRUN_BLOCK_ROOT_FSTYPE={fstype}");
-                }
-                if let Some(options) = &block_root.options {
-                    res += &format!(" KRUN_BLOCK_ROOT_OPTIONS={options}");
-                }
-                res
-            }
-            None => "".to_string(),
-        }
-        #[cfg(not(feature = "blk"))]
-        "".to_string()
     }
 
     fn set_env(&mut self, env: String) {
@@ -244,6 +226,36 @@ impl ContextConfig {
             Some(rlimits) => format!("KRUN_RLIMITS={rlimits}"),
             None => "".to_string(),
         }
+    }
+}
+
+impl ContextConfig {
+    #[cfg(all(feature = "blk", not(feature = "tee")))]
+    fn set_block_root(&mut self, device: String, fstype: Option<String>, options: Option<String>) {
+        self.block_root = Some(BlockRootConfig {
+            device,
+            fstype,
+            options,
+        });
+    }
+
+    fn get_block_root(&self) -> String {
+        #[cfg(feature = "blk")]
+        match &self.block_root {
+            Some(block_root) => {
+                let mut res = format!("KRUN_BLOCK_ROOT_DEVICE={}", block_root.device);
+                if let Some(fstype) = &block_root.fstype {
+                    res += &format!(" KRUN_BLOCK_ROOT_FSTYPE={fstype}");
+                }
+                if let Some(options) = &block_root.options {
+                    res += &format!(" KRUN_BLOCK_ROOT_OPTIONS={options}");
+                }
+                res
+            }
+            None => "".to_string(),
+        }
+        #[cfg(not(feature = "blk"))]
+        "".to_string()
     }
 
     #[cfg(feature = "blk")]
@@ -326,17 +338,17 @@ impl TryFrom<ContextConfig> for NitroEnclave {
             return Err(-libc::EINVAL);
         };
 
-        let Some(exec_path) = ctx.exec_path else {
+        let Some(exec_path) = ctx.nitro.exec_path else {
             error!("exec path not specified");
             return Err(-libc::EINVAL);
         };
 
-        let Some(exec_env) = ctx.env else {
+        let Some(exec_env) = ctx.nitro.env else {
             error!("execution env not specified");
             return Err(-libc::EINVAL);
         };
 
-        let Some(exec_args) = ctx.args else {
+        let Some(exec_args) = ctx.nitro.args else {
             error!("execution args not specified");
             return Err(-libc::EINVAL);
         };
@@ -366,7 +378,7 @@ impl TryFrom<ContextConfig> for NitroEnclave {
             }
         };
 
-        let Some(output_path) = ctx.nitro_console_output else {
+        let Some(output_path) = ctx.nitro.console_output else {
             error!("console output path not specified");
             return Err(-libc::EINVAL);
         };
@@ -1048,8 +1060,13 @@ pub unsafe extern "C" fn krun_set_port_map(ctx_id: u32, c_port_map: *const *cons
     }
 }
 
+/// Set resource limits for the process to be run inside the VM.
+///
+/// Only available in aws-nitro builds. Non-nitro builds use
+/// Config::apply() with .krun_config.json instead.
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
+#[cfg(feature = "aws-nitro")]
 pub unsafe extern "C" fn krun_set_rlimits(ctx_id: u32, c_rlimits: *const *const c_char) -> i32 {
     unsafe {
         let rlimits = if c_rlimits.is_null() {
@@ -1075,7 +1092,7 @@ pub unsafe extern "C" fn krun_set_rlimits(ctx_id: u32, c_rlimits: *const *const 
 
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
-                ctx_cfg.get_mut().set_rlimits(rlimits);
+                ctx_cfg.get_mut().nitro.set_rlimits(rlimits);
             }
             Entry::Vacant(_) => return -libc::ENOENT,
         }
@@ -1084,8 +1101,13 @@ pub unsafe extern "C" fn krun_set_rlimits(ctx_id: u32, c_rlimits: *const *const 
     }
 }
 
+/// Set the working directory for the process to be run inside the VM.
+///
+/// Only available in aws-nitro builds. Non-nitro builds use
+/// Config::apply() with .krun_config.json instead.
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
+#[cfg(feature = "aws-nitro")]
 pub unsafe extern "C" fn krun_set_workdir(ctx_id: u32, c_workdir_path: *const c_char) -> i32 {
     unsafe {
         let workdir_path = match CStr::from_ptr(c_workdir_path).to_str() {
@@ -1095,7 +1117,10 @@ pub unsafe extern "C" fn krun_set_workdir(ctx_id: u32, c_workdir_path: *const c_
 
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
-                ctx_cfg.get_mut().set_workdir(workdir_path.to_string());
+                ctx_cfg
+                    .get_mut()
+                    .nitro
+                    .set_workdir(workdir_path.to_string());
             }
             Entry::Vacant(_) => return -libc::ENOENT,
         }
@@ -1104,6 +1129,7 @@ pub unsafe extern "C" fn krun_set_workdir(ctx_id: u32, c_workdir_path: *const c_
     }
 }
 
+#[cfg(feature = "aws-nitro")]
 unsafe fn collapse_str_array(array: &[*const c_char]) -> Result<String, std::str::Utf8Error> {
     unsafe {
         let mut strvec = Vec::new();
@@ -1121,9 +1147,15 @@ unsafe fn collapse_str_array(array: &[*const c_char]) -> Result<String, std::str
     }
 }
 
+/// Set the executable to be run inside the VM, together with its arguments
+/// and environment variables.
+///
+/// Only available in aws-nitro builds. Non-nitro builds use
+/// Config::apply() with .krun_config.json instead.
 #[allow(clippy::format_collect)]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
+#[cfg(feature = "aws-nitro")]
 pub unsafe extern "C" fn krun_set_exec(
     ctx_id: u32,
     c_exec_path: *const c_char,
@@ -1170,9 +1202,9 @@ pub unsafe extern "C" fn krun_set_exec(
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
                 let cfg = ctx_cfg.get_mut();
-                cfg.set_exec_path(exec_path.to_string());
-                cfg.set_env(env);
-                cfg.set_args(args);
+                cfg.nitro.set_exec_path(exec_path.to_string());
+                cfg.nitro.set_env(env);
+                cfg.nitro.set_args(args);
             }
             Entry::Vacant(_) => return -libc::ENOENT,
         }
@@ -1181,9 +1213,14 @@ pub unsafe extern "C" fn krun_set_exec(
     }
 }
 
+/// Set the environment variables for the process to be run inside the VM.
+///
+/// Only available in aws-nitro builds. Non-nitro builds use
+/// Config::apply() with .krun_config.json instead.
 #[allow(clippy::format_collect)]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
+#[cfg(feature = "aws-nitro")]
 pub unsafe extern "C" fn krun_set_env(ctx_id: u32, c_envp: *const *const c_char) -> i32 {
     unsafe {
         let env = if !c_envp.is_null() {
@@ -1204,7 +1241,7 @@ pub unsafe extern "C" fn krun_set_env(ctx_id: u32, c_envp: *const *const c_char)
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
                 let cfg = ctx_cfg.get_mut();
-                cfg.set_env(env);
+                cfg.nitro.set_env(env);
             }
             Entry::Vacant(_) => return -libc::ENOENT,
         }
@@ -1696,10 +1733,10 @@ pub unsafe extern "C" fn krun_set_console_output(ctx_id: u32, c_filepath: *const
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
                 let cfg = ctx_cfg.get_mut();
-                if cfg.nitro_console_output.is_some() {
+                if cfg.nitro.console_output.is_some() {
                     -libc::EINVAL
                 } else {
-                    cfg.nitro_console_output = Some(PathBuf::from(filepath.to_string()));
+                    cfg.nitro.console_output = Some(PathBuf::from(filepath.to_string()));
                     KRUN_SUCCESS
                 }
             }
@@ -2248,7 +2285,6 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
 /// separated by spaces.
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub unsafe extern "C" fn krun_append_kernel_cmdline(ctx_id: u32, c_arg: *const c_char) -> i32 {
     if c_arg.is_null() {
         return -libc::EINVAL;
@@ -2813,22 +2849,14 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     }
 
     let mut prolog = DEFAULT_KERNEL_CMDLINE.to_string();
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     for arg in &ctx_cfg.extra_kernel_cmdline {
         prolog.push(' ');
         prolog.push_str(arg);
     }
     let kernel_cmdline = KernelCmdlineConfig {
         prolog: Some(prolog),
-        krun_env: Some(format!(
-            " {} {} {} {} {}",
-            ctx_cfg.get_exec_path(),
-            ctx_cfg.get_workdir(),
-            ctx_cfg.get_block_root(),
-            ctx_cfg.get_rlimits(),
-            ctx_cfg.get_env(),
-        )),
-        epilog: Some(format!(" -- {}", ctx_cfg.get_args())),
+        krun_env: Some(format!(" {}", ctx_cfg.get_block_root())),
+        epilog: None,
     };
 
     if ctx_cfg.vmr.set_kernel_cmdline(kernel_cmdline).is_err() {
