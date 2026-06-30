@@ -1032,6 +1032,8 @@ version = "2.0.0-dev"
 dependencies = [
  "crossbeam-channel",
  "env_logger",
+ "ffier",
+ "ffier-builtins",
  "krun-aws-nitro",
  "krun-devices",
  "krun-display",
