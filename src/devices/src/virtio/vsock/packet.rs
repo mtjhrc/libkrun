@@ -625,7 +625,7 @@ impl VsockPacket {
     }
 
     pub fn read_proxy_create(&self) -> Option<TsiProxyCreate> {
-        if self.buf_size >= 6 {
+        if self.buf_size >= 8 {
             let peer_port: u32 = byte_order::read_le_u32(&self.buf().unwrap()[0..]);
             let family: u16 = byte_order::read_le_u16(&self.buf().unwrap()[4..]);
             let _type: u16 = byte_order::read_le_u16(&self.buf().unwrap()[6..]);
