@@ -149,12 +149,9 @@ else
 	echo "(Run 'make' with BUILD_BSD_INIT=1 in the libkrun root to build FreeBSD assets.)"
 fi
 
-# Build runner args: pass through all arguments
-RUNNER_ARGS="$*"
-
 # Add --base-dir if KRUN_TEST_BASE_DIR is set
 if [ -n "${KRUN_TEST_BASE_DIR}" ]; then
-	RUNNER_ARGS="${RUNNER_ARGS} --base-dir ${KRUN_TEST_BASE_DIR}"
+	set -- "$@" --base-dir "${KRUN_TEST_BASE_DIR}"
 fi
 
 # Resolve gvproxy path: prefer explicit env var, then cached binary in
@@ -215,4 +212,4 @@ if [ -z "${KRUN_TEST_GVPROXY_PATH}" ]; then
 	fi
 fi
 
-target/debug/runner ${RUNNER_ARGS}
+exec target/debug/runner "$@"
