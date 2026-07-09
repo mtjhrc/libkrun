@@ -98,6 +98,26 @@ impl TestNetPerf {
         )
     }
 
+    pub fn new_vhost_user_passt_tx() -> Self {
+        Self::new_perf(
+            [169, 254, 2, 2],
+            15104,
+            false,
+            #[cfg(feature = "host")]
+            Box::new(crate::test_net::vhost_user_passt::VhostUserPasst),
+        )
+    }
+
+    pub fn new_vhost_user_passt_rx() -> Self {
+        Self::new_perf(
+            [169, 254, 2, 2],
+            15114,
+            true,
+            #[cfg(feature = "host")]
+            Box::new(crate::test_net::vhost_user_passt::VhostUserPasst),
+        )
+    }
+
     pub fn new_vmnet_helper_tx() -> Self {
         Self::new_perf(
             [192, 168, 105, 1],
