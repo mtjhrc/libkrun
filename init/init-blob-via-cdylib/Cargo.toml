@@ -18,3 +18,4 @@ pkg-config = "0.3"
 
 [dependencies]
 ffier = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }
+krun-via-cdylib-weak = { path = "../../src/libkrun-via-cdylib-weak" }

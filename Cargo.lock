@@ -857,7 +857,7 @@ dependencies = [
  "ffier-gen-c-header",
  "ffier-gen-rust-client",
  "ffier-schema",
- "libloading",
+ "krun-via-cdylib-weak",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -868,6 +868,7 @@ name = "krun-init-blob-via-cdylib"
 version = "0.1.0-1.18.1"
 dependencies = [
  "ffier",
+ "krun-via-cdylib-weak",
  "pkg-config",
 ]
 
