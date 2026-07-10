@@ -18,7 +18,7 @@ ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
 ffier-gen-c-header = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
 ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
 ffier-schema = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
-libloading = "0.8"
+krun-via-cdylib-weak = { path = "../../src/libkrun-via-cdylib-weak" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

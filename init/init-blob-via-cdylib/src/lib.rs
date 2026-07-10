@@ -5,6 +5,8 @@
     clippy::missing_safety_doc,
     clippy::needless_lifetimes
 )]
+use krun_via_cdylib_weak::{FsOverlay, Payload};
+
 /// Marker trait for types exported as opaque C handles.
 pub trait FfiHandle {
     const C_HANDLE_NAME: &'static str;
@@ -136,6 +138,49 @@ impl<T: FfiHandle + 'static> FfiType for &mut T {
     }
     unsafe fn from_c(_: *mut core::ffi::c_void) -> Self {
         unimplemented!("&mut T from_c")
+    }
+}
+
+impl FfiHandle for FsOverlay {
+    const C_HANDLE_NAME: &'static str =
+        <FsOverlay as krun_via_cdylib_weak::FfiHandle>::C_HANDLE_NAME;
+    const TYPE_TAG: u32 = <FsOverlay as krun_via_cdylib_weak::FfiHandle>::TYPE_TAG;
+    unsafe fn as_handle(&self) -> *mut core::ffi::c_void {
+        unsafe { krun_via_cdylib_weak::FfiHandle::as_handle(self) }
+    }
+    fn __from_raw(handle: *mut core::ffi::c_void) -> Self {
+        <FsOverlay as krun_via_cdylib_weak::FfiHandle>::__from_raw(handle)
+    }
+}
+impl FfiType for FsOverlay {
+    type CRepr = *mut core::ffi::c_void;
+    const C_TYPE_NAME: &'static str = <FsOverlay as krun_via_cdylib_weak::FfiHandle>::C_HANDLE_NAME;
+    fn into_c(self) -> *mut core::ffi::c_void {
+        krun_via_cdylib_weak::FfiType::into_c(self)
+    }
+    unsafe fn from_c(repr: *mut core::ffi::c_void) -> Self {
+        <FsOverlay as krun_via_cdylib_weak::FfiHandle>::__from_raw(repr)
+    }
+}
+
+impl FfiHandle for Payload {
+    const C_HANDLE_NAME: &'static str = <Payload as krun_via_cdylib_weak::FfiHandle>::C_HANDLE_NAME;
+    const TYPE_TAG: u32 = <Payload as krun_via_cdylib_weak::FfiHandle>::TYPE_TAG;
+    unsafe fn as_handle(&self) -> *mut core::ffi::c_void {
+        unsafe { krun_via_cdylib_weak::FfiHandle::as_handle(self) }
+    }
+    fn __from_raw(handle: *mut core::ffi::c_void) -> Self {
+        <Payload as krun_via_cdylib_weak::FfiHandle>::__from_raw(handle)
+    }
+}
+impl FfiType for Payload {
+    type CRepr = *mut core::ffi::c_void;
+    const C_TYPE_NAME: &'static str = <Payload as krun_via_cdylib_weak::FfiHandle>::C_HANDLE_NAME;
+    fn into_c(self) -> *mut core::ffi::c_void {
+        krun_via_cdylib_weak::FfiType::into_c(self)
+    }
+    unsafe fn from_c(repr: *mut core::ffi::c_void) -> Self {
+        <Payload as krun_via_cdylib_weak::FfiHandle>::__from_raw(repr)
     }
 }
 
@@ -314,51 +359,9 @@ impl std::fmt::Debug for ApplyErrorSymbolNotFoundData {
     }
 }
 
-pub struct ApplyErrorOverlayFileData(ApplyErrorErrorHandle);
-impl ApplyErrorOverlayFileData {
-    pub fn field_0(&self) -> i32 {
-        let mut __buf = std::mem::MaybeUninit::<<i32 as FfiType>::CRepr>::uninit();
-        unsafe {
-            krun_init_error_payload(
-                self.0.handle() as *const core::ffi::c_void,
-                __buf.as_mut_ptr() as *mut core::ffi::c_void,
-                core::mem::size_of::<<i32 as FfiType>::CRepr>(),
-            )
-        };
-        unsafe { <i32 as FfiType>::from_c(__buf.assume_init()) }
-    }
-}
-impl std::fmt::Debug for ApplyErrorOverlayFileData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OverlayFile(...)")
-    }
-}
-
-pub struct ApplyErrorKernelCmdlineData(ApplyErrorErrorHandle);
-impl ApplyErrorKernelCmdlineData {
-    pub fn field_0(&self) -> i32 {
-        let mut __buf = std::mem::MaybeUninit::<<i32 as FfiType>::CRepr>::uninit();
-        unsafe {
-            krun_init_error_payload(
-                self.0.handle() as *const core::ffi::c_void,
-                __buf.as_mut_ptr() as *mut core::ffi::c_void,
-                core::mem::size_of::<<i32 as FfiType>::CRepr>(),
-            )
-        };
-        unsafe { <i32 as FfiType>::from_c(__buf.assume_init()) }
-    }
-}
-impl std::fmt::Debug for ApplyErrorKernelCmdlineData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "KernelCmdline(...)")
-    }
-}
-
 #[derive(Debug)]
 pub enum ApplyError {
     SymbolNotFound(ApplyErrorSymbolNotFoundData),
-    OverlayFile(ApplyErrorOverlayFileData),
-    KernelCmdline(ApplyErrorKernelCmdlineData),
 }
 
 impl ApplyError {
@@ -367,16 +370,12 @@ impl ApplyError {
         let handle = ApplyErrorErrorHandle(err_handle);
         match code {
             1u32 => Self::SymbolNotFound(ApplyErrorSymbolNotFoundData(handle)),
-            2u32 => Self::OverlayFile(ApplyErrorOverlayFileData(handle)),
-            3u32 => Self::KernelCmdline(ApplyErrorKernelCmdlineData(handle)),
             other => panic!("unknown {} error code {}", "ApplyError", other),
         }
     }
     fn handle_ptr(&self) -> *mut core::ffi::c_void {
         match self {
             Self::SymbolNotFound(d) => d.0.handle(),
-            Self::OverlayFile(d) => d.0.handle(),
-            Self::KernelCmdline(d) => d.0.handle(),
         }
     }
 }
@@ -419,8 +418,8 @@ unsafe extern "C" {
     pub fn krun_init_config_apply(
         handle: *mut core::ffi::c_void,
         lib_handle: <*mut core::ffi::c_void as FfiType>::CRepr,
-        ctx_id: <u32 as FfiType>::CRepr,
-        fs_tag: <&'static str as FfiType>::CRepr,
+        overlay: <&'static mut FsOverlay as FfiType>::CRepr,
+        payload: <&'static mut Payload as FfiType>::CRepr,
         err_out: *mut *mut core::ffi::c_void,
     ) -> ffier::FfierResult;
 }
@@ -473,38 +472,27 @@ impl Config {
         let __raw = unsafe { krun_init_config_builder() };
         unsafe { <Builder as FfiType>::from_c(__raw) }
     }
-    #[doc = " Apply this init configuration to a libkrun VM context."]
+    #[doc = " Apply this init configuration to a libkrun VM."]
     #[doc = ""]
-    #[doc = " Adds the init binary and associated configuration file(s) as"]
-    #[doc = " overlay files on the specified virtiofs device, and appends"]
-    #[doc = " the appropriate kernel command line argument to specify the"]
-    #[doc = " init binary."]
+    #[doc = " Populates `overlay` with the init binary and config files,"]
+    #[doc = " and appends the init kernel cmdline arg to `payload`."]
     #[doc = ""]
-    #[doc = " `lib_handle` is the result of `dlopen(\"libkrun.so\")`. Pass NULL to"]
-    #[doc = " search the global symbol namespace (requires libkrun was linked or"]
-    #[doc = " opened with `RTLD_GLOBAL`)."]
-    #[doc = ""]
-    #[doc = " # Safety"]
-    #[doc = ""]
-    #[doc = " - If `lib_handle` is non-null it must be a valid handle returned by"]
-    #[doc = "   `dlopen` (or equivalent) that remains open for the duration of"]
-    #[doc = "   this call."]
-    #[doc = " - The caller must keep this `Config` alive for the entire lifetime"]
-    #[doc = "   of the VM. `apply` passes data pointers to libkrun that remain"]
-    #[doc = "   borrowed until the VM exits."]
+    #[doc = " `lib_handle` is a `dlopen` handle for libkrun.so (or null for"]
+    #[doc = " the global namespace). Used to load the symbols needed for"]
+    #[doc = " FsOverlay and Payload operations."]
     pub fn apply(
         &self,
         lib_handle: *mut core::ffi::c_void,
-        ctx_id: u32,
-        fs_tag: &str,
+        overlay: &mut FsOverlay,
+        payload: &mut Payload,
     ) -> Result<(), ApplyError> {
         let mut __err: *mut core::ffi::c_void = core::ptr::null_mut();
         let __r = unsafe {
             krun_init_config_apply(
                 self.0,
                 <*mut core::ffi::c_void as FfiType>::into_c(lib_handle),
-                <u32 as FfiType>::into_c(ctx_id),
-                <&str as FfiType>::into_c(fs_tag),
+                FfiHandle::as_handle(overlay),
+                FfiHandle::as_handle(payload),
                 &mut __err as *mut *mut core::ffi::c_void,
             )
         };
