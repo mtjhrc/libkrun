@@ -378,6 +378,7 @@ impl Default for FsOverlay {
     }
 }
 
+#[ffier::export]
 impl FsOverlay {
     /// Create a new empty overlay.
     pub fn new() -> Self {
@@ -387,9 +388,6 @@ impl FsOverlay {
     }
 
     /// Add a virtual directory entry.
-    ///
-    /// `path` may contain `/` separators for nested entries (e.g. `"etc/nested"`).
-    /// Intermediate directories must already exist in the overlay.
     pub fn add_dir(&mut self, path: &str, mode: u32) {
         let entry = VirtualEntry {
             mode,
@@ -402,9 +400,6 @@ impl FsOverlay {
     }
 
     /// Add a virtual file entry.
-    ///
-    /// `path` may contain `/` separators for nested entries (e.g. `"etc/nested/file.txt"`).
-    /// Intermediate directories must already exist in the overlay.
     pub fn add_file(&mut self, path: &str, data: &[u8], mode: u32, one_shot: bool) {
         let data: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
         let entry = VirtualEntry {
@@ -414,8 +409,9 @@ impl FsOverlay {
         };
         self.add_at_path(path, entry);
     }
+}
 
-    /// Consume the overlay and return the raw virtual directory entries.
+impl FsOverlay {
     pub fn into_entries(self) -> Vec<VirtualDirEntry> {
         self.entries
     }
