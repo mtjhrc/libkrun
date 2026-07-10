@@ -2,6 +2,7 @@ pub mod devices;
 pub mod error;
 pub mod logging;
 pub mod payload;
+pub mod vmm_builder;
 
 pub use devices::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
@@ -10,6 +11,7 @@ pub use devices::{
 pub use error::{DetailedError, Error};
 pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
 pub use payload::{KernelFormat, Payload};
+pub use vmm_builder::{Vmm, VmmBuilder};
 
 // Re-export from the external `devices` (krun-devices) crate.
 // Can't use `devices::` here because `pub mod devices` above shadows it.
@@ -26,6 +28,8 @@ ffier::library_definition!("krun", library_tag = 1,
     crate::api::devices::ConsoleDevice<'_> = 4,
     crate::api::devices::ConsoleBuilder<'_> = 5,
     crate::api::payload::Payload = 8,
+    crate::api::vmm_builder::VmmBuilder<'_> = 10,
+    crate::api::vmm_builder::Vmm<'_> = 11,
     crate::api::devices::AttachDevice for crate::api::devices::FsDevice,
     crate::api::devices::AttachDevice for crate::api::devices::ConsoleDevice,
     trait ffier_builtins::PushStr = 12,
