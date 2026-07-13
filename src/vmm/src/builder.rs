@@ -616,8 +616,9 @@ pub fn build_microvm(
         vm_resources.initrd_bundle.as_ref(),
         vm_resources.firmware_config.as_ref(),
         &fs_shm_sizes,
-        vm_resources.gpu_virgl_flags,
-        vm_resources.gpu_shm_size,
+        vm_resources
+            .gpu_virgl_flags
+            .map(|_| vm_resources.gpu_shm_size.unwrap_or(1 << 33)),
         {
             #[cfg(all(feature = "vhost-user", target_os = "linux"))]
             {
@@ -1599,7 +1600,6 @@ pub fn create_guest_memory(
     #[cfg(feature = "tee")] initrd_bundle: Option<&crate::vmm_config::kernel_bundle::InitrdBundle>,
     firmware_config: Option<&crate::vmm_config::firmware::FirmwareConfig>,
     fs_shm_sizes: &[Option<usize>],
-    gpu_virgl_flags: Option<u32>,
     gpu_shm_size: Option<usize>,
     use_vhost_user: bool,
     payload: &Payload,
@@ -1666,8 +1666,7 @@ pub fn create_guest_memory(
                 .map_err(StartMicrovmError::ShmCreate)?;
         }
     }
-    if gpu_virgl_flags.is_some() {
-        let size = gpu_shm_size.unwrap_or(1 << 33);
+    if let Some(size) = gpu_shm_size {
         shm_manager
             .create_gpu_region(size)
             .map_err(StartMicrovmError::ShmCreate)?;
@@ -2813,7 +2812,6 @@ pub mod tests {
             None,
             None,
             &[],
-            None,
             None,
             false,
             &Payload::Empty,

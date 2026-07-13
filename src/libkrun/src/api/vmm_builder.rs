@@ -215,15 +215,16 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
     let fs_shm_sizes: Vec<Option<usize>> = requirements.iter().map(|r| r.shm_size).collect();
 
     #[cfg(feature = "gpu")]
-    let (gpu_virgl_flags, gpu_shm_size) = {
-        let gpu_req = requirements.iter().find_map(|r| r.gpu_shm.as_ref());
-        match gpu_req {
-            Some(req) => (Some(req.virgl_flags), Some(req.shm_size)),
-            None => (None, None),
-        }
+    let gpu_shm_size: Option<usize> = {
+        let gpu_shms: Vec<_> = requirements.iter().filter_map(|r| r.gpu_shm).collect();
+        assert!(
+            gpu_shms.len() <= 1,
+            "multiple GPU SHM regions not implemented"
+        );
+        gpu_shms.into_iter().next()
     };
     #[cfg(not(feature = "gpu"))]
-    let (gpu_virgl_flags, gpu_shm_size): (Option<u32>, Option<usize>) = (None, None);
+    let gpu_shm_size: Option<usize> = None;
 
     // 4. Create guest memory
     let kernel_bundle_ref = kernel_bundle.as_ref();
@@ -236,7 +237,6 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         None,
         None, // firmware_config
         &fs_shm_sizes,
-        gpu_virgl_flags,
         gpu_shm_size,
         false, // use_vhost_user: v2 API doesn't support vhost-user yet
         &payload_type,
