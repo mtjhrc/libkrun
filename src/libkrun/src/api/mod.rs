@@ -4,6 +4,8 @@ pub mod logging;
 pub mod payload;
 pub mod vmm_builder;
 
+#[cfg(feature = "blk")]
+pub use devices::BlockDevice;
 pub use devices::{
     AttachContext, AttachDevice, BalloonDevice, ConsoleBuilder, ConsoleDevice, DeviceManager,
     DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion, RngDevice,
@@ -37,6 +39,10 @@ ffier::library_definition!("krun", library_tag = 1,
     crate::api::devices::AttachDevice for crate::api::devices::ConsoleDevice,
     crate::api::devices::RngDevice = 15,
     crate::api::devices::VsockDevice = 16,
+    #[cfg(feature = "blk")]
+    crate::api::devices::BlockDevice = 17,
+    #[cfg(feature = "blk")]
+    crate::api::devices::AttachDevice for crate::api::devices::BlockDevice,
     crate::api::devices::AttachDevice for crate::api::devices::BalloonDevice,
     crate::api::devices::AttachDevice for crate::api::devices::RngDevice,
     crate::api::devices::AttachDevice for crate::api::devices::VsockDevice,

@@ -19,14 +19,15 @@ typedef void* KrunVmm;
 typedef void* KrunBalloonDevice;
 typedef void* KrunRngDevice;
 typedef void* KrunVsockDevice;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
+typedef void* KrunBlockDevice;
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -408,6 +409,13 @@ void krun_vsock_device_add_unix_port(KrunVsockDevice handle, uint32_t port, Krun
 typedef void (*krun_vsock_device_add_unix_port_fn)(KrunVsockDevice handle, uint32_t port, KrunStr path, bool listen);
 void krun_vsock_device_destroy(KrunVsockDevice handle);
 typedef void (*krun_vsock_device_destroy_fn)(KrunVsockDevice handle);
+
+/* BlockDevice ------------------------------------------------------- */
+
+KrunBlockDevice krun_block_device_new(KrunStr id, KrunStr disk_image_path, bool is_read_only, KrunError* err_out);
+typedef KrunBlockDevice (*krun_block_device_new_fn)(KrunStr id, KrunStr disk_image_path, bool is_read_only, KrunError* err_out);
+void krun_block_device_destroy(KrunBlockDevice handle);
+typedef void (*krun_block_device_destroy_fn)(KrunBlockDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 
