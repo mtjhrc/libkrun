@@ -14,7 +14,7 @@ pub use devices::{
     VsockDevice,
 };
 #[cfg(feature = "gpu")]
-pub use devices::{DisplayBackend, DisplayInfoBuilder};
+pub use devices::{DisplayBackend, DisplayInfoBuilder, GpuDevice};
 pub use error::{DetailedError, Error};
 pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
 pub use payload::{KernelFormat, Payload};
