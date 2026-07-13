@@ -20,14 +20,15 @@ typedef void* KrunBalloonDevice;
 typedef void* KrunRngDevice;
 typedef void* KrunVsockDevice;
 typedef void* KrunBlockDevice;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
+typedef void* KrunNetDevice;
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunNetDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -416,6 +417,26 @@ KrunBlockDevice krun_block_device_new(KrunStr id, KrunStr disk_image_path, bool 
 typedef KrunBlockDevice (*krun_block_device_new_fn)(KrunStr id, KrunStr disk_image_path, bool is_read_only, KrunError* err_out);
 void krun_block_device_destroy(KrunBlockDevice handle);
 typedef void (*krun_block_device_destroy_fn)(KrunBlockDevice handle);
+
+/* NetDevice --------------------------------------------------------- */
+
+/** Create a net device backed by a Unix datagram socket path. */
+KrunNetDevice krun_net_device_new_unixgram_path(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, bool vfkit_magic, KrunError* err_out);
+typedef KrunNetDevice (*krun_net_device_new_unixgram_path_fn)(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, bool vfkit_magic, KrunError* err_out);
+/** Create a net device backed by a Unix datagram socket fd. */
+KrunNetDevice krun_net_device_new_unixgram_fd(KrunStr id, int32_t fd, KrunBytes mac, uint32_t features, KrunError* err_out);
+typedef KrunNetDevice (*krun_net_device_new_unixgram_fd_fn)(KrunStr id, int32_t fd, KrunBytes mac, uint32_t features, KrunError* err_out);
+/** Create a net device backed by a Unix stream socket path. */
+KrunNetDevice krun_net_device_new_unixstream_path(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, KrunError* err_out);
+typedef KrunNetDevice (*krun_net_device_new_unixstream_path_fn)(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, KrunError* err_out);
+/** Create a net device backed by a Unix stream socket fd. */
+KrunNetDevice krun_net_device_new_unixstream_fd(KrunStr id, int32_t fd, KrunBytes mac, uint32_t features, KrunError* err_out);
+typedef KrunNetDevice (*krun_net_device_new_unixstream_fd_fn)(KrunStr id, int32_t fd, KrunBytes mac, uint32_t features, KrunError* err_out);
+/** Create a net device backed by a TAP interface. */
+KrunNetDevice krun_net_device_new_tap(KrunStr id, KrunStr tap_name, KrunBytes mac, uint32_t features, KrunError* err_out);
+typedef KrunNetDevice (*krun_net_device_new_tap_fn)(KrunStr id, KrunStr tap_name, KrunBytes mac, uint32_t features, KrunError* err_out);
+void krun_net_device_destroy(KrunNetDevice handle);
+typedef void (*krun_net_device_destroy_fn)(KrunNetDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 

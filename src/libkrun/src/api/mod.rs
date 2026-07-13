@@ -6,6 +6,8 @@ pub mod vmm_builder;
 
 #[cfg(feature = "blk")]
 pub use devices::BlockDevice;
+#[cfg(feature = "net")]
+pub use devices::NetDevice;
 pub use devices::{
     AttachContext, AttachDevice, BalloonDevice, ConsoleBuilder, ConsoleDevice, DeviceManager,
     DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion, RngDevice,
@@ -41,7 +43,10 @@ ffier::library_definition!("krun", library_tag = 1,
     crate::api::devices::VsockDevice = 16,
     // TODO: gate behind cfg(feature = "blk") once ffier supports conditional entries
     crate::api::devices::BlockDevice = 17,
+    // TODO: gate behind cfg(feature = "net") once ffier supports conditional entries
+    crate::api::devices::NetDevice = 18,
     crate::api::devices::AttachDevice for crate::api::devices::BlockDevice,
+    crate::api::devices::AttachDevice for crate::api::devices::NetDevice,
     crate::api::devices::AttachDevice for crate::api::devices::BalloonDevice,
     crate::api::devices::AttachDevice for crate::api::devices::RngDevice,
     crate::api::devices::AttachDevice for crate::api::devices::VsockDevice,
