@@ -876,3 +876,34 @@ impl<'a> AttachDevice<'a> for ConsoleDevice<'a> {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// BalloonDevice
+// ---------------------------------------------------------------------------
+
+/// A virtio balloon device for dynamic memory management.
+pub struct BalloonDevice {
+    pub(crate) inner: Arc<Mutex<devices::virtio::Balloon>>,
+}
+
+#[ffier::export]
+impl BalloonDevice {
+    pub fn new() -> Result<Self, Error> {
+        let balloon = devices::virtio::Balloon::new().map_err(|e| {
+            log::error!("balloon: {e:?}");
+            Error::Internal()
+        })?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(balloon)),
+        })
+    }
+}
+
+#[ffier::export]
+impl<'a> AttachDevice<'a> for BalloonDevice {
+    #[ffier(skip)]
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
+        ctx.subscribe_events(self.inner.clone())?;
+        ctx.register("balloon", self.inner)
+    }
+}
