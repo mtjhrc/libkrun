@@ -439,6 +439,7 @@ dependencies = [
  "anyhow",
  "krun-init-blob-via-cdylib",
  "krun-via-cdylib-weak",
+ "libc",
  "libloading",
  "macros",
  "nix",

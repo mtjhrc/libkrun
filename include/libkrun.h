@@ -359,6 +359,13 @@ typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunMmioDevi
 void krun_vmm_builder_set_kernel_console(KrunVmmBuilder* handle, KrunStr console);
 typedef void (*krun_vmm_builder_set_kernel_console_fn)(KrunVmmBuilder* handle, KrunStr console);
 /**
+ * Set a file descriptor to use as the serial console (COM1) input.
+ *
+ * Ownership of the fd is transferred to the VM on [`build`](Self::build).
+ */
+void krun_vmm_builder_serial_input_fd(KrunVmmBuilder* handle, int fd);
+typedef void (*krun_vmm_builder_serial_input_fd_fn)(KrunVmmBuilder* handle, int fd);
+/**
  * Build the VM, creating guest memory, attaching devices, and starting
  * vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
  * must have been set.

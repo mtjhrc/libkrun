@@ -130,6 +130,14 @@ impl<'a> VmmBuilder<'a> {
         self
     }
 
+    /// Set a file descriptor to use as the serial console (COM1) input.
+    ///
+    /// Ownership of the fd is transferred to the VM on [`build`](Self::build).
+    pub fn serial_input_fd(mut self, fd: RawFd) -> Self {
+        self.serial_input_fd = Some(fd);
+        self
+    }
+
     /// Build the VM, creating guest memory, attaching devices, and starting
     /// vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
     /// must have been set.
@@ -138,18 +146,6 @@ impl<'a> VmmBuilder<'a> {
             log::error!("{e}");
             e.code
         })
-    }
-}
-
-impl<'a> VmmBuilder<'a> {
-    /// Set a file descriptor to use as the serial console (COM1) input.
-    ///
-    /// Ownership of the fd is transferred to the VM on [`build`](Self::build).
-    /// Used for FreeBSD guests that require serial console input (e.g. a pipe
-    /// read end to prevent kqueue busy-spin on macOS).
-    pub fn serial_input_fd(mut self, fd: RawFd) -> Self {
-        self.serial_input_fd = Some(fd);
-        self
     }
 }
 
