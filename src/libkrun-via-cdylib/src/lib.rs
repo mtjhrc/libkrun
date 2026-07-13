@@ -1194,6 +1194,10 @@ unsafe extern "C" {
         handle: *mut core::ffi::c_void,
         console: <&'static str as FfiType>::CRepr,
     );
+    pub fn krun_vmm_builder_serial_input_fd(
+        handle: *mut core::ffi::c_void,
+        fd: <RawFd as FfiType>::CRepr,
+    );
     pub fn krun_vmm_builder_build(
         handle: *mut core::ffi::c_void,
         err_out: *mut *mut core::ffi::c_void,
@@ -1337,6 +1341,22 @@ impl<'a> VmmBuilder<'a> {
             krun_vmm_builder_set_kernel_console(
                 &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
                 <&str as FfiType>::into_c(console),
+            )
+        };
+        Self(__handle, std::marker::PhantomData)
+    }
+    #[doc = " Set a file descriptor to use as the serial console (COM1) input."]
+    #[doc = ""]
+    #[doc = " Ownership of the fd is transferred to the VM on [`build`](Self::build)."]
+    pub fn serial_input_fd(self, fd: RawFd) -> Self {
+        let mut __handle = {
+            let this = std::mem::ManuallyDrop::new(self);
+            this.0
+        };
+        unsafe {
+            krun_vmm_builder_serial_input_fd(
+                &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
+                <RawFd as FfiType>::into_c(fd),
             )
         };
         Self(__handle, std::marker::PhantomData)

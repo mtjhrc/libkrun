@@ -88,6 +88,7 @@ pub fn require_vm_symbols() -> Result<(), libloading::Error> {
             KrunVmmBuilderVcpus,
             KrunVmmBuilderRamMib,
             KrunVmmBuilderPayload,
+            KrunVmmBuilderSerialInputFd,
             KrunVmmBuilderDevices,
             KrunVmmBuilderBuild,
             KrunBalloonDeviceNew,
