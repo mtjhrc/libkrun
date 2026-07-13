@@ -915,3 +915,34 @@ impl<'a> AttachDevice<'a> for BalloonDevice {
         ctx.register("balloon", self.inner)
     }
 }
+
+// ---------------------------------------------------------------------------
+// RngDevice
+// ---------------------------------------------------------------------------
+
+/// A virtio entropy source (RNG) device.
+pub struct RngDevice {
+    pub(crate) inner: Arc<Mutex<devices::virtio::Rng>>,
+}
+
+#[ffier::export]
+impl RngDevice {
+    pub fn new() -> Result<Self, Error> {
+        let rng = devices::virtio::Rng::new().map_err(|e| {
+            log::error!("rng: {e:?}");
+            Error::Internal()
+        })?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(rng)),
+        })
+    }
+}
+
+#[ffier::export]
+impl<'a> AttachDevice<'a> for RngDevice {
+    #[ffier(skip)]
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
+        ctx.subscribe_events(self.inner.clone())?;
+        ctx.register("rng", self.inner)
+    }
+}
