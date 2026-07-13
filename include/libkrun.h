@@ -17,14 +17,15 @@ typedef void* KrunPayload;
 typedef void* KrunVmmBuilder;
 typedef void* KrunVmm;
 typedef void* KrunBalloonDevice;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice */
+typedef void* KrunRngDevice;
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice | KrunRngDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -381,6 +382,13 @@ KrunBalloonDevice krun_balloon_device_new(KrunError* err_out);
 typedef KrunBalloonDevice (*krun_balloon_device_new_fn)(KrunError* err_out);
 void krun_balloon_device_destroy(KrunBalloonDevice handle);
 typedef void (*krun_balloon_device_destroy_fn)(KrunBalloonDevice handle);
+
+/* RngDevice --------------------------------------------------------- */
+
+KrunRngDevice krun_rng_device_new(KrunError* err_out);
+typedef KrunRngDevice (*krun_rng_device_new_fn)(KrunError* err_out);
+void krun_rng_device_destroy(KrunRngDevice handle);
+typedef void (*krun_rng_device_destroy_fn)(KrunRngDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 
