@@ -6,6 +6,8 @@ pub mod vmm_builder;
 
 #[cfg(feature = "blk")]
 pub use devices::BlockDevice;
+#[cfg(feature = "input")]
+pub use devices::InputDevice;
 #[cfg(feature = "net")]
 pub use devices::NetDevice;
 pub use devices::{

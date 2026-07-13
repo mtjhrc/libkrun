@@ -1335,3 +1335,82 @@ impl<'a> AttachDevice<'a> for GpuDevice {
         ctx.register(&id, inner)
     }
 }
+
+// ---------------------------------------------------------------------------
+// InputDevice
+// ---------------------------------------------------------------------------
+
+/// A virtio input device.
+#[cfg(feature = "input")]
+pub struct InputDevice {
+    config_backend: krun_input::InputConfigBackend<'static>,
+    events_backend: krun_input::InputEventProviderBackend<'static>,
+}
+
+#[cfg(feature = "input")]
+impl InputDevice {
+    /// Create from explicit config and events backends.
+    ///
+    /// # Safety
+    ///
+    /// `config_backend` and `event_provider_backend` must point to valid
+    /// backend structs of the correct size. The structs are copied.
+    pub unsafe fn new(
+        config_backend: *const std::ffi::c_void,
+        config_backend_size: usize,
+        event_provider_backend: *const std::ffi::c_void,
+        event_provider_backend_size: usize,
+    ) -> Result<Self, Error> {
+        use krun_input::{InputConfigBackend, InputEventProviderBackend};
+
+        if config_backend.is_null() || event_provider_backend.is_null() {
+            return Err(Error::InvalidParam());
+        }
+        if config_backend_size < std::mem::size_of::<InputConfigBackend>()
+            || event_provider_backend_size < std::mem::size_of::<InputEventProviderBackend>()
+        {
+            return Err(Error::InvalidParam());
+        }
+
+        let config = unsafe { *(config_backend as *const InputConfigBackend) };
+        let events = unsafe { *(event_provider_backend as *const InputEventProviderBackend) };
+
+        if !config.verify() || !events.verify() {
+            return Err(Error::InvalidParam());
+        }
+
+        Ok(Self {
+            config_backend: config,
+            events_backend: events,
+        })
+    }
+
+    /// Create from an input device fd (e.g. `/dev/input/eventN`).
+    pub fn new_from_fd(input_fd: i32) -> Result<Self, Error> {
+        use devices::virtio::input::passthrough::PassthroughInputBackend;
+        use krun_input::{IntoInputConfig, IntoInputEvents};
+
+        if input_fd < 0 {
+            return Err(Error::BadFd());
+        }
+
+        let fd = unsafe { BorrowedFd::borrow_raw(input_fd) };
+        let borrowed_fd: &'static BorrowedFd<'static> = Box::leak(Box::new(fd));
+
+        Ok(Self {
+            config_backend: PassthroughInputBackend::into_input_config(Some(borrowed_fd)),
+            events_backend: PassthroughInputBackend::into_input_events(Some(borrowed_fd)),
+        })
+    }
+}
+
+#[cfg(feature = "input")]
+impl<'a> AttachDevice<'a> for InputDevice {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
+        let input = devices::virtio::input::Input::new(self.config_backend, self.events_backend)
+            .map_err(|e| DetailedError::new(Error::Internal(), format!("input: {e:?}")))?;
+        let inner = Arc::new(Mutex::new(input));
+        let id = format!("input{}", ctx.device_index());
+        ctx.register(&id, inner)
+    }
+}
