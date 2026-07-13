@@ -778,9 +778,12 @@ unsafe extern "C" {
         result: *mut <u32 as FfiType>::CRepr,
         err_out: *mut *mut core::ffi::c_void,
     ) -> ffier::FfierResult;
-    pub fn krun_console_builder_set_kernel_console(
+    pub fn krun_console_builder_add_inout_port(
         handle: *mut core::ffi::c_void,
-        port_index: <u32 as FfiType>::CRepr,
+        name: <&'static str as FfiType>::CRepr,
+        input_fd: <i32 as FfiType>::CRepr,
+        output_fd: <i32 as FfiType>::CRepr,
+        result: *mut <u32 as FfiType>::CRepr,
         err_out: *mut *mut core::ffi::c_void,
     ) -> ffier::FfierResult;
     pub fn krun_console_builder_build(
@@ -851,7 +854,7 @@ impl<'a> ConsoleBuilder<'a> {
     #[doc = ""]
     #[doc = " # Returns"]
     #[doc = ""]
-    #[doc = " The zero-based port index, usable with [`set_kernel_console`](ConsoleBuilder::set_kernel_console)."]
+    #[doc = " The zero-based port index."]
     pub fn add_tty_port(&mut self, name: &str, tty_fd: BorrowedFd<'a>) -> Result<u32, Error> {
         let mut __out = std::mem::MaybeUninit::uninit();
         let mut __err: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -875,17 +878,28 @@ impl<'a> ConsoleBuilder<'a> {
     #[doc = " # Arguments"]
     #[doc = ""]
     #[doc = " - `port_index`: a value returned by [`add_tty_port`](ConsoleBuilder::add_tty_port)."]
-    pub fn set_kernel_console(&mut self, port_index: u32) -> Result<(), Error> {
+    #[doc = " Add a port with separate input and output fds (no terminal properties)."]
+    #[doc = " Pass -1 for input_fd or output_fd to disable that direction."]
+    pub fn add_inout_port(
+        &mut self,
+        name: &str,
+        input_fd: i32,
+        output_fd: i32,
+    ) -> Result<u32, Error> {
+        let mut __out = std::mem::MaybeUninit::uninit();
         let mut __err: *mut core::ffi::c_void = core::ptr::null_mut();
         let __r = unsafe {
-            krun_console_builder_set_kernel_console(
+            krun_console_builder_add_inout_port(
                 self.0,
-                <u32 as FfiType>::into_c(port_index),
+                <&str as FfiType>::into_c(name),
+                <i32 as FfiType>::into_c(input_fd),
+                <i32 as FfiType>::into_c(output_fd),
+                __out.as_mut_ptr(),
                 &mut __err as *mut *mut core::ffi::c_void,
             )
         };
         if __r == 0 {
-            Ok(())
+            Ok(unsafe { <u32 as FfiType>::from_c(__out.assume_init()) })
         } else {
             Err(Error::from_ffi(__r, __err))
         }
@@ -1176,6 +1190,10 @@ unsafe extern "C" {
         handle: *mut core::ffi::c_void,
         devices: <MmioDeviceManager<'static> as FfiType>::CRepr,
     );
+    pub fn krun_vmm_builder_set_kernel_console(
+        handle: *mut core::ffi::c_void,
+        console: <&'static str as FfiType>::CRepr,
+    );
     pub fn krun_vmm_builder_build(
         handle: *mut core::ffi::c_void,
         err_out: *mut *mut core::ffi::c_void,
@@ -1301,6 +1319,24 @@ impl<'a> VmmBuilder<'a> {
             krun_vmm_builder_devices(
                 &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
                 <MmioDeviceManager<'a> as FfiType>::into_c(devices),
+            )
+        };
+        Self(__handle, std::marker::PhantomData)
+    }
+    #[doc = " Override the kernel `console=` parameter."]
+    #[doc = ""]
+    #[doc = " For example, `\"hvc0\"` routes kernel messages to the first"]
+    #[doc = " virtio console device. If not set, the default from the kernel"]
+    #[doc = " cmdline is used."]
+    pub fn set_kernel_console(self, console: &str) -> Self {
+        let mut __handle = {
+            let this = std::mem::ManuallyDrop::new(self);
+            this.0
+        };
+        unsafe {
+            krun_vmm_builder_set_kernel_console(
+                &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
+                <&str as FfiType>::into_c(console),
             )
         };
         Self(__handle, std::marker::PhantomData)

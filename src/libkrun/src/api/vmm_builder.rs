@@ -58,8 +58,9 @@ pub struct VmmBuilder<'a> {
     kernel: Option<Payload>,
     device_manager: Option<Box<dyn DeviceManager<'a> + 'a>>,
     /// Optional raw fd to use as serial console (COM1) input.
-    /// Ownership of the fd is transferred to the VM on build.
     serial_input_fd: Option<RawFd>,
+    /// Override the kernel `console=` parameter (e.g. `"hvc0"`).
+    kernel_console: Option<String>,
 }
 
 impl Default for VmmBuilder<'_> {
@@ -78,6 +79,7 @@ impl<'a> VmmBuilder<'a> {
             kernel: None,
             device_manager: None,
             serial_input_fd: None,
+            kernel_console: None,
         }
     }
 
@@ -115,6 +117,16 @@ impl<'a> VmmBuilder<'a> {
     /// only [`MmioDeviceManager`] for virtio-mmio).
     pub fn devices(mut self, devices: MmioDeviceManager<'a>) -> Self {
         self.device_manager = Some(Box::new(devices));
+        self
+    }
+
+    /// Override the kernel `console=` parameter.
+    ///
+    /// For example, `"hvc0"` routes kernel messages to the first
+    /// virtio console device. If not set, the default from the kernel
+    /// cmdline is used.
+    pub fn set_kernel_console(mut self, console: &str) -> Self {
+        self.kernel_console = Some(console.to_string());
         self
     }
 
@@ -192,6 +204,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         )
     })?;
     let serial_input_fd = builder_cfg.serial_input_fd;
+    let kernel_console = builder_cfg.kernel_console;
 
     // 1. Extract kernel, payload type, and cmdline from Payload
     let loaded_kernel = builder_cfg
@@ -246,6 +259,23 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         kernel_cmdline
             .insert_str(&kernel_cmdline_str)
             .map_err(|e| DetailedError::new(Error::Internal(), format!("cmdline: {e:?}")))?;
+    }
+
+    // TODO: extract this into a shared function in vmm::builder and call
+    // from both here and build_microvm() to eliminate the copypasta.
+    if let Some(kernel_console) = &kernel_console {
+        let cmdline = kernel_cmdline.as_str();
+        let console_start_idx = cmdline.find("console=").unwrap();
+        let console_end_idx = cmdline
+            .get(console_start_idx..)
+            .and_then(|s| s.find(" ").map(|i| i + console_start_idx));
+
+        let cmdline = cmdline.replace(
+            &cmdline[console_start_idx..console_end_idx.unwrap()],
+            format!("console={kernel_console}").as_str(),
+        );
+        kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
+        kernel_cmdline.insert_str(cmdline).unwrap();
     }
 
     log::info!("kernel cmdline: {}", kernel_cmdline.as_str());

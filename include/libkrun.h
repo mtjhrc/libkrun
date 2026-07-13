@@ -254,7 +254,7 @@ typedef void (*krun_console_device_destroy_fn)(KrunConsoleDevice handle);
  *
  * # Returns
  *
- * The zero-based port index, usable with [`set_kernel_console`](ConsoleBuilder::set_kernel_console).
+ * The zero-based port index.
  */
 KrunResult krun_console_builder_add_tty_port(KrunConsoleBuilder handle, KrunStr name, int tty_fd, uint32_t* result, KrunError* err_out);
 typedef KrunResult (*krun_console_builder_add_tty_port_fn)(KrunConsoleBuilder handle, KrunStr name, int tty_fd, uint32_t* result, KrunError* err_out);
@@ -264,9 +264,11 @@ typedef KrunResult (*krun_console_builder_add_tty_port_fn)(KrunConsoleBuilder ha
  * # Arguments
  *
  * - `port_index`: a value returned by [`add_tty_port`](ConsoleBuilder::add_tty_port).
+ * Add a port with separate input and output fds (no terminal properties).
+ * Pass -1 for input_fd or output_fd to disable that direction.
  */
-KrunResult krun_console_builder_set_kernel_console(KrunConsoleBuilder handle, uint32_t port_index, KrunError* err_out);
-typedef KrunResult (*krun_console_builder_set_kernel_console_fn)(KrunConsoleBuilder handle, uint32_t port_index, KrunError* err_out);
+KrunResult krun_console_builder_add_inout_port(KrunConsoleBuilder handle, KrunStr name, int32_t input_fd, int32_t output_fd, uint32_t* result, KrunError* err_out);
+typedef KrunResult (*krun_console_builder_add_inout_port_fn)(KrunConsoleBuilder handle, KrunStr name, int32_t input_fd, int32_t output_fd, uint32_t* result, KrunError* err_out);
 /** Build the console device. At least one port must have been added. */
 KrunConsoleDevice krun_console_builder_build(KrunConsoleBuilder handle, KrunError* err_out);
 typedef KrunConsoleDevice (*krun_console_builder_build_fn)(KrunConsoleBuilder handle, KrunError* err_out);
@@ -342,6 +344,15 @@ typedef void (*krun_vmm_builder_payload_fn)(KrunVmmBuilder* handle, KrunPayload 
  */
 void krun_vmm_builder_devices(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
 typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
+/**
+ * Override the kernel `console=` parameter.
+ *
+ * For example, `"hvc0"` routes kernel messages to the first
+ * virtio console device. If not set, the default from the kernel
+ * cmdline is used.
+ */
+void krun_vmm_builder_set_kernel_console(KrunVmmBuilder* handle, KrunStr console);
+typedef void (*krun_vmm_builder_set_kernel_console_fn)(KrunVmmBuilder* handle, KrunStr console);
 /**
  * Build the VM, creating guest memory, attaching devices, and starting
  * vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
