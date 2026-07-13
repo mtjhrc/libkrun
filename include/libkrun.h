@@ -18,14 +18,15 @@ typedef void* KrunVmmBuilder;
 typedef void* KrunVmm;
 typedef void* KrunBalloonDevice;
 typedef void* KrunRngDevice;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice | KrunRngDevice */
+typedef void* KrunVsockDevice;
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -389,6 +390,24 @@ KrunRngDevice krun_rng_device_new(KrunError* err_out);
 typedef KrunRngDevice (*krun_rng_device_new_fn)(KrunError* err_out);
 void krun_rng_device_destroy(KrunRngDevice handle);
 typedef void (*krun_rng_device_destroy_fn)(KrunRngDevice handle);
+
+/* VsockDevice ------------------------------------------------------- */
+
+/**
+ * Create a new vsock device.
+ *
+ * `tsi_features` is a bitmask of TSI flags (0 to disable).
+ */
+KrunVsockDevice krun_vsock_device_new(uint64_t cid, uint32_t tsi_features, KrunError* err_out);
+typedef KrunVsockDevice (*krun_vsock_device_new_fn)(uint64_t cid, uint32_t tsi_features, KrunError* err_out);
+/** Add a host port forwarding: `"guest_port:host_port"`. */
+KrunResult krun_vsock_device_add_port_forward(KrunVsockDevice handle, KrunStr mapping, KrunError* err_out);
+typedef KrunResult (*krun_vsock_device_add_port_forward_fn)(KrunVsockDevice handle, KrunStr mapping, KrunError* err_out);
+/** Add a Unix socket port mapping. */
+void krun_vsock_device_add_unix_port(KrunVsockDevice handle, uint32_t port, KrunStr path, bool listen);
+typedef void (*krun_vsock_device_add_unix_port_fn)(KrunVsockDevice handle, uint32_t port, KrunStr path, bool listen);
+void krun_vsock_device_destroy(KrunVsockDevice handle);
+typedef void (*krun_vsock_device_destroy_fn)(KrunVsockDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 
