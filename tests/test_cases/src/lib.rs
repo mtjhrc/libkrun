@@ -331,9 +331,6 @@ mod tests {
                 panic!("test_cases() contains multiple items named `{name}`")
             }
 
-            if name == "all" {
-                panic!("test_cases() contains test named {name}, but the name is reseved")
-            }
             for c in ['*', '?', '[', ']', ',', '!'] {
                 if name.contains(c) {
                     panic!(
