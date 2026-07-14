@@ -267,7 +267,7 @@ test-prefix: test-prefix/$(LIBDIR_$(OS))/libkrun.pc
 	fi
 endif
 
-TEST ?= all
+TEST ?= *
 TEST_FLAGS ?=
 
 # Extra library paths needed for tests (libkrunfw, llvm)

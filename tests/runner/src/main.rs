@@ -357,37 +357,30 @@ fn run_tests(
     let mut results: Vec<TestResult> = Vec::new();
     let all_tests = test_cases();
 
-    let tests_to_run: Vec<_> = if test_case == "all" {
-        all_tests
-    } else {
-        let mut include: Vec<glob::Pattern> = Vec::new();
-        let mut exclude: Vec<glob::Pattern> = Vec::new();
-        for p in test_case.split(',').map(|p| p.trim()) {
-            if let Some(neg) = p.strip_prefix('!') {
-                exclude.push(
-                    glob::Pattern::new(neg)
-                        .with_context(|| format!("invalid glob pattern: {p}"))?,
-                );
-            } else {
-                include.push(
-                    glob::Pattern::new(p).with_context(|| format!("invalid glob pattern: {p}"))?,
-                );
-            }
-        }
-        if include.is_empty() {
-            anyhow::bail!(
-                "No include patterns given (only exclusions). Use e.g. \"*,{test_case}\" to exclude."
+    let mut include: Vec<glob::Pattern> = Vec::new();
+    let mut exclude: Vec<glob::Pattern> = Vec::new();
+    for p in test_case.split(',').map(|p| p.trim()) {
+        if let Some(neg) = p.strip_prefix('!') {
+            exclude.push(
+                glob::Pattern::new(neg).with_context(|| format!("invalid glob pattern: {p}"))?,
             );
+        } else {
+            include
+                .push(glob::Pattern::new(p).with_context(|| format!("invalid glob pattern: {p}"))?);
         }
+    }
+    if include.is_empty() {
+        anyhow::bail!(
+            "No include patterns given (only exclusions). Use e.g. \"*,{test_case}\" to exclude."
+        );
+    }
 
-        all_tests
-            .into_iter()
-            .filter(|t| {
-                include.iter().any(|p| p.matches(t.name))
-                    && !exclude.iter().any(|p| p.matches(t.name))
-            })
-            .collect()
-    };
+    let tests_to_run: Vec<_> = all_tests
+        .into_iter()
+        .filter(|t| {
+            include.iter().any(|p| p.matches(t.name)) && !exclude.iter().any(|p| p.matches(t.name))
+        })
+        .collect();
 
     if tests_to_run.is_empty() {
         anyhow::bail!("No tests matched: {test_case}");
@@ -452,8 +445,8 @@ fn run_tests(
 #[derive(clap::Subcommand, Clone, Debug)]
 enum CliCommand {
     Test {
-        /// Test(s) to run: "all", a name, or comma-separated glob patterns (e.g. "net-*,!net-tap")
-        #[arg(long, default_value = "all")]
+        /// Test(s) to run: a name or comma-separated glob patterns (e.g. "net-*,!net-tap")
+        #[arg(long, default_value = "*")]
         test_case: String,
         /// Base directory for test artifacts
         #[arg(long)]
@@ -476,7 +469,7 @@ enum CliCommand {
 impl Default for CliCommand {
     fn default() -> Self {
         Self::Test {
-            test_case: "all".to_string(),
+            test_case: "*".to_string(),
             base_dir: None,
             keep_all: false,
             github_summary: false,
