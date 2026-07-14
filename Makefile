@@ -248,7 +248,24 @@ test-prefix/$(LIBDIR_$(OS))/libkrun.pc: $(LIBRARY_RELEASE_$(OS))
 	mkdir -p test-prefix
 	PREFIX="$$(realpath test-prefix)" make install
 
+# Build and install libkrunfw from a source tree into test-prefix.
+# Usage: make test LIBKRUNFW_SRC=/path/to/libkrunfw
+ifdef LIBKRUNFW_SRC
+.PHONY: test-prefix-libkrunfw
+test-prefix-libkrunfw:
+	$(MAKE) -C $(LIBKRUNFW_SRC)
+	mkdir -p test-prefix
+	PREFIX="$$(realpath test-prefix)" $(MAKE) -C $(LIBKRUNFW_SRC) install
+
+test-prefix: test-prefix/$(LIBDIR_$(OS))/libkrun.pc test-prefix-libkrunfw
+else
 test-prefix: test-prefix/$(LIBDIR_$(OS))/libkrun.pc
+	@if ls test-prefix/$(LIBDIR_$(OS))/libkrunfw* >/dev/null 2>&1; then \
+		echo "WARNING: test-prefix contains a custom libkrunfw from a previous LIBKRUNFW_SRC= run." >&2; \
+		echo "         Tests will use it instead of the system libkrunfw." >&2; \
+		echo "         To reset, run: rm -rf test-prefix" >&2; \
+	fi
+endif
 
 TEST ?= all
 TEST_FLAGS ?=
