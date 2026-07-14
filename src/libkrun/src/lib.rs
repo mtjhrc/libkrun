@@ -123,8 +123,9 @@ fn init_virtual_entry() -> VirtualDirEntry {
     }
 }
 
-static KRUNFW: LazyLock<Option<libloading::Library>> =
-    LazyLock::new(|| unsafe { libloading::Library::new(KRUNFW_NAME).ok() });
+static KRUNFW: LazyLock<Result<libloading::Library, String>> = LazyLock::new(|| unsafe {
+    libloading::Library::new(KRUNFW_NAME).map_err(|err| err.to_string())
+});
 
 pub struct KrunfwBindings {
     get_kernel: libloading::Symbol<
@@ -138,30 +139,47 @@ pub struct KrunfwBindings {
 }
 
 impl KrunfwBindings {
-    fn load_bindings() -> Result<KrunfwBindings, libloading::Error> {
-        let krunfw = match KRUNFW.as_ref() {
-            Some(krunfw) => krunfw,
-            None => return Err(libloading::Error::DlOpenUnknown),
-        };
+    fn load_bindings() -> Result<KrunfwBindings, String> {
+        let krunfw = KRUNFW.as_ref().map_err(|err| err.clone())?;
         Ok(unsafe {
             KrunfwBindings {
-                get_kernel: krunfw.get(b"krunfw_get_kernel")?,
+                get_kernel: krunfw
+                    .get(b"krunfw_get_kernel")
+                    .map_err(|err| err.to_string())?,
                 #[cfg(feature = "tee")]
-                get_initrd: krunfw.get(b"krunfw_get_initrd")?,
+                get_initrd: krunfw
+                    .get(b"krunfw_get_initrd")
+                    .map_err(|err| err.to_string())?,
                 #[cfg(feature = "tee")]
-                get_qboot: krunfw.get(b"krunfw_get_qboot")?,
+                get_qboot: krunfw
+                    .get(b"krunfw_get_qboot")
+                    .map_err(|err| err.to_string())?,
             }
         })
     }
 
-    pub fn new() -> Option<Self> {
-        Self::load_bindings().ok()
+    pub fn new() -> Result<Self, String> {
+        Self::load_bindings()
+    }
+}
+
+struct KrunfwBindingsResult(Result<KrunfwBindings, String>);
+
+impl Default for KrunfwBindingsResult {
+    fn default() -> Self {
+        Self(KrunfwBindings::new())
+    }
+}
+
+impl KrunfwBindingsResult {
+    fn as_ref(&self) -> Result<&KrunfwBindings, &String> {
+        self.0.as_ref()
     }
 }
 
 #[derive(Default)]
 struct ContextConfig {
-    krunfw: Option<KrunfwBindings>,
+    krunfw: KrunfwBindingsResult,
     vmr: VmResources,
     workdir: Option<String>,
     exec_path: Option<String>,
@@ -518,7 +536,6 @@ pub extern "C" fn krun_create_ctx() -> i32 {
 
     let ctx_cfg = {
         ContextConfig {
-            krunfw: KrunfwBindings::new(),
             shutdown_efd,
             ..Default::default()
         }
@@ -2860,14 +2877,17 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         && ctx_cfg.vmr.kernel_bundle.is_none()
         && ctx_cfg.vmr.firmware_config.is_none()
     {
-        if let Some(ref krunfw) = ctx_cfg.krunfw {
-            if let Err(err) = unsafe { load_krunfw_payload(krunfw, &mut ctx_cfg.vmr) } {
-                eprintln!("Can't load libkrunfw symbols: {err}");
+        match ctx_cfg.krunfw.as_ref() {
+            Ok(krunfw) => {
+                if let Err(err) = unsafe { load_krunfw_payload(krunfw, &mut ctx_cfg.vmr) } {
+                    eprintln!("Can't load libkrunfw symbols: {err}");
+                    return -libc::ENOENT;
+                }
+            }
+            Err(err) => {
+                eprintln!("Couldn't find or load {KRUNFW_NAME}: {err}");
                 return -libc::ENOENT;
             }
-        } else {
-            eprintln!("Couldn't find or load {KRUNFW_NAME}");
-            return -libc::ENOENT;
         }
     }
 
