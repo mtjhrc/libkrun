@@ -334,6 +334,13 @@ mod tests {
             if name == "all" {
                 panic!("test_cases() contains test named {name}, but the name is reseved")
             }
+            for c in ['*', '?', '[', ']', ',', '!'] {
+                if name.contains(c) {
+                    panic!(
+                        "test name `{name}` contains `{c}`, which is reserved for the test selection syntax"
+                    )
+                }
+            }
         }
     }
 }
