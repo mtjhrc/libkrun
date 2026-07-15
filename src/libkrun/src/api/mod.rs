@@ -10,6 +10,8 @@ pub use devices::BlockDevice;
 pub use devices::InputDevice;
 #[cfg(feature = "net")]
 pub use devices::NetDevice;
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+pub use devices::VhostUserDevice;
 pub use devices::{
     AttachContext, AttachDevice, BalloonDevice, ConsoleBuilder, ConsoleDevice, DeviceManager,
     DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion, RngDevice,
@@ -53,6 +55,10 @@ ffier::library_definition!("krun", library_tag = 1,
     crate::api::devices::NetDevice = 18,
     #[cfg(feature = "net")]
     crate::api::devices::AttachDevice for crate::api::devices::NetDevice,
+    #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+    crate::api::devices::VhostUserDevice = 19,
+    #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+    crate::api::devices::AttachDevice for crate::api::devices::VhostUserDevice,
     crate::api::devices::AttachDevice for crate::api::devices::BalloonDevice,
     crate::api::devices::AttachDevice for crate::api::devices::RngDevice,
     crate::api::devices::AttachDevice for crate::api::devices::VsockDevice,

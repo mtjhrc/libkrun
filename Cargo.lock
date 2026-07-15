@@ -858,6 +858,7 @@ dependencies = [
  "ffier-gen-rust-client",
  "ffier-schema",
  "krun-via-cdylib-weak",
+ "libloading",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

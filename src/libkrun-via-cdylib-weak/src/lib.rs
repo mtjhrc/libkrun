@@ -2771,6 +2771,133 @@ impl Drop for NetDevice {
     }
 }
 
+static KRUN_VHOST_USER_DEVICE_DESTROY: std::sync::OnceLock<
+    unsafe extern "C" fn(*mut core::ffi::c_void),
+> = std::sync::OnceLock::new();
+#[allow(non_snake_case)]
+pub unsafe fn krun_vhost_user_device_destroy(handle: *mut core::ffi::c_void) {
+    unsafe {
+        (KRUN_VHOST_USER_DEVICE_DESTROY
+            .get()
+            .expect("symbol `krun_vhost_user_device_destroy` not loaded; call require() first"))(
+            handle,
+        )
+    }
+}
+
+static KRUN_VHOST_USER_DEVICE_NEW: std::sync::OnceLock<
+    unsafe extern "C" fn(
+        <u32 as FfiType>::CRepr,
+        <&'static str as FfiType>::CRepr,
+        <&'static str as FfiType>::CRepr,
+        <u16 as FfiType>::CRepr,
+        *const <u16 as FfiType>::CRepr,
+        usize,
+        *mut *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void,
+> = std::sync::OnceLock::new();
+#[allow(non_snake_case)]
+pub unsafe fn krun_vhost_user_device_new(
+    device_type: <u32 as FfiType>::CRepr,
+    socket_path: <&'static str as FfiType>::CRepr,
+    name: <&'static str as FfiType>::CRepr,
+    num_queues: <u16 as FfiType>::CRepr,
+    queue_sizes: *const <u16 as FfiType>::CRepr,
+    queue_sizes_len: usize,
+    err_out: *mut *mut core::ffi::c_void,
+) -> *mut core::ffi::c_void {
+    unsafe {
+        (KRUN_VHOST_USER_DEVICE_NEW
+            .get()
+            .expect("symbol `krun_vhost_user_device_new` not loaded; call require() first"))(
+            device_type,
+            socket_path,
+            name,
+            num_queues,
+            queue_sizes,
+            queue_sizes_len,
+            err_out,
+        )
+    }
+}
+
+pub struct VhostUserDevice(*mut core::ffi::c_void);
+
+impl VhostUserDevice {
+    #[doc(hidden)]
+    pub fn __from_raw(ptr: *mut core::ffi::c_void) -> Self {
+        Self(ptr)
+    }
+    #[doc(hidden)]
+    pub fn __into_raw(self) -> *mut core::ffi::c_void {
+        let this = std::mem::ManuallyDrop::new(self);
+        this.0
+    }
+}
+
+impl FfiHandle for VhostUserDevice {
+    const C_HANDLE_NAME: &'static str = "KrunVhostUserDevice";
+    const TYPE_TAG: u32 = 16777235u32;
+    unsafe fn as_handle(&self) -> *mut core::ffi::c_void {
+        self.0
+    }
+    fn __from_raw(handle: *mut core::ffi::c_void) -> Self {
+        Self(handle)
+    }
+}
+
+impl FfiType for VhostUserDevice {
+    type CRepr = *mut core::ffi::c_void;
+    const C_TYPE_NAME: &'static str = "VhostUserDevice";
+    fn into_c(self) -> *mut core::ffi::c_void {
+        self.__into_raw()
+    }
+    unsafe fn from_c(repr: *mut core::ffi::c_void) -> Self {
+        Self::__from_raw(repr)
+    }
+}
+
+impl std::fmt::Debug for VhostUserDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("VhostUserDevice").field(&self.0).finish()
+    }
+}
+
+impl VhostUserDevice {
+    pub fn new(
+        device_type: u32,
+        socket_path: &str,
+        name: &str,
+        num_queues: u16,
+        queue_sizes: &[u16],
+    ) -> Result<VhostUserDevice, Error> {
+        let mut __err: *mut core::ffi::c_void = core::ptr::null_mut();
+        let __raw = unsafe {
+            krun_vhost_user_device_new(
+                <u32 as FfiType>::into_c(device_type),
+                <&str as FfiType>::into_c(socket_path),
+                <&str as FfiType>::into_c(name),
+                <u16 as FfiType>::into_c(num_queues),
+                queue_sizes.as_ptr(),
+                queue_sizes.len(),
+                &mut __err as *mut *mut core::ffi::c_void,
+            )
+        };
+        if !__raw.is_null() {
+            Ok(unsafe { <VhostUserDevice as FfiType>::from_c(__raw) })
+        } else {
+            let __r = unsafe { krun_error_result(__err) };
+            Err(Error::from_ffi(__r, __err))
+        }
+    }
+}
+
+impl Drop for VhostUserDevice {
+    fn drop(&mut self) {
+        unsafe { krun_vhost_user_device_destroy(self.0) }
+    }
+}
+
 pub trait PushStr {
     fn push(&mut self, s: &str) -> bool;
     #[doc(hidden)]
@@ -2923,6 +3050,13 @@ impl<'a> AttachDevice<'a> for BlockDevice {
 }
 
 impl<'a> AttachDevice<'a> for NetDevice {
+    fn __into_raw_handle(self) -> *mut core::ffi::c_void {
+        let this = std::mem::ManuallyDrop::new(self);
+        this.0
+    }
+}
+
+impl<'a> AttachDevice<'a> for VhostUserDevice {
     fn __into_raw_handle(self) -> *mut core::ffi::c_void {
         let this = std::mem::ManuallyDrop::new(self);
         this.0
@@ -3104,6 +3238,10 @@ pub enum Symbol {
     KrunNetDeviceNewUnixstreamFd,
     /// `krun_net_device_new_tap`
     KrunNetDeviceNewTap,
+    /// `krun_vhost_user_device_destroy`
+    KrunVhostUserDeviceDestroy,
+    /// `krun_vhost_user_device_new`
+    KrunVhostUserDeviceNew,
     /// `krun_error_code`
     KrunErrorCode,
     /// `krun_error_message`
@@ -3177,6 +3315,8 @@ impl Symbol {
             Symbol::KrunNetDeviceNewUnixstreamPath => "krun_net_device_new_unixstream_path",
             Symbol::KrunNetDeviceNewUnixstreamFd => "krun_net_device_new_unixstream_fd",
             Symbol::KrunNetDeviceNewTap => "krun_net_device_new_tap",
+            Symbol::KrunVhostUserDeviceDestroy => "krun_vhost_user_device_destroy",
+            Symbol::KrunVhostUserDeviceNew => "krun_vhost_user_device_new",
             Symbol::KrunErrorCode => "krun_error_code",
             Symbol::KrunErrorMessage => "krun_error_message",
             Symbol::KrunErrorResult => "krun_error_result",
@@ -3921,6 +4061,35 @@ pub fn require(
                             )?
                         };
                         let _ = KRUN_NET_DEVICE_NEW_TAP.set(f);
+                    }
+                }
+                Symbol::KrunVhostUserDeviceDestroy => {
+                    if KRUN_VHOST_USER_DEVICE_DESTROY.get().is_none() {
+                        let f = unsafe {
+                            *lib.get::<unsafe extern "C" fn(*mut core::ffi::c_void)>(
+                                b"krun_vhost_user_device_destroy\0",
+                            )?
+                        };
+                        let _ = KRUN_VHOST_USER_DEVICE_DESTROY.set(f);
+                    }
+                }
+                Symbol::KrunVhostUserDeviceNew => {
+                    if KRUN_VHOST_USER_DEVICE_NEW.get().is_none() {
+                        let f = unsafe {
+                            *lib.get::<unsafe extern "C" fn(
+                                <u32 as FfiType>::CRepr,
+                                <&'static str as FfiType>::CRepr,
+                                <&'static str as FfiType>::CRepr,
+                                <u16 as FfiType>::CRepr,
+                                *const <u16 as FfiType>::CRepr,
+                                usize,
+                                *mut *mut core::ffi::c_void,
+                            )
+                                -> *mut core::ffi::c_void>(
+                                b"krun_vhost_user_device_new\0"
+                            )?
+                        };
+                        let _ = KRUN_VHOST_USER_DEVICE_NEW.set(f);
                     }
                 }
                 Symbol::KrunErrorCode => {
