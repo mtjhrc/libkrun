@@ -14,10 +14,10 @@ timesync = []
 ffi = ["ffier-gen-c-header", "ffier-gen-rust-client", "ffier-schema"]
 
 [dependencies]
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
-ffier-gen-c-header = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
-ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
-ffier-schema = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
+ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "96d4f20" }
+ffier-gen-c-header = { git = "https://github.com/mtjhrc/ffier.git", rev = "96d4f20", optional = true }
+ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "96d4f20", optional = true }
+ffier-schema = { git = "https://github.com/mtjhrc/ffier.git", rev = "96d4f20", optional = true }
 krun-via-cdylib-weak = { path = "../../src/libkrun-via-cdylib-weak" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

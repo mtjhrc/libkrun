@@ -21,14 +21,15 @@ typedef void* KrunRngDevice;
 typedef void* KrunVsockDevice;
 typedef void* KrunBlockDevice;
 typedef void* KrunNetDevice;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunNetDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
+typedef void* KrunVhostUserDevice;
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunNetDevice | KrunVhostUserDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice | KrunVhostUserDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -444,6 +445,13 @@ KrunNetDevice krun_net_device_new_tap(KrunStr id, KrunStr tap_name, KrunBytes ma
 typedef KrunNetDevice (*krun_net_device_new_tap_fn)(KrunStr id, KrunStr tap_name, KrunBytes mac, uint32_t features, KrunError* err_out);
 void krun_net_device_destroy(KrunNetDevice handle);
 typedef void (*krun_net_device_destroy_fn)(KrunNetDevice handle);
+
+/* VhostUserDevice --------------------------------------------------- */
+
+KrunVhostUserDevice krun_vhost_user_device_new(uint32_t device_type, KrunStr socket_path, KrunStr name, uint16_t num_queues, const uint16_t* queue_sizes, size_t queue_sizes_len, KrunError* err_out);
+typedef KrunVhostUserDevice (*krun_vhost_user_device_new_fn)(uint32_t device_type, KrunStr socket_path, KrunStr name, uint16_t num_queues, const uint16_t* queue_sizes, size_t queue_sizes_len, KrunError* err_out);
+void krun_vhost_user_device_destroy(KrunVhostUserDevice handle);
+typedef void (*krun_vhost_user_device_destroy_fn)(KrunVhostUserDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 

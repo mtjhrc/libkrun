@@ -522,7 +522,7 @@ unsafe extern "C" {
     );
     pub fn krun_init_builder_args(
         handle: *mut core::ffi::c_void,
-        argv: *const ffier::FfierBytes,
+        argv: *const <&'static str as FfiType>::CRepr,
         argv_len: usize,
     );
     pub fn krun_init_builder_env_var(
@@ -531,7 +531,7 @@ unsafe extern "C" {
     );
     pub fn krun_init_builder_env(
         handle: *mut core::ffi::c_void,
-        vars: *const ffier::FfierBytes,
+        vars: *const <&'static str as FfiType>::CRepr,
         vars_len: usize,
     );
     pub fn krun_init_builder_workdir(
@@ -550,7 +550,7 @@ unsafe extern "C" {
     );
     pub fn krun_init_builder_rlimits(
         handle: *mut core::ffi::c_void,
-        limits: *const ffier::FfierBytes,
+        limits: *const <&'static str as FfiType>::CRepr,
         limits_len: usize,
     );
     pub fn krun_init_builder_dhcp(handle: *mut core::ffi::c_void, enable: <bool as FfiType>::CRepr);
@@ -646,10 +646,8 @@ impl Builder {
             let this = std::mem::ManuallyDrop::new(self);
             this.0
         };
-        let __ffi_argv: Vec<ffier::FfierBytes> = argv
-            .iter()
-            .map(|s| unsafe { ffier::FfierBytes::from_str(s) })
-            .collect();
+        let __ffi_argv: Vec<<&str as FfiType>::CRepr> =
+            argv.iter().map(|s| <&str as FfiType>::into_c(*s)).collect();
         unsafe {
             krun_init_builder_args(
                 &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
@@ -679,10 +677,8 @@ impl Builder {
             let this = std::mem::ManuallyDrop::new(self);
             this.0
         };
-        let __ffi_vars: Vec<ffier::FfierBytes> = vars
-            .iter()
-            .map(|s| unsafe { ffier::FfierBytes::from_str(s) })
-            .collect();
+        let __ffi_vars: Vec<<&str as FfiType>::CRepr> =
+            vars.iter().map(|s| <&str as FfiType>::into_c(*s)).collect();
         unsafe {
             krun_init_builder_env(
                 &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
@@ -742,9 +738,9 @@ impl Builder {
             let this = std::mem::ManuallyDrop::new(self);
             this.0
         };
-        let __ffi_limits: Vec<ffier::FfierBytes> = limits
+        let __ffi_limits: Vec<<&str as FfiType>::CRepr> = limits
             .iter()
-            .map(|s| unsafe { ffier::FfierBytes::from_str(s) })
+            .map(|s| <&str as FfiType>::into_c(*s))
             .collect();
         unsafe {
             krun_init_builder_rlimits(

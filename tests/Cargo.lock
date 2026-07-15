@@ -131,7 +131,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "ffier"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=96d4f20#96d4f20ab92be2c79436c3388e07e2e80d1972b9"
 dependencies = [
  "ffier-builtins",
  "ffier-impl",
@@ -141,7 +141,7 @@ dependencies = [
 [[package]]
 name = "ffier-builtins"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=96d4f20#96d4f20ab92be2c79436c3388e07e2e80d1972b9"
 dependencies = [
  "ffier-impl",
  "ffier-rt",
@@ -150,7 +150,7 @@ dependencies = [
 [[package]]
 name = "ffier-impl"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=96d4f20#96d4f20ab92be2c79436c3388e07e2e80d1972b9"
 dependencies = [
  "ffier-schema",
  "proc-macro2",
@@ -162,12 +162,12 @@ dependencies = [
 [[package]]
 name = "ffier-rt"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=96d4f20#96d4f20ab92be2c79436c3388e07e2e80d1972b9"
 
 [[package]]
 name = "ffier-schema"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=96d4f20#96d4f20ab92be2c79436c3388e07e2e80d1972b9"
 dependencies = [
  "serde",
  "serde_json",

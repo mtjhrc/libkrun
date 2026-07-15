@@ -6,5 +6,5 @@ description = "Weak (dlsym) Rust client for libkrun — stub, populated later"
 license = "Apache-2.0"
 
 [dependencies]
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
+ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "96d4f20" }
 libloading = "0.8"

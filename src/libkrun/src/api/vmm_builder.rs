@@ -238,7 +238,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         None, // firmware_config
         &fs_shm_sizes,
         gpu_shm_size,
-        false, // use_vhost_user: v2 API doesn't support vhost-user yet
+        requirements.iter().any(|r| r.process_shareable_memory),
         &payload_type,
     )
     .map_err(|e| DetailedError::new(Error::BootError(), format!("{e:?}")))?;
