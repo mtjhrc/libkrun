@@ -1,15 +1,24 @@
+/*
+ * Multiport virtio-console example using the libkrun v2 API.
+ *
+ * Usage: consoles ROOT_DIR COMMAND [ARGS...]
+ *
+ * Creates tmux-backed TTY ports and a FIFO inout port, then runs COMMAND
+ * in a VM with ROOT_DIR as the rootfs.
+ */
+
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libkrun.h>
+#include <libkrun_init.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <stdarg.h>
-#include <sys/wait.h>
 #include <sys/stat.h>
-
-#include <libkrun.h>
-#include <libkrun_init.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static bool push_to_stderr(void *userdata, KrunStr s)
 {
@@ -19,6 +28,11 @@ static bool push_to_stderr(void *userdata, KrunStr s)
 }
 
 static KrunVtableHandle stderr_writer = KRUN_VTABLE_HANDLE(
+    KRUN_PUSH_STR_TYPE_TAG,
+    ((KrunPushStrVtable){ .drop = NULL, .push = push_to_stderr }),
+    NULL);
+
+static KrunVtableHandle stderr_writer_init = KRUN_VTABLE_HANDLE(
     KRUN_INIT_PUSH_STR_TYPE_TAG,
     ((KrunInitPushStrVtable){ .drop = NULL, .push = push_to_stderr }),
     NULL);
@@ -29,10 +43,10 @@ static KrunVtableHandle stderr_writer = KRUN_VTABLE_HANDLE(
     if (err) {                                                                 \
         flockfile(stderr);                                                     \
         fprintf(stderr, "%s failed: ", #call);                                 \
-        krun_init_error_message(err, &stderr_writer);                          \
+        krun_error_message(err, &stderr_writer);                               \
         fputc('\n', stderr);                                                   \
         funlockfile(stderr);                                                   \
-        krun_init_error_destroy(err);                                          \
+        krun_error_destroy(err);                                               \
         return 1;                                                              \
     }
 
@@ -48,17 +62,20 @@ static int cmd_output(char *output, size_t output_size, const char *prog, ...)
     while (argc < 31) {
         const char *arg = va_arg(args, const char *);
         argv[argc++] = arg;
-        if (arg == NULL) break;
+        if (arg == NULL)
+            break;
     }
     va_end(args);
     argv[argc] = NULL;
 
     if (output && output_size > 0) {
-        if (pipe(pipe_fds) < 0) return -1;
+        if (pipe(pipe_fds) < 0)
+            return -1;
     }
 
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0)
+        return -1;
     if (pid == 0) {
         if (pipe_fds[0] >= 0) {
             close(pipe_fds[0]);
@@ -73,60 +90,72 @@ static int cmd_output(char *output, size_t output_size, const char *prog, ...)
         close(pipe_fds[1]);
         ssize_t n = read(pipe_fds[0], output, output_size - 1);
         close(pipe_fds[0]);
-        if (n < 0) n = 0;
+        if (n < 0)
+            n = 0;
         output[n] = '\0';
     }
 
     int status;
-    if (waitpid(pid, &status, 0) < 0) return -1;
-    if (!WIFEXITED(status)) return -1;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    if (!WIFEXITED(status))
+        return -1;
     return WEXITSTATUS(status);
 }
 
-#define cmd(...) ({ char _d[1]; cmd_output(_d, 0, __VA_ARGS__); })
+#define cmd(...)                                                               \
+    ({                                                                         \
+        char _d[1];                                                            \
+        cmd_output(_d, 0, __VA_ARGS__);                                        \
+    })
 
 static int create_tmux_tty(const char *session_name)
 {
     char tty_path[256];
     char wait_cmd[128];
-    
+
     snprintf(wait_cmd, sizeof(wait_cmd), "waitpid %d", (int)getpid());
-    if (cmd("tmux", "new-session", "-d", "-s", session_name, "sh", "-c", wait_cmd, NULL) != 0)
+    if (cmd("tmux", "new-session", "-d", "-s", session_name, "sh", "-c",
+            wait_cmd, NULL) != 0)
         return -1;
 
-    // Hook up tmux to send us SIGWINCH signal on resize
     char hook_cmd[128];
-    snprintf(hook_cmd, sizeof(hook_cmd), "run-shell 'kill -WINCH %d'", (int)getpid());
+    snprintf(hook_cmd, sizeof(hook_cmd), "run-shell 'kill -WINCH %d'",
+             (int)getpid());
     cmd("tmux", "set-hook", "-g", "client-resized", hook_cmd, NULL);
 
-    if (cmd_output(tty_path, sizeof(tty_path), "tmux", "display-message", "-p", "-t", session_name, "#{pane_tty}", NULL) != 0)
+    if (cmd_output(tty_path, sizeof(tty_path), "tmux", "display-message", "-p",
+                   "-t", session_name, "#{pane_tty}", NULL) != 0)
         return -1;
     tty_path[strcspn(tty_path, "\n")] = '\0';
 
-    int fd = open(tty_path, O_RDWR);
-    if (fd < 0) return -1;
-    return fd;
+    return open(tty_path, O_RDWR);
 }
 
 static int mkfifo_if_needed(const char *path)
 {
-    if (mkfifo(path, 0666) < 0) {
-        if (errno != EEXIST) return -1;
-    }
+    if (mkfifo(path, 0666) < 0 && errno != EEXIST)
+        return -1;
     return 0;
 }
 
-
-static int create_fifo_inout(const char *fifo_in, const char *fifo_out, int *input_fd, int *output_fd)
+static int create_fifo_inout(const char *fifo_in, const char *fifo_out,
+                             int *input_fd, int *output_fd)
 {
-    if (mkfifo_if_needed(fifo_in) < 0) return -1;
-    if (mkfifo_if_needed(fifo_out) < 0) return -1;
+    if (mkfifo_if_needed(fifo_in) < 0)
+        return -1;
+    if (mkfifo_if_needed(fifo_out) < 0)
+        return -1;
 
     int in_fd = open(fifo_in, O_RDONLY | O_NONBLOCK);
-    if (in_fd < 0) return -1;
+    if (in_fd < 0)
+        return -1;
 
     int out_fd = open(fifo_out, O_RDWR | O_NONBLOCK);
-    if (out_fd < 0) { close(in_fd); return -1; }
+    if (out_fd < 0) {
+        close(in_fd);
+        return -1;
+    }
 
     *input_fd = in_fd;
     *output_fd = out_fd;
@@ -141,108 +170,102 @@ int main(int argc, char *const argv[])
     }
 
     const char *root_dir = argv[1];
-    const char *command = argv[2];
-    const char *const *command_args = (argc > 3) ? (const char *const *)&argv[3] : NULL;
-    const char *const envp[] = { 0 };
+    KrunError err = NULL;
 
-    krun_init_log(KRUN_LOG_TARGET_DEFAULT, KRUN_LOG_LEVEL_WARN, KRUN_LOG_STYLE_AUTO, 0);
+    TRY(krun_init_log(KRUN_LOG_TARGET_DEFAULT, KRUN_LOG_LEVEL_WARN,
+                      KRUN_LOG_STYLE_AUTO, &err));
 
-    int err;
-    int ctx_id = krun_create_ctx();
-    if (ctx_id < 0) { errno = -ctx_id; perror("krun_create_ctx"); return 1; }
+    KrunConsoleBuilder console_builder = krun_console_device_builder();
 
-    int console_id = krun_add_virtio_console_multiport(ctx_id);
-    if (console_id < 0) {
-        errno = -console_id;
-        perror("krun_add_virtio_console_multiport");
-        return 1;
-    }
+    const int num_consoles = 3;
+    for (int i = 0; i < num_consoles; i++) {
+        char session_name[64];
+        char port_name[64];
+        snprintf(session_name, sizeof(session_name), "krun-console-%d", i + 1);
+        snprintf(port_name, sizeof(port_name), "console-%d", i + 1);
 
-    /* Configure console ports - edit this section to add/remove ports */
-    {
-        
-        // You could also use the controlling terminal of this process in the guest: 
-        /* 
-        if ((err = krun_add_console_port_tty(ctx_id, console_id, "host_tty", open("/dev/tty", O_RDWR)))) {
-            errno = -err; 
-            perror("port host_tty"); 
+        int tmux_fd = create_tmux_tty(session_name);
+        if (tmux_fd < 0) {
+            perror("create_tmux_tty");
             return 1;
         }
-        */
-
-        int num_consoles = 3;
-        for (int i = 0; i < num_consoles; i++) {
-            char session_name[64];
-            char port_name[64];
-            snprintf(session_name, sizeof(session_name), "krun-console-%d", i + 1);
-            snprintf(port_name, sizeof(port_name), "console-%d", i + 1);
-
-            int tmux_fd = create_tmux_tty(session_name);
-            if (tmux_fd < 0) {
-                perror("create_tmux_tty");
-                return 1;
-            }
-            if ((err = krun_add_console_port_tty(ctx_id, console_id, port_name, tmux_fd))) {
-                errno = -err;
-                perror("krun_add_console_port_tty");
-                return 1;
-            }
-        }
-
-        int in_fd, out_fd;
-        if (create_fifo_inout("/tmp/consoles_example_in", "/tmp/consoles_example_out", &in_fd, &out_fd) < 0) {
-            perror("create_fifo_inout");
-            return 1;
-        }
-        if ((err = krun_add_console_port_inout(ctx_id, console_id, "fifo_inout", in_fd, out_fd))) {
-            errno = -err;
-            perror("krun_add_console_port_inout");
-            return 1;
-        }
-
-        fprintf(stderr, "\n=== Console ports configured ===\n");
-        for (int i = 0; i < num_consoles; i++) {
-            fprintf(stderr, "  console-%d: tmux attach -t krun-console-%d\n", i + 1, i + 1);
-        }
-        fprintf(stderr, "  fifo_inout: /tmp/consoles_example_in (host->guest)\n");
-        fprintf(stderr, "  fifo_inout: /tmp/consoles_example_out (guest->host)\n");
-        fprintf(stderr, "================================\n\n");
+        uint32_t port_index = 0;
+        TRY(krun_console_builder_add_tty_port(console_builder,
+                                              KRUN_STR(port_name), tmux_fd,
+                                              &port_index, &err));
+        (void)port_index;
     }
 
-    if ((err = krun_set_vm_config(ctx_id, 4, 4096))) {
-        errno = -err;
-        perror("krun_set_vm_config");
+    int in_fd, out_fd;
+    if (create_fifo_inout("/tmp/consoles_example_in",
+                          "/tmp/consoles_example_out", &in_fd, &out_fd) < 0) {
+        perror("create_fifo_inout");
         return 1;
     }
+    uint32_t fifo_port = 0;
+    TRY(krun_console_builder_add_inout_port(console_builder,
+                                            KRUN_STR("fifo_inout"), in_fd,
+                                            out_fd, &fifo_port, &err));
+    (void)fifo_port;
 
-    if ((err = krun_add_virtiofs3(ctx_id, KRUN_FS_ROOT_TAG, root_dir, 0, false))) {
-        errno = -err;
-        perror("krun_add_virtiofs3");
-        return 1;
+    fprintf(stderr, "\n=== Console ports configured ===\n");
+    for (int i = 0; i < num_consoles; i++) {
+        fprintf(stderr, "  console-%d: tmux attach -t krun-console-%d\n",
+                i + 1, i + 1);
     }
+    fprintf(stderr, "  fifo_inout: /tmp/consoles_example_in (host->guest)\n");
+    fprintf(stderr, "  fifo_inout: /tmp/consoles_example_out (guest->host)\n");
+    fprintf(stderr, "================================\n\n");
 
-    // Build init configuration.
-    {
-        KrunInitError err;
-        KrunInitBuilder builder = krun_init_config_builder();
+    TRY(KrunConsoleDevice console =
+            krun_console_builder_build(console_builder, &err));
 
-        krun_init_builder_arg(&builder, KRUN_STR(command));
-        if (command_args) {
-            for (int i = 0; command_args[i]; i++)
-                krun_init_builder_arg(&builder, KRUN_STR(command_args[i]));
+    KrunInitBuilder config_builder = krun_init_config_builder();
+    KrunStr guest_args[argc - 1];
+    for (int i = 2; i < argc; i++)
+        guest_args[i - 2] = KRUN_STR(argv[i]);
+    krun_init_builder_args(&config_builder, guest_args, (size_t)(argc - 2));
+    krun_init_builder_workdir(&config_builder, KRUN_STR("/"));
+    KrunInitConfig config = krun_init_builder_build(&config_builder);
+
+    TRY(KrunFsDevice rootfs = krun_fs_device_new(
+            KRUN_STR("/dev/root"), KRUN_STR(root_dir), &err));
+    TRY(KrunPayload payload = krun_payload_load_krunfw(&err));
+
+    KrunFsOverlay overlay = krun_fs_overlay_new();
+    KrunInitError ierr = NULL;
+    if (krun_init_config_apply(config, NULL, overlay, payload, &ierr) !=
+        KRUN_RESULT_SUCCESS) {
+        flockfile(stderr);
+        fprintf(stderr, "krun_init_config_apply failed: ");
+        if (ierr) {
+            krun_init_error_message(ierr, &stderr_writer_init);
+            krun_init_error_destroy(ierr);
         }
-
-        KrunInitConfig config = krun_init_builder_build(&builder);
-        TRY(krun_init_config_apply(config, NULL, ctx_id,
-                                   KRUN_STR("/dev/root"), &err));
-    }
-
-    if ((err = krun_start_enter(ctx_id))) {
-        errno = -err;
-        perror("krun_start_enter");
+        fputc('\n', stderr);
+        funlockfile(stderr);
         return 1;
     }
+    krun_fs_device_set_overlay(rootfs, overlay);
+
+    TRY(KrunBalloonDevice balloon = krun_balloon_device_new(&err));
+    TRY(KrunRngDevice rng = krun_rng_device_new(&err));
+
+    KrunMmioDeviceManager devices = krun_mmio_device_manager_new();
+    krun_mmio_device_manager_add(devices, rootfs);
+    krun_mmio_device_manager_add(devices, console);
+    krun_mmio_device_manager_add(devices, balloon);
+    krun_mmio_device_manager_add(devices, rng);
+
+    KrunVmmBuilder builder = krun_vmm_builder_new();
+    TRY(krun_vmm_builder_vcpus(&builder, 4, &err));
+    TRY(krun_vmm_builder_ram_mib(&builder, 4096, &err));
+    krun_vmm_builder_payload(&builder, payload);
+    krun_vmm_builder_devices(&builder, devices);
+
+    TRY(KrunVmm vmm = krun_vmm_builder_build(&builder, &err));
+    krun_vmm_run(vmm);
+    krun_vmm_destroy(vmm);
+    krun_init_config_destroy(config);
     return 0;
 }
-
-
