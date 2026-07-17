@@ -14,4 +14,4 @@ doctest = false
 pkg-config = "0.3"
 
 [dependencies]
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
+ffier = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }

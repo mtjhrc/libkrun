@@ -14,10 +14,10 @@ timesync = []
 ffi = ["ffier-gen-c-header", "ffier-gen-rust-client", "ffier-schema"]
 
 [dependencies]
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
-ffier-gen-c-header = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
-ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
-ffier-schema = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5", optional = true }
+ffier = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }
+ffier-gen-c-header = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d", optional = true }
+ffier-gen-rust-client = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d", optional = true }
+ffier-schema = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d", optional = true }
 libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
