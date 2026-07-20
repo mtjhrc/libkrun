@@ -9,7 +9,7 @@ pub use devices::{
     FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion,
 };
 pub use error::{DetailedError, Error};
-pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
+pub use logging::{LOG_OPTION_NO_ENV, LogLevel, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
 pub use vmm_builder::{Vmm, VmmBuilder};
 
@@ -32,6 +32,5 @@ ffier::library_definition!("krun", library_tag = 1,
     enum crate::api::payload::KernelFormat,
     enum crate::api::logging::LogLevel,
     enum crate::api::logging::LogStyle,
-    enum crate::api::logging::LogTarget,
     fn crate::api::logging::init_log,
 );
