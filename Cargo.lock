@@ -466,11 +466,11 @@ dependencies = [
 [[package]]
 name = "ffier"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d#aaafc8a8ad351ec1b05eae7c5f929e275273bc4d"
 dependencies = [
- "ffier-builtins 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
- "ffier-impl 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
- "ffier-rt 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
+ "ffier-builtins 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
+ "ffier-impl 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
+ "ffier-rt 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
 ]
 
 [[package]]
@@ -485,10 +485,10 @@ dependencies = [
 [[package]]
 name = "ffier-builtins"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d#aaafc8a8ad351ec1b05eae7c5f929e275273bc4d"
 dependencies = [
- "ffier-impl 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
- "ffier-rt 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
+ "ffier-impl 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
+ "ffier-rt 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
 ]
 
 [[package]]
@@ -525,9 +525,9 @@ dependencies = [
 [[package]]
 name = "ffier-impl"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d#aaafc8a8ad351ec1b05eae7c5f929e275273bc4d"
 dependencies = [
- "ffier-schema 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
+ "ffier-schema 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -542,7 +542,7 @@ source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32
 [[package]]
 name = "ffier-rt"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d#aaafc8a8ad351ec1b05eae7c5f929e275273bc4d"
 
 [[package]]
 name = "ffier-schema"
@@ -556,7 +556,7 @@ dependencies = [
 [[package]]
 name = "ffier-schema"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5#e1de7a58cb430a4ec385cf8c44be47478ee8f0c0"
+source = "git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d#aaafc8a8ad351ec1b05eae7c5f929e275273bc4d"
 dependencies = [
  "serde",
  "serde_json",
@@ -1059,8 +1059,8 @@ version = "2.0.0-dev"
 dependencies = [
  "crossbeam-channel",
  "env_logger",
- "ffier 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
- "ffier-builtins 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=e1de7a5)",
+ "ffier 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
+ "ffier-builtins 0.2.0 (git+file:///home/mhrica/Dev2/ffier/ffier.git?rev=aaafc8a8ad351ec1b05eae7c5f929e275273bc4d)",
  "krun-arch",
  "krun-aws-nitro",
  "krun-devices",

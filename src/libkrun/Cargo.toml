@@ -24,8 +24,8 @@ timesync = ["devices/timesync"]
 [dependencies]
 crossbeam-channel = ">=0.5.15"
 env_logger = "0.11"
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
-ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", rev = "e1de7a5" }
+ffier = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }
+ffier-builtins = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }
 libc = ">=0.2.39"
 libloading = "0.8"
 log = "0.4.0"
