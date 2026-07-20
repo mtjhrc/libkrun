@@ -3,7 +3,7 @@ extern crate log;
 
 mod attach;
 pub mod api;
-pub use api::*;
+pub use api::{DetailedError, Error, LogLevel, LogStyle, LogTarget, init_log};
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
