@@ -691,7 +691,7 @@ dependencies = [
  "rustc_version",
  "tokio",
  "tracing",
- "vm-memory 0.18.0",
+ "vm-memory",
  "windows-sys",
 ]
 
@@ -796,7 +796,7 @@ dependencies = [
  "libc",
  "linux-loader",
  "tdx",
- "vm-memory 0.17.1",
+ "vm-memory",
  "vmm-sys-util 0.15.0",
  "windows-sys",
 ]
@@ -856,7 +856,7 @@ dependencies = [
  "vhost",
  "virtio-bindings",
  "vm-fdt",
- "vm-memory 0.17.1",
+ "vm-memory",
  "vmm-sys-util 0.15.0",
  "windows-sys",
  "zerocopy",
@@ -933,7 +933,7 @@ name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
  "krun-utils",
- "vm-memory 0.17.1",
+ "vm-memory",
 ]
 
 [[package]]
@@ -965,7 +965,7 @@ dependencies = [
 name = "krun-smbios"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
- "vm-memory 0.17.1",
+ "vm-memory",
 ]
 
 [[package]]
@@ -1012,7 +1012,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tdx",
- "vm-memory 0.17.1",
+ "vm-memory",
  "vmm-sys-util 0.14.0",
  "windows-sys",
  "zstd",
@@ -1078,7 +1078,7 @@ dependencies = [
  "log",
  "nitro-enclaves 0.5.0",
  "once_cell",
- "vm-memory 0.17.1",
+ "vm-memory",
  "windows-sys",
 ]
 
@@ -1098,7 +1098,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de72cb02c55ecffcf75fe78295926f872eb6eb0a58d629c58a8c324dc26380f6"
 dependencies = [
- "vm-memory 0.17.1",
+ "vm-memory",
 ]
 
 [[package]]
@@ -1764,7 +1764,7 @@ dependencies = [
  "bitflags 2.13.0",
  "libc",
  "uuid",
- "vm-memory 0.17.1",
+ "vm-memory",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -1795,15 +1795,6 @@ dependencies = [
  "libc",
  "thiserror 2.0.18",
  "winapi",
-]
-
-[[package]]
-name = "vm-memory"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
-dependencies = [
- "thiserror 2.0.18",
 ]
 
 [[package]]
