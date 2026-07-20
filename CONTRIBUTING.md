@@ -152,9 +152,9 @@ The `Assisted-by` / `Generated-by` trailer should appear before
 
 `Co-authored-by` implies authorship, but AI tools are generally not
 considered authors in a copyright sense. Many AI coding tools add
-`Co-authored-by` tags by default (e.g. Claude Code, GitHub Copilot)
-— please replace them with `Assisted-by`. An automated CI check
-rejects PRs that contain AI `Co-authored-by` trailers.
+`Co-authored-by` tags by default (e.g. Claude Code, GitHub Copilot,
+Cursor) — please replace them with `Assisted-by`. An automated CI
+check rejects PRs that contain AI `Co-authored-by` trailers.
 
 This policy is inspired by the
 [Linux kernel's AI Coding Assistants policy](https://docs.kernel.org/process/coding-assistants.html).
