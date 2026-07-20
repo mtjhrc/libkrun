@@ -30,7 +30,7 @@ def co_authors(msg: str) -> Iterator[tuple[str, str]]:
 
 
 # AGENT:MODEL | AGENT: MODEL | AGENT / MODEL | AGENT (MODEL)
-ASSISTED_BY_RE = re.compile(
+ASSISTED_BY_RE = _re(
     r"^(?P<key>Assisted-by|Generated-by):\s*"
     r"(?P<agent>[A-Za-z][A-Za-z0-9 -]*[A-Za-z0-9])"
     r"(?:"
@@ -39,6 +39,7 @@ ASSISTED_BY_RE = re.compile(
     r"| \((?P<model_paren>.+)\)"      # AGENT (MODEL)
     r")$"
 )
+ASSISTED_BY_PREFIX_RE = _re(r"^(Assisted-by|Generated-by):\s")
 
 
 def assisted_by(msg: str) -> Iterator[tuple[str, str | None, str | None]]:
@@ -48,7 +49,7 @@ def assisted_by(msg: str) -> Iterator[tuple[str, str | None, str | None]]:
     the format check.
     """
     for line in msg.splitlines():
-        if not re.match(r"^(Assisted-by|Generated-by):\s", line):
+        if not ASSISTED_BY_PREFIX_RE.match(line):
             continue
         m = ASSISTED_BY_RE.match(line)
         if m:
