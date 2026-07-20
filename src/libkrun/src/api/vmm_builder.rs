@@ -137,7 +137,6 @@ impl<'a> VmmBuilder<'a> {
                     Error::FileNotFound()
                 }
                 vmm::resources::Error::ParseTeeConfig(_) => Error::ValidationFailed(),
-                vmm::resources::Error::VmConfig(_) => Error::ConflictingConfig(),
                 _ => Error::Internal(),
             }
         })?;

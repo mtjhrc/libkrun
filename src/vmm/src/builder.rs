@@ -39,8 +39,6 @@ use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
 #[cfg(feature = "tee")]
 use crate::resources::TeeConfig;
-#[cfg(feature = "tee")]
-use crate::resources::VmResources;
 use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
 use devices::legacy::KvmAia;
@@ -566,27 +564,6 @@ pub struct TeeLaunchState {
     #[cfg(feature = "tdx")]
     tdx_launcher: Option<tdx::launch::Launcher>,
     measured_regions: Vec<MeasuredRegion>,
-}
-
-#[cfg(feature = "tee")]
-pub fn tee_boot_input_from_resources(
-    vm_resources: &VmResources,
-) -> std::result::Result<TeeBootInput<'_>, StartMicrovmError> {
-    Ok(TeeBootInput {
-        tee_config: vm_resources.tee_config(),
-        kernel_bundle: vm_resources
-            .kernel_bundle
-            .as_ref()
-            .ok_or(StartMicrovmError::MissingKernelConfig)?,
-        qboot_bundle: vm_resources
-            .qboot_bundle
-            .as_ref()
-            .ok_or(StartMicrovmError::MissingKernelConfig)?,
-        initrd_bundle: vm_resources
-            .initrd_bundle
-            .as_ref()
-            .ok_or(StartMicrovmError::MissingKernelConfig)?,
-    })
 }
 
 #[cfg(feature = "tee")]
