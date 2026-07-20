@@ -2,6 +2,8 @@
 extern crate log;
 
 mod attach;
+pub mod api;
+pub use api::*;
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
