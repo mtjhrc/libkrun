@@ -39,6 +39,8 @@ use crate::device_manager::mmio::MMIODeviceManager;
 use crate::resources::{
     DefaultVirtioConsoleConfig, PortConfig, TsiFlags, VirtioConsoleConfigMode, VmResources,
 };
+#[cfg(feature = "tee")]
+use crate::resources::TeeConfig;
 use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::NetBuilder;
@@ -579,6 +581,229 @@ pub fn choose_payload(
     }
 }
 
+#[cfg(feature = "tee")]
+pub struct TeeBootInput<'a> {
+    pub tee_config: &'a TeeConfig,
+    pub kernel_bundle: &'a crate::vmm_config::kernel_bundle::KernelBundle,
+    pub qboot_bundle: &'a crate::vmm_config::kernel_bundle::QbootBundle,
+    pub initrd_bundle: &'a crate::vmm_config::kernel_bundle::InitrdBundle,
+}
+
+#[cfg(feature = "tee")]
+pub struct TeeLaunchState {
+    kvm: KvmContext,
+    tee: Tee,
+    #[cfg(feature = "amd-sev")]
+    snp_launcher: Option<snp::Launcher<snp::Started, RawFd, RawFd>>,
+    #[cfg(feature = "tdx")]
+    tdx_launcher: Option<tdx::launch::Launcher>,
+    measured_regions: Vec<MeasuredRegion>,
+}
+
+#[cfg(feature = "tee")]
+pub fn tee_boot_input_from_resources(
+    vm_resources: &VmResources,
+) -> std::result::Result<TeeBootInput<'_>, StartMicrovmError> {
+    Ok(TeeBootInput {
+        tee_config: vm_resources.tee_config(),
+        kernel_bundle: vm_resources
+            .kernel_bundle
+            .as_ref()
+            .ok_or(StartMicrovmError::MissingKernelConfig)?,
+        qboot_bundle: vm_resources
+            .qboot_bundle
+            .as_ref()
+            .ok_or(StartMicrovmError::MissingKernelConfig)?,
+        initrd_bundle: vm_resources
+            .initrd_bundle
+            .as_ref()
+            .ok_or(StartMicrovmError::MissingKernelConfig)?,
+    })
+}
+
+#[cfg(feature = "tee")]
+fn build_tee_measured_regions(
+    tee: Tee,
+    guest_memory: &GuestMemoryMmap,
+    kernel_bundle: &crate::vmm_config::kernel_bundle::KernelBundle,
+    qboot_bundle: &crate::vmm_config::kernel_bundle::QbootBundle,
+    payload_config: &PayloadConfig,
+) -> std::result::Result<Vec<MeasuredRegion>, StartMicrovmError> {
+    println!("Injecting and measuring memory regions. This may take a while.");
+
+    match tee {
+        #[cfg(feature = "amd-sev")]
+        Tee::Snp => {
+            let initrd_config = payload_config
+                .initrd_config
+                .as_ref()
+                .ok_or(StartMicrovmError::MissingKernelConfig)?;
+
+            Ok(vec![
+                MeasuredRegion {
+                    guest_addr: arch::FIRMWARE_START,
+                    host_addr: guest_memory
+                        .get_host_address(GuestAddress(arch::FIRMWARE_START))
+                        .unwrap() as u64,
+                    size: qboot_bundle.size,
+                },
+                MeasuredRegion {
+                    guest_addr: kernel_bundle.guest_addr,
+                    host_addr: guest_memory
+                        .get_host_address(GuestAddress(kernel_bundle.guest_addr))
+                        .unwrap() as u64,
+                    size: kernel_bundle.size,
+                },
+                MeasuredRegion {
+                    guest_addr: initrd_config.address.0,
+                    host_addr: guest_memory.get_host_address(initrd_config.address).unwrap() as u64,
+                    size: initrd_config.size,
+                },
+                MeasuredRegion {
+                    guest_addr: arch::x86_64::layout::ZERO_PAGE_START,
+                    host_addr: guest_memory
+                        .get_host_address(GuestAddress(arch::x86_64::layout::ZERO_PAGE_START))
+                        .unwrap() as u64,
+                    size: 4096,
+                },
+            ])
+        }
+        #[cfg(feature = "tdx")]
+        Tee::Tdx => Ok(vec![
+            MeasuredRegion {
+                guest_addr: 0,
+                host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
+                size: 0x8000_0000,
+            },
+            MeasuredRegion {
+                guest_addr: arch::FIRMWARE_START,
+                host_addr: guest_memory
+                    .get_host_address(GuestAddress(arch::FIRMWARE_START))
+                    .unwrap() as u64,
+                size: qboot_bundle.size,
+            },
+        ]),
+        _ => Err(StartMicrovmError::InvalidTee),
+    }
+}
+
+#[cfg(feature = "tee")]
+pub fn create_tee_vm(
+    guest_memory: &GuestMemoryMmap,
+    tee_boot: &TeeBootInput<'_>,
+    payload_config: &PayloadConfig,
+    #[cfg(feature = "tdx")] sender: Sender<WorkerMessage>,
+) -> std::result::Result<(Vm, TeeLaunchState), StartMicrovmError> {
+    let kvm = KvmContext::new()
+        .map_err(Error::KvmContext)
+        .map_err(StartMicrovmError::Internal)?;
+    let vm = setup_vm(
+        &kvm,
+        guest_memory,
+        tee_boot.tee_config,
+        #[cfg(feature = "tdx")]
+        sender,
+    )?;
+
+    let tee = tee_boot.tee_config.tee;
+
+    #[cfg(feature = "amd-sev")]
+    let snp_launcher = match tee {
+        Tee::Snp => Some(
+            vm.snp_secure_virt_prepare(guest_memory)
+                .map_err(StartMicrovmError::SecureVirtPrepare)?,
+        ),
+        _ => None,
+    };
+
+    #[cfg(feature = "tdx")]
+    let tdx_launcher = match tee {
+        Tee::Tdx => Some(
+            vm.tdx_secure_virt_prepare()
+                .map_err(StartMicrovmError::SecureVirtPrepare)?,
+        ),
+        _ => None,
+    };
+
+    let measured_regions = build_tee_measured_regions(
+        tee,
+        guest_memory,
+        tee_boot.kernel_bundle,
+        tee_boot.qboot_bundle,
+        payload_config,
+    )?;
+
+    Ok((
+        vm,
+        TeeLaunchState {
+            kvm,
+            tee,
+            #[cfg(feature = "amd-sev")]
+            snp_launcher,
+            #[cfg(feature = "tdx")]
+            tdx_launcher,
+            measured_regions,
+        },
+    ))
+}
+
+#[cfg(feature = "tee")]
+pub fn prepare_tee_vcpus(
+    vm: &Vm,
+    tee_state: &mut TeeLaunchState,
+    vcpus: &[Vcpu],
+) -> std::result::Result<(), StartMicrovmError> {
+    #[cfg(feature = "tdx")]
+    if let Some(launcher) = tee_state.tdx_launcher.as_mut() {
+        for vcpu in vcpus {
+            vcpu.tdx_secure_virt_prepare(launcher);
+        }
+        vm.tdx_secure_virt_init_vcpus(launcher).unwrap();
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "tee")]
+pub fn finalize_tee_vm(
+    vmm: &mut Vmm,
+    tee_state: TeeLaunchState,
+) -> std::result::Result<(), StartMicrovmError> {
+    match tee_state.tee {
+        #[cfg(feature = "amd-sev")]
+        Tee::Snp => {
+            let cpuid = tee_state
+                .kvm
+                .fd()
+                .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
+                .map_err(VstateError::KvmCpuId)
+                .map_err(StartMicrovmError::SecureVirtAttest)?;
+            vmm.kvm_vm()
+                .snp_secure_virt_measure(
+                    cpuid,
+                    vmm.guest_memory(),
+                    tee_state.measured_regions,
+                    tee_state.snp_launcher.unwrap(),
+                )
+                .map_err(StartMicrovmError::SecureVirtAttest)?;
+        }
+        #[cfg(feature = "tdx")]
+        Tee::Tdx => {
+            let mut launcher = tee_state.tdx_launcher.unwrap();
+            vmm.kvm_vm()
+                .tdx_secure_virt_prepare_memory(&mut launcher, &tee_state.measured_regions)
+                .unwrap();
+            vmm.kvm_vm()
+                .tdx_secure_virt_finalize_vm(launcher)
+                .map_err(StartMicrovmError::SecureVirtPrepare)?;
+        }
+        _ => return Err(StartMicrovmError::InvalidTee),
+    }
+
+    println!("Starting TEE/microVM.");
+    Ok(())
+}
+
 /// Builds and starts a microVM based on the current Firecracker VmResources configuration.
 ///
 /// This is the default build recipe, one could build other microVM flavors by using the
@@ -669,117 +894,16 @@ pub fn build_microvm(
     let mut vm = setup_vm(&guest_memory, vm_resources.nested_enabled)?;
 
     #[cfg(feature = "tee")]
-    let (_kvm, vm) = {
-        let kvm = KvmContext::new()
-            .map_err(Error::KvmContext)
-            .map_err(StartMicrovmError::Internal)?;
-        let vm = setup_vm(
-            &kvm,
-            &guest_memory,
-            vm_resources,
-            #[cfg(feature = "tdx")]
-            _sender.clone(),
-        )?;
-        (kvm, vm)
-    };
+    let tee_boot = tee_boot_input_from_resources(vm_resources)?;
 
     #[cfg(feature = "tee")]
-    let tee = vm_resources.tee_config().tee;
-
-    #[cfg(feature = "amd-sev")]
-    let snp_launcher = match tee {
-        Tee::Snp => Some(
-            vm.snp_secure_virt_prepare(&guest_memory)
-                .map_err(StartMicrovmError::SecureVirtPrepare)?,
-        ),
-        _ => None,
-    };
-
-    #[cfg(feature = "tdx")]
-    let mut tdx_launcher = match tee {
-        Tee::Tdx => vm
-            .tdx_secure_virt_prepare()
-            .map_err(StartMicrovmError::SecureVirtPrepare)?,
-        _ => panic!(),
-    };
-
-    #[cfg(all(feature = "tee", not(feature = "tdx")))]
-    let measured_regions = {
-        println!("Injecting and measuring memory regions. This may take a while.");
-
-        let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
-            qboot_bundle.size
-        } else {
-            return Err(StartMicrovmError::MissingKernelConfig);
-        };
-        let (kernel_guest_addr, kernel_size) =
-            if let Some(kernel_bundle) = &vm_resources.kernel_bundle {
-                (kernel_bundle.guest_addr, kernel_bundle.size)
-            } else {
-                return Err(StartMicrovmError::MissingKernelConfig);
-            };
-        let (initrd_addr, initrd_size) = if let Some(initrd_config) = &payload_config.initrd_config
-        {
-            (initrd_config.address, initrd_config.size)
-        } else {
-            return Err(StartMicrovmError::MissingKernelConfig);
-        };
-
-        vec![
-            MeasuredRegion {
-                guest_addr: arch::FIRMWARE_START,
-                host_addr: guest_memory
-                    .get_host_address(GuestAddress(arch::FIRMWARE_START))
-                    .unwrap() as u64,
-                size: qboot_size,
-            },
-            MeasuredRegion {
-                guest_addr: kernel_guest_addr,
-                host_addr: guest_memory
-                    .get_host_address(GuestAddress(kernel_guest_addr))
-                    .unwrap() as u64,
-                size: kernel_size,
-            },
-            MeasuredRegion {
-                guest_addr: initrd_addr.0,
-                host_addr: guest_memory.get_host_address(initrd_addr).unwrap() as u64,
-                size: initrd_size,
-            },
-            MeasuredRegion {
-                guest_addr: arch::x86_64::layout::ZERO_PAGE_START,
-                host_addr: guest_memory
-                    .get_host_address(GuestAddress(arch::x86_64::layout::ZERO_PAGE_START))
-                    .unwrap() as u64,
-                size: 4096,
-            },
-        ]
-    };
-
-    #[cfg(feature = "tdx")]
-    let measured_regions = {
-        println!("Injecting and measuring memory regions. This may take a while.");
-        let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
-            qboot_bundle.size
-        } else {
-            return Err(StartMicrovmError::MissingKernelConfig);
-        };
-        let m = vec![
-            MeasuredRegion {
-                guest_addr: 0,
-                host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
-                size: 0x8000_0000,
-            },
-            MeasuredRegion {
-                guest_addr: arch::FIRMWARE_START,
-                host_addr: guest_memory
-                    .get_host_address(GuestAddress(arch::FIRMWARE_START))
-                    .unwrap() as u64,
-                size: qboot_size,
-            },
-        ];
-
-        m
-    };
+    let (vm, mut tee_state) = create_tee_vm(
+        &guest_memory,
+        &tee_boot,
+        &payload_config,
+        #[cfg(feature = "tdx")]
+        _sender.clone(),
+    )?;
 
     let mut serial_devices = Vec::new();
 
@@ -914,13 +1038,8 @@ pub fn build_microvm(
         .map_err(StartMicrovmError::Internal)?;
     }
 
-    #[cfg(feature = "tdx")]
-    {
-        for vcpu in &vcpus {
-            vcpu.tdx_secure_virt_prepare(&mut tdx_launcher);
-        }
-        vm.tdx_secure_virt_init_vcpus(&mut tdx_launcher).unwrap();
-    }
+    #[cfg(feature = "tee")]
+    prepare_tee_vcpus(&vm, &mut tee_state, &vcpus)?;
 
     // On aarch64, the vCPUs need to be created (i.e call KVM_CREATE_VCPU) and configured before
     // setting up the IRQ chip because the `KVM_CREATE_VCPU` ioctl will return error if the IRQCHIP
@@ -1163,38 +1282,7 @@ pub fn build_microvm(
     .map_err(StartMicrovmError::Internal)?;
 
     #[cfg(feature = "tee")]
-    {
-        match tee {
-            #[cfg(feature = "amd-sev")]
-            Tee::Snp => {
-                let cpuid = _kvm
-                    .fd()
-                    .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
-                    .map_err(VstateError::KvmCpuId)
-                    .map_err(StartMicrovmError::SecureVirtAttest)?;
-                vmm.kvm_vm()
-                    .snp_secure_virt_measure(
-                        cpuid,
-                        vmm.guest_memory(),
-                        measured_regions,
-                        snp_launcher.unwrap(),
-                    )
-                    .map_err(StartMicrovmError::SecureVirtAttest)?;
-            }
-            #[cfg(feature = "tdx")]
-            Tee::Tdx => {
-                vmm.kvm_vm()
-                    .tdx_secure_virt_prepare_memory(&mut tdx_launcher, &measured_regions)
-                    .unwrap();
-                vmm.kvm_vm()
-                    .tdx_secure_virt_finalize_vm(tdx_launcher)
-                    .map_err(StartMicrovmError::SecureVirtPrepare)?;
-            }
-            _ => return Err(StartMicrovmError::InvalidTee),
-        }
-
-        println!("Starting TEE/microVM.");
-    }
+    finalize_tee_vm(&mut vmm, tee_state)?;
 
     vmm.start_vcpus(vcpus)
         .map_err(StartMicrovmError::Internal)?;
@@ -1820,14 +1908,14 @@ fn validate_tee_config(_tee: Tee) -> std::result::Result<(), StartMicrovmError> 
 pub fn setup_vm(
     kvm: &KvmContext,
     guest_memory: &GuestMemoryMmap,
-    resources: &super::resources::VmResources,
+    tee_config: &TeeConfig,
     #[cfg(feature = "tdx")] _sender: Sender<WorkerMessage>,
 ) -> std::result::Result<Vm, StartMicrovmError> {
-    validate_tee_config(resources.tee_config().tee)?;
+    validate_tee_config(tee_config.tee)?;
 
     let mut vm = Vm::new(
         kvm.fd(),
-        resources.tee_config(),
+        tee_config,
         #[cfg(feature = "tdx")]
         _sender,
     )

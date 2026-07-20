@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 use std::os::fd::{FromRawFd, RawFd};
+#[cfg(feature = "tee")]
+use std::path::Path;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +64,8 @@ pub struct VmmBuilder<'a> {
     /// Optional raw fd to use as serial console (COM1) input.
     /// Ownership of the fd is transferred to the VM on build.
     serial_input_fd: Option<RawFd>,
+    #[cfg(feature = "tee")]
+    tee_config: Option<vmm::resources::TeeConfig>,
 }
 
 impl Default for VmmBuilder<'_> {
@@ -80,6 +84,8 @@ impl<'a> VmmBuilder<'a> {
             kernel: None,
             device_manager: None,
             serial_input_fd: None,
+            #[cfg(feature = "tee")]
+            tee_config: None,
         }
     }
 
@@ -120,10 +126,28 @@ impl<'a> VmmBuilder<'a> {
         self
     }
 
+    #[cfg(feature = "tee")]
+    pub fn tee_config_file(mut self, path: &str) -> Result<Self, Error> {
+        let tee_config = vmm::resources::load_tee_config(Path::new(path)).map_err(|e| {
+            log::error!("tee config: {e:?}");
+            match e {
+                vmm::resources::Error::OpenTeeConfig(open_err)
+                    if open_err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    Error::FileNotFound()
+                }
+                vmm::resources::Error::ParseTeeConfig(_) => Error::ValidationFailed(),
+                vmm::resources::Error::VmConfig(_) => Error::ConflictingConfig(),
+                _ => Error::Internal(),
+            }
+        })?;
+        self.tee_config = Some(tee_config);
+        Ok(self)
+    }
+
     /// Build the VM, creating guest memory, attaching devices, and starting
     /// vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
     /// must have been set.
-    #[cfg(not(feature = "tee"))]
     pub fn build(self) -> Result<Vmm<'a>, Error> {
         build_vm(self).map_err(|e| {
             log::error!("{e}");
@@ -167,7 +191,6 @@ pub struct Vmm<'a> {
 impl<'a> Vmm<'a> {
     /// Run the VM event loop. This call blocks until the VM exits or a
     /// fatal error occurs.
-    #[cfg(not(feature = "tee"))]
     pub fn run(&mut self) {
         loop {
             if let Err(e) = self.event_manager.run() {
@@ -182,29 +205,70 @@ impl<'a> Vmm<'a> {
 // The actual VM construction logic
 // ---------------------------------------------------------------------------
 
-#[cfg(not(feature = "tee"))]
 fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
-    let vcpus_count = builder_cfg
-        .vcpus
-        .ok_or_else(|| DetailedError::new(Error::MissingConfig(), "vcpus not set"))?;
-    let ram_mib = builder_cfg
-        .ram_mib
-        .ok_or_else(|| DetailedError::new(Error::MissingConfig(), "ram_mib not set"))?;
-    let device_manager = builder_cfg.device_manager.ok_or_else(|| {
+    let VmmBuilder {
+        vcpus,
+        ram_mib,
+        kernel,
+        device_manager,
+        serial_input_fd,
+        #[cfg(feature = "tee")]
+        tee_config,
+    } = builder_cfg;
+
+    #[cfg(not(feature = "tee"))]
+    let vcpus_count =
+        vcpus.ok_or_else(|| DetailedError::new(Error::MissingConfig(), "vcpus not set"))?;
+    #[cfg(not(feature = "tee"))]
+    let ram_mib =
+        ram_mib.ok_or_else(|| DetailedError::new(Error::MissingConfig(), "ram_mib not set"))?;
+
+    let device_manager = device_manager.ok_or_else(|| {
         DetailedError::new(
             Error::MissingConfig(),
             "no device manager set (call .devices())",
         )
     })?;
-    let serial_input_fd = builder_cfg.serial_input_fd;
 
     // 1. Extract kernel, payload type, and cmdline from Payload
-    let loaded_kernel = builder_cfg
-        .kernel
+    let loaded_kernel = kernel
         .ok_or_else(|| DetailedError::new(Error::MissingConfig(), "kernel not set"))?;
     let kernel_bundle = loaded_kernel.bundle;
+    #[cfg(feature = "tee")]
+    let qboot_bundle = loaded_kernel.qboot_bundle;
+    #[cfg(feature = "tee")]
+    let initrd_bundle = loaded_kernel.initrd_bundle;
     let payload_type = loaded_kernel.payload;
     let kernel_cmdline_str = loaded_kernel.cmdline;
+
+    #[cfg(feature = "tee")]
+    let tee_config =
+        tee_config.ok_or_else(|| DetailedError::new(Error::MissingConfig(), "tee config not set"))?;
+    #[cfg(feature = "tee")]
+    let tee_ram_mib = u32::try_from(tee_config.ram_mib)
+        .map_err(|_| DetailedError::new(Error::OutOfRange(), "tee ram_mib does not fit in u32"))?;
+    #[cfg(feature = "tee")]
+    let vcpus_count = match vcpus {
+        Some(count) if count != tee_config.cpus => {
+            return Err(DetailedError::new(
+                Error::ConflictingConfig(),
+                "vcpus does not match tee config",
+            ));
+        }
+        Some(count) => count,
+        None => tee_config.cpus,
+    };
+    #[cfg(feature = "tee")]
+    let ram_mib = match ram_mib {
+        Some(mib) if mib != tee_ram_mib => {
+            return Err(DetailedError::new(
+                Error::ConflictingConfig(),
+                "ram_mib does not match tee config",
+            ));
+        }
+        Some(mib) => mib,
+        None => tee_ram_mib,
+    };
 
     // 3. Collect shm sizes from device manager requirements
     let requirements = device_manager.requirements();
@@ -228,9 +292,9 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         ram_mib as usize,
         kernel_bundle_ref,
         #[cfg(feature = "tee")]
-        None,
+        qboot_bundle.as_ref(),
         #[cfg(feature = "tee")]
-        None,
+        initrd_bundle.as_ref(),
         None, // firmware_config
         &fs_shm_sizes,
         gpu_shm_size,
@@ -269,10 +333,34 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         arch_memory_info.ram_last_addr
     );
 
+    #[allow(unused_variables)]
+    let (worker_sender, worker_receiver) = crossbeam_channel::unbounded();
+
     // 6. Set up VM
     #[cfg(not(feature = "tee"))]
     let vm = builder::setup_vm(&guest_memory, false)
         .map_err(|e| DetailedError::new(Error::HypervisorError(), format!("{e:?}")))?;
+    #[cfg(feature = "tee")]
+    let tee_boot = builder::TeeBootInput {
+        tee_config: &tee_config,
+        kernel_bundle: kernel_bundle_ref
+            .ok_or_else(|| DetailedError::new(Error::MissingConfig(), "kernel bundle not set"))?,
+        qboot_bundle: qboot_bundle
+            .as_ref()
+            .ok_or_else(|| DetailedError::new(Error::MissingConfig(), "qboot bundle not set"))?,
+        initrd_bundle: initrd_bundle
+            .as_ref()
+            .ok_or_else(|| DetailedError::new(Error::MissingConfig(), "initrd bundle not set"))?,
+    };
+    #[cfg(feature = "tee")]
+    let (vm, mut tee_state) = builder::create_tee_vm(
+        &guest_memory,
+        &tee_boot,
+        &payload_config,
+        #[cfg(feature = "tdx")]
+        worker_sender.clone(),
+    )
+    .map_err(|e| DetailedError::new(Error::HypervisorError(), format!("{e:?}")))?;
 
     let mut event_manager = EventManager::new()
         .map_err(|e| DetailedError::new(Error::Internal(), format!("EventManager: {e:?}")))?;
@@ -360,10 +448,14 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
             true, // kernel_boot
             payload_config.pvh,
             #[cfg(feature = "tee")]
-            crossbeam_channel::unbounded().0,
+            worker_sender.clone(),
         )
         .map_err(|e| DetailedError::new(Error::HypervisorError(), format!("{e:?}")))?;
     }
+
+    #[cfg(feature = "tee")]
+    builder::prepare_tee_vcpus(&vm, &mut tee_state, &vcpus)
+        .map_err(|e| DetailedError::new(Error::HypervisorError(), format!("{e:?}")))?;
 
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
@@ -450,11 +542,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         pio_device_manager,
     };
 
-    // 11. Create worker thread channel (used for macOS GPU mapping, x86 GSI, TEE)
-    #[allow(unused_variables)]
-    let (worker_sender, worker_receiver) = crossbeam_channel::unbounded();
-
-    // 12. Attach all devices via the device manager
+    // 11. Attach all devices via the device manager
     // TODO: MMIO device registration appends "virtio_mmio.device=..." params
     // directly to vmm.kernel_cmdline during attach. Ideally the device manager
     // would return these params and we'd append them here, keeping all cmdline
@@ -483,6 +571,10 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
         payload_config.pvh,
     )
     .map_err(|e| DetailedError::new(Error::Internal(), format!("{e:?}")))?;
+
+    #[cfg(feature = "tee")]
+    builder::finalize_tee_vm(&mut vmm, tee_state)
+        .map_err(|e| DetailedError::new(Error::HypervisorError(), format!("{e:?}")))?;
 
     // 15. Start vCPUs
     vmm.start_vcpus(vcpus)

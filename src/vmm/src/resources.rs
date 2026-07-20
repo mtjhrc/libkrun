@@ -10,6 +10,8 @@ use std::io::BufReader;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 #[cfg(feature = "tee")]
+use std::path::Path;
+#[cfg(feature = "tee")]
 use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use utils::windows::SendHandle;
@@ -102,6 +104,14 @@ impl Default for TeeConfig {
             attestation_url: "".to_string(),
         }
     }
+}
+
+#[cfg(feature = "tee")]
+pub fn load_tee_config(filepath: &Path) -> std::result::Result<TeeConfig, Error> {
+    let file = File::open(filepath).map_err(Error::OpenTeeConfig)?;
+    let reader = BufReader::new(file);
+
+    serde_json::from_reader(reader).map_err(Error::ParseTeeConfig)
 }
 
 #[cfg(unix)]
@@ -401,10 +411,7 @@ impl VmResources {
 
     #[cfg(feature = "tee")]
     pub fn set_tee_config(&mut self, filepath: PathBuf) -> Result<Error> {
-        let file = File::open(filepath.as_path()).map_err(Error::OpenTeeConfig)?;
-        let reader = BufReader::new(file);
-        let tee_config: TeeConfig =
-            serde_json::from_reader(reader).map_err(Error::ParseTeeConfig)?;
+        let tee_config = load_tee_config(filepath.as_path())?;
 
         // Override VmConfig with TeeConfig values
         self.set_vm_config(&VmConfig {

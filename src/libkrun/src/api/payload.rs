@@ -5,6 +5,10 @@ use super::error::Error;
 #[allow(dead_code)]
 pub struct Payload {
     pub(crate) bundle: Option<vmm::vmm_config::kernel_bundle::KernelBundle>,
+    #[cfg(feature = "tee")]
+    pub(crate) qboot_bundle: Option<vmm::vmm_config::kernel_bundle::QbootBundle>,
+    #[cfg(feature = "tee")]
+    pub(crate) initrd_bundle: Option<vmm::vmm_config::kernel_bundle::InitrdBundle>,
     pub(crate) payload: vmm::builder::Payload,
     pub(crate) cmdline: String,
 }
@@ -40,12 +44,59 @@ impl Payload {
             size,
         };
 
+        #[cfg(feature = "tee")]
+        let qboot_bundle = {
+            let get_qboot: libloading::Symbol<unsafe extern "C" fn(*mut usize) -> *mut libc::c_char> =
+                unsafe {
+                    lib.get(b"krunfw_get_qboot").map_err(|e| {
+                        log::error!("krunfw symbol: {e}");
+                        Error::Internal()
+                    })?
+                };
+
+            let mut size: usize = 0;
+            let host_addr = unsafe { get_qboot(&mut size) };
+            if host_addr.is_null() {
+                log::error!("krunfw_get_qboot returned null");
+                return Err(Error::BootError());
+            }
+
+            vmm::vmm_config::kernel_bundle::QbootBundle {
+                host_addr: host_addr as u64,
+                size,
+            }
+        };
+
+        #[cfg(feature = "tee")]
+        let initrd_bundle = {
+            let get_initrd: libloading::Symbol<
+                unsafe extern "C" fn(*mut usize) -> *mut libc::c_char,
+            > = unsafe {
+                lib.get(b"krunfw_get_initrd").map_err(|e| {
+                    log::error!("krunfw symbol: {e}");
+                    Error::Internal()
+                })?
+            };
+
+            let mut size: usize = 0;
+            let host_addr = unsafe { get_initrd(&mut size) };
+            if host_addr.is_null() {
+                log::error!("krunfw_get_initrd returned null");
+                return Err(Error::BootError());
+            }
+
+            vmm::vmm_config::kernel_bundle::InitrdBundle {
+                host_addr: host_addr as u64,
+                size,
+            }
+        };
+
         let payload_type = vmm::builder::choose_payload(
             Some(&bundle),
             #[cfg(feature = "tee")]
-            None,
+            Some(&qboot_bundle),
             #[cfg(feature = "tee")]
-            None,
+            Some(&initrd_bundle),
             None,
             None,
         )
@@ -58,6 +109,10 @@ impl Payload {
 
         Ok(Payload {
             bundle: Some(bundle),
+            #[cfg(feature = "tee")]
+            qboot_bundle: Some(qboot_bundle),
+            #[cfg(feature = "tee")]
+            initrd_bundle: Some(initrd_bundle),
             payload: payload_type,
             cmdline,
         })
@@ -95,6 +150,10 @@ impl Payload {
 
         Ok(Payload {
             bundle: None,
+            #[cfg(feature = "tee")]
+            qboot_bundle: None,
+            #[cfg(feature = "tee")]
+            initrd_bundle: None,
             payload: payload_type,
             cmdline: cmdline.to_string(),
         })
