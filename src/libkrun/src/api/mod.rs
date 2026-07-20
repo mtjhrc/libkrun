@@ -13,6 +13,8 @@ pub use devices::{
     DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion, RngDevice,
     VsockDevice,
 };
+#[cfg(feature = "gpu")]
+pub use devices::{DisplayBackend, DisplayInfoBuilder};
 pub use error::{DetailedError, Error};
 pub use logging::{LOG_OPTION_NO_ENV, LogLevel, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
