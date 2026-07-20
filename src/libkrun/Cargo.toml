@@ -33,7 +33,9 @@ once_cell = "1.4.1"
 krun_display = { package = "krun-display", version = "0.1.0", path = "../display", optional = true, features = ["bindgen_clang_runtime"] }
 krun_input = { package = "krun-input", version = "0.1.0", path = "../input", optional = true, features = ["bindgen_clang_runtime"] }
 
+arch = { package = "krun-arch", version = "=0.1.0-2.0.0-dev", path = "../arch" }
 devices = { package = "krun-devices", version = "=0.1.0-2.0.0-dev", path = "../devices" }
+kernel = { package = "krun-kernel", version = "=0.1.0-2.0.0-dev", path = "../kernel" }
 polly = { package = "krun-polly", version = "=0.1.0-2.0.0-dev", path = "../polly" }
 utils = { package = "krun-utils", version = "=0.1.0-2.0.0-dev", path = "../utils" }
 vmm = { package = "krun-vmm", version = "=0.1.0-2.0.0-dev", path = "../vmm" }
