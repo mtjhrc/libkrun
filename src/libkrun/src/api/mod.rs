@@ -4,18 +4,27 @@ pub mod logging;
 pub mod payload;
 pub mod vmm_builder;
 
+#[cfg(not(feature = "tee"))]
+pub use devices::BalloonDevice;
 #[cfg(feature = "blk")]
 pub use devices::BlockDevice;
+pub use devices::ConsoleBuilder;
+pub use devices::ConsoleDevice;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub use devices::FsDevice;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub use devices::FsOverlay;
 #[cfg(feature = "input")]
 pub use devices::InputDevice;
 #[cfg(feature = "net")]
 pub use devices::NetDevice;
+#[cfg(not(feature = "tee"))]
+pub use devices::RngDevice;
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
 pub use devices::VhostUserDevice;
 pub use devices::{
-    AttachContext, AttachDevice, BalloonDevice, ConsoleBuilder, ConsoleDevice, DeviceManager,
-    DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion, RngDevice,
-    VsockDevice,
+    AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
+    ResolvedShmRegion, VsockDevice,
 };
 #[cfg(feature = "gpu")]
 pub use devices::{DisplayBackend, DisplayInfoBuilder, GpuDevice};
@@ -35,16 +44,21 @@ ffier::library_definition!("krun", library_tag = 1,
     primitives_prefix = "krun",
     crate::api::error::Error = 1,
     crate::api::devices::MmioDeviceManager<'_> = 2,
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     crate::api::devices::FsDevice<'_> = 3,
     crate::api::devices::ConsoleDevice<'_> = 4,
     crate::api::devices::ConsoleBuilder<'_> = 5,
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     crate::api::devices::FsOverlay = 6,
     crate::api::payload::Payload = 8,
     crate::api::vmm_builder::VmmBuilder<'_> = 10,
     crate::api::vmm_builder::Vmm<'_> = 11,
+    #[cfg(not(feature = "tee"))]
     crate::api::devices::BalloonDevice = 14,
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     crate::api::devices::AttachDevice for crate::api::devices::FsDevice,
     crate::api::devices::AttachDevice for crate::api::devices::ConsoleDevice,
+    #[cfg(not(feature = "tee"))]
     crate::api::devices::RngDevice = 15,
     crate::api::devices::VsockDevice = 16,
     #[cfg(feature = "blk")]
@@ -59,7 +73,9 @@ ffier::library_definition!("krun", library_tag = 1,
     crate::api::devices::VhostUserDevice = 19,
     #[cfg(all(feature = "vhost-user", target_os = "linux"))]
     crate::api::devices::AttachDevice for crate::api::devices::VhostUserDevice,
+    #[cfg(not(feature = "tee"))]
     crate::api::devices::AttachDevice for crate::api::devices::BalloonDevice,
+    #[cfg(not(feature = "tee"))]
     crate::api::devices::AttachDevice for crate::api::devices::RngDevice,
     crate::api::devices::AttachDevice for crate::api::devices::VsockDevice,
     trait ffier::builtins::PushStr = 12,

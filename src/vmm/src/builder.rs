@@ -983,6 +983,8 @@ pub fn create_guest_memory(
 
     let mut shm_manager = ShmManager::new(&arch_mem_info);
 
+    #[cfg(feature = "tee")]
+    let _ = fs_shm_sizes;
     #[cfg(not(feature = "tee"))]
     for (index, shm_size) in fs_shm_sizes.iter().enumerate() {
         if let Some(shm_size) = shm_size {

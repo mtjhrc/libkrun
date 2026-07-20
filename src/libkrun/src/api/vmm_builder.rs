@@ -8,7 +8,9 @@ use kernel::cmdline::Cmdline;
 use polly::event_manager::EventManager;
 use utils::eventfd::EventFd;
 use vmm::Vmm as InnerVmm;
-use vmm::builder::{self, create_guest_memory, load_cmdline};
+#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+use vmm::builder::load_cmdline;
+use vmm::builder::{self, create_guest_memory};
 use vmm::device_manager::mmio::MMIODeviceManager;
 use vmm::vstate::VcpuConfig;
 
@@ -289,7 +291,6 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, DetailedError> {
     );
 
     // 6. Set up VM
-    #[cfg(not(feature = "tee"))]
     let vm = builder::setup_vm(&guest_memory, false)
         .map_err(|e| DetailedError::new(Error::HypervisorError(), format!("{e:?}")))?;
 

@@ -10,11 +10,15 @@ use std::sync::{Arc, Mutex};
 use devices::legacy::IrqChip;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::{DisplayInfo, DisplayInfoEdid, PhysicalSize};
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualEntryContent};
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use devices::virtio::passthrough::PermissionSemantics;
 use devices::virtio::{PortDescription, VirtioDevice, VirtioShmRegion, VmmExitObserver, port_io};
 use polly::event_manager::{EventManager, Subscriber};
-use vm_memory::{Address, GuestMemory, GuestMemoryMmap};
+use vm_memory::GuestMemoryMmap;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use vm_memory::{Address, GuestMemory};
 use vmm::Vmm;
 use vmm::builder::{attach_mmio_device, setup_terminal_raw_mode};
 use vmm::device_manager::shm::ShmManager;
@@ -365,16 +369,19 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
 /// Entries are synthetic files/directories that exist only in memory,
 /// overlaid on top of the real (or null) host filesystem. They are
 /// visible to the guest but do not exist on the host.
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub struct FsOverlay {
     entries: Vec<VirtualDirEntry>,
 }
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 impl Default for FsOverlay {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 #[ffier::export]
 impl FsOverlay {
     /// Create a new empty overlay.
@@ -408,6 +415,7 @@ impl FsOverlay {
     }
 }
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 impl FsOverlay {
     pub fn into_entries(self) -> Vec<VirtualDirEntry> {
         self.entries
@@ -437,6 +445,7 @@ impl FsOverlay {
 /// Exposes a host directory to the guest as a shared filesystem.
 /// The `tag` is used by the guest to mount the filesystem
 /// (e.g. `mount -t virtiofs /dev/root /mnt`).
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub struct FsDevice<'a> {
     pub(crate) inner: Arc<Mutex<devices::virtio::Fs>>,
     #[allow(dead_code)]
@@ -445,6 +454,7 @@ pub struct FsDevice<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 #[ffier::export]
 impl<'a> FsDevice<'a> {
     /// Create a new virtiofs device sharing a host directory.
@@ -523,6 +533,7 @@ impl<'a> FsDevice<'a> {
     }
 }
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 impl<'a> FsDevice<'a> {
     fn new_inner(tag: &str, host_path: Option<String>, read_only: bool) -> Result<Self, Error> {
         let exit_code = Arc::new(AtomicI32::new(i32::MAX));
@@ -565,6 +576,7 @@ impl<'a> FsDevice<'a> {
     }
 }
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 #[ffier::export]
 impl<'a> AttachDevice<'a> for FsDevice<'a> {
     #[ffier(skip)]
@@ -594,6 +606,7 @@ impl<'a> AttachDevice<'a> for FsDevice<'a> {
 
 /// Walk parent directory components in a virtual entry tree, returning the
 /// children vec of the deepest parent.
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 fn resolve_parent_dirs<'a>(
     entries: &'a mut Vec<VirtualDirEntry>,
     parents: &[&str],
@@ -888,10 +901,12 @@ impl<'a> AttachDevice<'a> for ConsoleDevice<'a> {
 // ---------------------------------------------------------------------------
 
 /// A virtio balloon device for dynamic memory management.
+#[cfg(not(feature = "tee"))]
 pub struct BalloonDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Balloon>>,
 }
 
+#[cfg(not(feature = "tee"))]
 #[ffier::export]
 impl BalloonDevice {
     pub fn new() -> Result<Self, Error> {
@@ -905,6 +920,7 @@ impl BalloonDevice {
     }
 }
 
+#[cfg(not(feature = "tee"))]
 #[ffier::export]
 impl<'a> AttachDevice<'a> for BalloonDevice {
     #[ffier(skip)]
@@ -919,10 +935,12 @@ impl<'a> AttachDevice<'a> for BalloonDevice {
 // ---------------------------------------------------------------------------
 
 /// A virtio entropy source (RNG) device.
+#[cfg(not(feature = "tee"))]
 pub struct RngDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Rng>>,
 }
 
+#[cfg(not(feature = "tee"))]
 #[ffier::export]
 impl RngDevice {
     pub fn new() -> Result<Self, Error> {
@@ -936,6 +954,7 @@ impl RngDevice {
     }
 }
 
+#[cfg(not(feature = "tee"))]
 #[ffier::export]
 impl<'a> AttachDevice<'a> for RngDevice {
     #[ffier(skip)]
