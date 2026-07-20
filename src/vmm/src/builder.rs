@@ -16,6 +16,8 @@ use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::BorrowedFd;
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+use std::os::fd::FromRawFd;
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle};
 #[cfg(windows)]

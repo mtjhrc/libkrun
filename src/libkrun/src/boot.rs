@@ -44,10 +44,10 @@ use devices::virtio::display::DisplayInfo;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::NoopDisplayBackend;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use devices::virtio::fs::ExportTable;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use devices::virtio::passthrough::PermissionSemantics;
 use devices::virtio::{PortDescription, Vsock, port_io};
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use devices::virtio::{VirtioShmRegion, fs::ExportTable};
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
 #[cfg(feature = "gpu")]
@@ -61,9 +61,6 @@ use utils::eventfd::EventFd;
 #[cfg(windows)]
 use utils::windows::SendHandle;
 use utils::worker_message::WorkerMessage;
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use vm_memory::Address;
-use vm_memory::GuestMemory;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 #[cfg(windows)]
@@ -83,8 +80,8 @@ use vmm::builder::load_cmdline;
 #[cfg(not(feature = "tee"))]
 use vmm::builder::setup_vm;
 use vmm::builder::{
-    StartMicrovmError, attach_legacy_devices, attach_mmio_device, choose_payload,
-    create_guest_memory, setup_serial_device, setup_terminal_raw_mode,
+    StartMicrovmError, attach_legacy_devices, choose_payload, create_guest_memory,
+    setup_serial_device, setup_terminal_raw_mode,
 };
 #[cfg(feature = "tee")]
 use vmm::builder::{
@@ -93,7 +90,6 @@ use vmm::builder::{
 #[cfg(target_arch = "x86_64")]
 use vmm::device_manager::legacy::PortIODeviceManager;
 use vmm::device_manager::mmio::MMIODeviceManager;
-use vmm::device_manager::shm::ShmManager;
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
 use vmm::resources::VhostUserDeviceConfig;
 use vmm::resources::{
@@ -101,16 +97,12 @@ use vmm::resources::{
 };
 #[cfg(target_os = "linux")]
 use vmm::signal_handler::register_sigint_handler;
-#[cfg(target_os = "linux")]
-use vmm::signal_handler::register_sigwinch_handler;
-#[cfg(feature = "blk")]
-use vmm::vmm_config::block::BlockBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vmm::vmm_config::fs::FsDeviceConfig;
 use vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
-#[cfg(feature = "net")]
-use vmm::vmm_config::net::NetBuilder;
 use vmm::{Error, Vmm};
+
+use crate::attach::AttachContext;
 
 /// Builds and starts a microVM based on the current `VmResources` configuration.
 ///
@@ -465,92 +457,26 @@ pub fn build_microvm(
         setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
     }
 
-    #[cfg(not(feature = "tee"))]
-    attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
-    #[cfg(not(feature = "tee"))]
-    {
-        #[cfg(all(feature = "vhost-user", target_os = "linux"))]
-        {
-            const VIRTIO_ID_RNG: u32 = 4;
-            for device_config in &vm_resources.vhost_user_devices {
-                attach_vhost_user_device(&mut vmm, event_manager, intc.clone(), device_config)?;
-            }
-
-            let has_vhost_user_rng = vm_resources
-                .vhost_user_devices
-                .iter()
-                .any(|dev| dev.device_type == VIRTIO_ID_RNG);
-
-            if !has_vhost_user_rng {
-                attach_rng_device(&mut vmm, event_manager, intc.clone())?;
-            }
-        }
-
-        #[cfg(not(all(feature = "vhost-user", target_os = "linux")))]
-        {
-            attach_rng_device(&mut vmm, event_manager, intc.clone())?;
-        }
-    }
-    for (console_id, console_cfg) in vm_resources.virtio_consoles.iter().enumerate() {
-        attach_console_devices(
+    let devices = collect_devices(vm_resources, exit_code);
+    for device in devices {
+        let device_index = device.device_index();
+        let mut ctx = AttachContext::new_mmio(
             &mut vmm,
             event_manager,
+            &_shm_manager,
             intc.clone(),
-            vm_resources,
-            Some(console_cfg),
-            console_id as u32,
-        )?;
-    }
-
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-    let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
-        Some(Default::default())
-    } else {
-        None
-    };
-
-    #[cfg(feature = "gpu")]
-    if let Some(virgl_flags) = vm_resources.gpu_virgl_flags {
-        let display_backend = vm_resources
-            .display_backend
-            .unwrap_or_else(|| NoopDisplayBackend::into_display_backend(None));
-
-        attach_gpu_device(
-            &mut vmm,
-            &mut _shm_manager,
-            #[cfg(not(feature = "tee"))]
-            export_table.clone(),
-            intc.clone(),
-            virgl_flags,
-            Box::from(&vm_resources.displays[..]),
-            display_backend,
+            device_index,
             #[cfg(target_os = "macos")]
-            _sender.clone(),
-        )?;
+            Some(_sender.clone()),
+        );
+        device.attach(&mut ctx)?;
     }
 
-    #[cfg(feature = "input")]
-    if !vm_resources.input_backends.is_empty() {
-        attach_input_devices(&mut vmm, &vm_resources.input_backends, intc.clone())?;
-    }
-
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-    attach_fs_devices(
-        &mut vmm,
-        &vm_resources.fs,
-        &mut _shm_manager,
-        #[cfg(not(feature = "tee"))]
-        export_table,
-        intc.clone(),
-        exit_code,
-        #[cfg(target_os = "macos")]
-        _sender,
-    )?;
-    #[cfg(feature = "blk")]
-    attach_block_devices(&mut vmm, &vm_resources.block, intc.clone())?;
-
-    if let Some(vsock) = vm_resources.vsock.get() {
-        attach_unixsock_vsock_device(&mut vmm, vsock, event_manager, intc.clone())?;
+    // Kept outside VsockAttach/NetAttach rather than routed through
+    // AttachContext::append_kernel_cmdline, which only logs on failure: a
+    // full kernel cmdline buffer must still fail the boot here, matching
+    // the original attach_unixsock_vsock_device/attach_net_devices behavior.
+    if vm_resources.vsock.get().is_some() {
         let tsi_flags = vm_resources.vsock.tsi_flags();
         if tsi_flags.contains(TsiFlags::HIJACK_INET) {
             vmm.kernel_cmdline.insert_str("tsi_hijack")?;
@@ -560,8 +486,6 @@ pub fn build_microvm(
         }
     }
 
-    #[cfg(feature = "net")]
-    attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
     #[cfg(feature = "net")]
     if vm_resources.dhcp_client {
         vmm.kernel_cmdline.insert_str("KRUN_DHCP=1")?;
@@ -602,63 +526,252 @@ pub fn build_microvm(
     Ok(vmm)
 }
 
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-fn attach_fs_devices(
-    vmm: &mut Vmm,
-    fs_devs: &[FsDeviceConfig],
-    shm_manager: &mut ShmManager,
-    #[cfg(not(feature = "tee"))] export_table: Option<ExportTable>,
-    intc: IrqChip,
-    exit_code: Arc<AtomicI32>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
+// ---------------------------------------------------------------------------
+// AttachDevice — converges every v1 device kind onto the same AttachContext
+// abstraction the typed API already uses, instead of hand-rolling
+// attach_mmio_device calls per device kind.
+// ---------------------------------------------------------------------------
 
-    for (i, config) in fs_devs.iter().enumerate() {
-        let fs = Arc::new(Mutex::new(
-            devices::virtio::Fs::new(
-                config.fs_id.clone(),
-                PermissionSemantics::LinuxComplete,
-                config.shared_dir.clone(),
-                exit_code.clone(),
-                config.read_only,
-                config.virtual_entries.clone(),
-            )
-            .unwrap(),
-        ));
-
-        let id = format!("{}{}", String::from(fs.lock().unwrap().id()), i);
-
-        if let Some(shm_region) = shm_manager.fs_region(i) {
-            fs.lock().unwrap().set_shm_region(VirtioShmRegion {
-                host_addr: vmm
-                    .guest_memory
-                    .get_host_address(shm_region.guest_addr)
-                    .map_err(StartMicrovmError::ShmHostAddr)? as u64,
-                guest_addr: shm_region.guest_addr.raw_value(),
-                size: shm_region.size,
-            });
-        }
-
-        #[cfg(not(feature = "tee"))]
-        if let Some(export_table) = export_table.as_ref() {
-            fs.lock().unwrap().set_export_table(export_table.clone());
-        }
-
-        #[cfg(target_os = "macos")]
-        fs.lock().unwrap().set_map_sender(map_sender.clone());
-
-        // The device mutex mustn't be locked here otherwise it will deadlock.
-        attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
+trait AttachDevice {
+    /// Index passed to `AttachContext::new_mmio`. Only meaningful for fs
+    /// devices, whose SHM region is keyed by their position within the fs
+    /// list specifically (see `ShmManager::fs_region`), not by a global
+    /// position across all attached devices.
+    fn device_index(&self) -> usize {
+        0
     }
 
-    Ok(())
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError>;
+}
+
+/// Builds every device the old v1 boot path attaches, in the same order
+/// `build_microvm` always has: balloon, then rng (unless a vhost-user rng
+/// device covers it), then consoles, gpu, input, fs, block, vsock, net.
+fn collect_devices(
+    vm_resources: &VmResources,
+    #[cfg_attr(any(feature = "tee", feature = "aws-nitro"), allow(unused_variables))]
+    exit_code: Arc<AtomicI32>,
+) -> Vec<Box<dyn AttachDevice>> {
+    let mut devices: Vec<Box<dyn AttachDevice>> = Vec::new();
+
+    #[cfg(not(feature = "tee"))]
+    devices.push(Box::new(BalloonAttach));
+
+    #[cfg(not(feature = "tee"))]
+    {
+        #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+        {
+            const VIRTIO_ID_RNG: u32 = 4;
+            for config in &vm_resources.vhost_user_devices {
+                devices.push(Box::new(VhostUserAttach {
+                    config: config.clone(),
+                }));
+            }
+
+            let has_vhost_user_rng = vm_resources
+                .vhost_user_devices
+                .iter()
+                .any(|dev| dev.device_type == VIRTIO_ID_RNG);
+
+            if !has_vhost_user_rng {
+                devices.push(Box::new(RngAttach));
+            }
+        }
+
+        #[cfg(not(all(feature = "vhost-user", target_os = "linux")))]
+        devices.push(Box::new(RngAttach));
+    }
+
+    for (id_number, cfg) in vm_resources.virtio_consoles.iter().enumerate() {
+        devices.push(Box::new(ConsoleAttach {
+            cfg: Some(cfg.clone()),
+            id_number: id_number as u32,
+            #[cfg(target_os = "windows")]
+            console_output: vm_resources.console_output.clone(),
+            #[cfg(target_os = "windows")]
+            disable_implicit_console: vm_resources.disable_implicit_console,
+        }));
+    }
+
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+    let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
+        Some(Default::default())
+    } else {
+        None
+    };
+
+    #[cfg(feature = "gpu")]
+    if let Some(virgl_flags) = vm_resources.gpu_virgl_flags {
+        let display_backend = vm_resources
+            .display_backend
+            .unwrap_or_else(|| NoopDisplayBackend::into_display_backend(None));
+
+        devices.push(Box::new(GpuAttach {
+            #[cfg(not(feature = "tee"))]
+            export_table: export_table.clone(),
+            virgl_flags,
+            displays: Box::from(&vm_resources.displays[..]),
+            display_backend,
+        }));
+    }
+
+    #[cfg(feature = "input")]
+    for (index, (config_backend, events_backend)) in vm_resources.input_backends.iter().enumerate()
+    {
+        devices.push(Box::new(InputAttach {
+            index,
+            config_backend: *config_backend,
+            events_backend: *events_backend,
+        }));
+    }
+
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+    for (index, config) in vm_resources.fs.iter().enumerate() {
+        devices.push(Box::new(FsAttach {
+            index,
+            config: config.clone(),
+            export_table: export_table.clone(),
+            exit_code: exit_code.clone(),
+        }));
+    }
+
+    #[cfg(feature = "blk")]
+    for block in vm_resources.block.list.iter() {
+        devices.push(Box::new(BlockAttach {
+            device: block.clone(),
+        }));
+    }
+
+    if let Some(vsock) = vm_resources.vsock.get() {
+        devices.push(Box::new(VsockAttach {
+            device: vsock.clone(),
+        }));
+    }
+
+    #[cfg(feature = "net")]
+    for net_device in vm_resources.net.list.iter() {
+        devices.push(Box::new(NetAttach {
+            device: net_device.clone(),
+        }));
+    }
+
+    devices
+}
+
+#[cfg(not(feature = "tee"))]
+struct BalloonAttach;
+
+#[cfg(not(feature = "tee"))]
+impl AttachDevice for BalloonAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
+
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        ctx.subscribe_events(balloon.clone())
+            .map_err(RegisterEvent)?;
+        let id = String::from(balloon.lock().unwrap().id());
+        ctx.register_mmio_device(&id, balloon)
+            .map_err(RegisterBalloonDevice)?;
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "tee"))]
+struct RngAttach;
+
+#[cfg(not(feature = "tee"))]
+impl AttachDevice for RngAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
+
+        let rng = Arc::new(Mutex::new(devices::virtio::Rng::new().unwrap()));
+        ctx.subscribe_events(rng.clone()).map_err(RegisterEvent)?;
+        let id = String::from(rng.lock().unwrap().id());
+        ctx.register_mmio_device(&id, rng)
+            .map_err(RegisterRngDevice)?;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+struct VhostUserAttach {
+    config: VhostUserDeviceConfig,
+}
+
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+impl AttachDevice for VhostUserAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
+
+        let device_config = self.config;
+        let device_name = device_config
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("vhost-user-{}", device_config.device_type));
+
+        let device = Arc::new(Mutex::new(
+            devices::virtio::VhostUserDevice::new(
+                &device_config.socket_path,
+                device_config.device_type,
+                device_name.clone(),
+                device_config.num_queues,
+                &device_config.queue_sizes,
+            )
+            .map_err(|e| {
+                RegisterVhostUserDevice(vmm::device_manager::mmio::Error::VhostUserDevice(e))
+            })?,
+        ));
+
+        ctx.subscribe_events(device.clone())
+            .map_err(RegisterEvent)?;
+        ctx.register_mmio_device(&device_name, device)
+            .map_err(RegisterVhostUserDevice)?;
+        Ok(())
+    }
+}
+
+struct ConsoleAttach {
+    cfg: Option<VirtioConsoleConfigMode>,
+    id_number: u32,
+    #[cfg(target_os = "windows")]
+    console_output: Option<PathBuf>,
+    #[cfg(target_os = "windows")]
+    disable_implicit_console: bool,
+}
+
+impl AttachDevice for ConsoleAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
+
+        let ports = match &self.cfg {
+            None => autoconfigure_console_ports(ctx, &self, None)?,
+            Some(VirtioConsoleConfigMode::Autoconfigure(autocfg)) => {
+                autoconfigure_console_ports(ctx, &self, Some(autocfg))?
+            }
+            Some(VirtioConsoleConfigMode::Explicit(ports)) => create_explicit_ports(ctx, ports)?,
+        };
+
+        let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
+
+        ctx.push_exit_observer(console.clone());
+        ctx.subscribe_events(console.clone())
+            .map_err(RegisterEvent)?;
+
+        #[cfg(target_os = "linux")]
+        ctx.register_sigwinch(console.lock().unwrap().get_sigwinch_fd())
+            .map_err(RegisterFsSigwinch)?;
+
+        ctx.register_mmio_device(&format!("hvc{}", self.id_number), console)
+            .map_err(RegisterConsoleDevice)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
 fn autoconfigure_console_ports(
-    vmm: &mut Vmm,
-    _vm_resources: &VmResources,
+    ctx: &mut AttachContext,
+    _console: &ConsoleAttach,
     cfg: Option<&DefaultVirtioConsoleConfig>,
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
     let (input_fd, output_fd, err_fd) = match cfg {
@@ -714,7 +827,9 @@ fn autoconfigure_console_ports(
             .map(|fd| port_io::term_fd(fd.as_raw_fd()).unwrap())
             .unwrap_or_else(|| port_io::term_fixed_size(0, 0));
 
-        setup_terminal_raw_mode(vmm, term_fd, forwarding_sigint);
+        if let Some(term_fd) = term_fd {
+            ctx.setup_terminal_raw_mode(term_fd, forwarding_sigint);
+        }
 
         let mut ports = vec![PortDescription::console(
             console_input,
@@ -754,16 +869,18 @@ fn is_valid_handle(h: *mut core::ffi::c_void) -> bool {
 
 #[cfg(target_os = "windows")]
 fn autoconfigure_console_ports(
-    vmm: &mut Vmm,
-    vm_resources: &VmResources,
+    ctx: &mut AttachContext,
+    console: &ConsoleAttach,
     cfg: Option<&DefaultVirtioConsoleConfig>,
-    creating_implicit_console: bool,
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
     use StartMicrovmError::*;
 
+    // The first console (id 0) is the implicit default console.
+    let creating_implicit_console = console.id_number == 0;
+
     let mut console_output_path: Option<PathBuf> = None;
-    if let Some(path) = vm_resources.console_output.clone() {
-        if !vm_resources.disable_implicit_console && creating_implicit_console {
+    if let Some(path) = console.console_output.clone() {
+        if !console.disable_implicit_console && creating_implicit_console {
             console_output_path = Some(path)
         }
     }
@@ -829,7 +946,9 @@ fn autoconfigure_console_ports(
             .map(|h| port_io::term_handle(h.as_raw_handle()).unwrap())
             .unwrap_or_else(|| port_io::term_fixed_size(0, 0));
 
-        setup_terminal_raw_mode(vmm, term_h, forwarding_sigint);
+        if let Some(term_h) = term_h {
+            ctx.setup_terminal_raw_mode(term_h, forwarding_sigint);
+        }
 
         let mut ports = vec![PortDescription::console(
             console_input,
@@ -864,7 +983,7 @@ fn autoconfigure_console_ports(
 
 #[cfg(unix)]
 fn create_explicit_ports(
-    vmm: &mut Vmm,
+    ctx: &mut AttachContext,
     port_configs: &[PortConfig],
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
     let mut ports = Vec::with_capacity(port_configs.len());
@@ -874,7 +993,7 @@ fn create_explicit_ports(
             PortConfig::Tty { name, tty_fd } => {
                 assert!(*tty_fd > 0, "PortConfig::Tty must have a valid tty_fd");
                 let term_fd = unsafe { BorrowedFd::borrow_raw(*tty_fd) };
-                setup_terminal_raw_mode(vmm, Some(term_fd), false);
+                ctx.setup_terminal_raw_mode(term_fd, false);
 
                 PortDescription {
                     name: name.clone().into(),
@@ -911,7 +1030,7 @@ fn create_explicit_ports(
 
 #[cfg(target_os = "windows")]
 fn create_explicit_ports(
-    vmm: &mut Vmm,
+    ctx: &mut AttachContext,
     port_configs: &[PortConfig],
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
     let mut ports = Vec::with_capacity(port_configs.len());
@@ -924,7 +1043,7 @@ fn create_explicit_ports(
                     "PortConfig::Tty must have a valid tty_handle"
                 );
                 let term_h = SendHandle::new(tty_handle.as_raw_handle());
-                setup_terminal_raw_mode(vmm, Some(term_h), false);
+                ctx.setup_terminal_raw_mode(term_h, false);
 
                 PortDescription {
                     name: name.clone().into(),
@@ -961,245 +1080,163 @@ fn create_explicit_ports(
     Ok(ports)
 }
 
-fn attach_console_devices(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-    vm_resources: &VmResources,
-    cfg: Option<&VirtioConsoleConfigMode>,
-    id_number: u32,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
-
-    let ports = match cfg {
-        None => autoconfigure_console_ports(vmm, vm_resources, None)?,
-        Some(VirtioConsoleConfigMode::Autoconfigure(autocfg)) => {
-            autoconfigure_console_ports(vmm, vm_resources, Some(autocfg))?
-        }
-        Some(VirtioConsoleConfigMode::Explicit(ports)) => create_explicit_ports(vmm, ports)?,
-    };
-
-    let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
-
-    vmm.exit_observers.push(console.clone());
-
-    event_manager
-        .add_subscriber(console.clone())
-        .map_err(RegisterEvent)?;
-
-    #[cfg(target_os = "linux")]
-    register_sigwinch_handler(console.lock().unwrap().get_sigwinch_fd())
-        .map_err(RegisterFsSigwinch)?;
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, format!("hvc{id_number}"), intc, console)
-        .map_err(RegisterConsoleDevice)?;
-
-    Ok(())
-}
-
-#[cfg(feature = "net")]
-fn attach_net_devices(
-    vmm: &mut Vmm,
-    net_devices: &NetBuilder,
-    intc: IrqChip,
-) -> Result<(), StartMicrovmError> {
-    for net_device in net_devices.list.iter() {
-        let id = net_device.lock().unwrap().id().to_string();
-
-        attach_mmio_device(vmm, id, intc.clone(), net_device.clone())
-            .map_err(StartMicrovmError::RegisterNetDevice)?;
-    }
-    Ok(())
-}
-
-fn attach_unixsock_vsock_device(
-    vmm: &mut Vmm,
-    unix_vsock: &Arc<Mutex<Vsock>>,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
-
-    event_manager
-        .add_subscriber(unix_vsock.clone())
-        .map_err(RegisterEvent)?;
-
-    let id = String::from(unix_vsock.lock().unwrap().id());
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc, unix_vsock.clone()).map_err(RegisterVsockDevice)?;
-
-    Ok(())
-}
-
-#[cfg(not(feature = "tee"))]
-fn attach_balloon_device(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
-
-    let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
-
-    event_manager
-        .add_subscriber(balloon.clone())
-        .map_err(RegisterEvent)?;
-
-    let id = String::from(balloon.lock().unwrap().id());
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc.clone(), balloon).map_err(RegisterBalloonDevice)?;
-
-    Ok(())
-}
-
-#[cfg(feature = "blk")]
-fn attach_block_devices(
-    vmm: &mut Vmm,
-    block_devs: &BlockBuilder,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
-
-    for block in block_devs.list.iter() {
-        let id = String::from(block.lock().unwrap().id());
-
-        // The device mutex mustn't be locked here otherwise it will deadlock.
-        attach_mmio_device(vmm, id, intc.clone(), block.clone()).map_err(RegisterBlockDevice)?;
-    }
-
-    Ok(())
-}
-
-#[cfg(not(feature = "tee"))]
-fn attach_rng_device(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
-
-    let rng = Arc::new(Mutex::new(devices::virtio::Rng::new().unwrap()));
-
-    event_manager
-        .add_subscriber(rng.clone())
-        .map_err(RegisterEvent)?;
-
-    let id = String::from(rng.lock().unwrap().id());
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc.clone(), rng).map_err(RegisterRngDevice)?;
-
-    Ok(())
-}
-
-#[cfg(not(feature = "tee"))]
-#[cfg(all(feature = "vhost-user", target_os = "linux"))]
-fn attach_vhost_user_device(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-    device_config: &VhostUserDeviceConfig,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
-
-    let device_name = device_config
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("vhost-user-{}", device_config.device_type));
-
-    let device = Arc::new(Mutex::new(
-        devices::virtio::VhostUserDevice::new(
-            &device_config.socket_path,
-            device_config.device_type,
-            device_name.clone(),
-            device_config.num_queues,
-            &device_config.queue_sizes,
-        )
-        .map_err(|e| {
-            RegisterVhostUserDevice(vmm::device_manager::mmio::Error::VhostUserDevice(e))
-        })?,
-    ));
-
-    event_manager
-        .add_subscriber(device.clone())
-        .map_err(RegisterEvent)?;
-
-    attach_mmio_device(vmm, device_name, intc.clone(), device).map_err(RegisterVhostUserDevice)?;
-
-    Ok(())
-}
-
 #[cfg(feature = "gpu")]
-#[allow(clippy::too_many_arguments)]
-fn attach_gpu_device(
-    vmm: &mut Vmm,
-    shm_manager: &mut ShmManager,
-    #[cfg(not(feature = "tee"))] mut export_table: Option<ExportTable>,
-    intc: IrqChip,
+struct GpuAttach {
+    #[cfg(not(feature = "tee"))]
+    export_table: Option<ExportTable>,
     virgl_flags: u32,
     displays: Box<[DisplayInfo]>,
     display_backend: DisplayBackend<'static>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
+}
 
-    let gpu = Arc::new(Mutex::new(
-        devices::virtio::Gpu::new(
-            virgl_flags,
-            displays,
-            display_backend,
-            #[cfg(target_os = "macos")]
-            map_sender,
-        )
-        .unwrap(),
-    ));
+#[cfg(feature = "gpu")]
+impl AttachDevice for GpuAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
 
-    let id = String::from(gpu.lock().unwrap().id());
+        let gpu = Arc::new(Mutex::new(
+            devices::virtio::Gpu::new(
+                self.virgl_flags,
+                self.displays,
+                self.display_backend,
+                #[cfg(target_os = "macos")]
+                ctx.map_sender().expect("gpu device requires a map sender"),
+            )
+            .unwrap(),
+        ));
 
-    if let Some(shm_region) = shm_manager.gpu_region() {
-        gpu.lock().unwrap().set_shm_region(VirtioShmRegion {
-            host_addr: vmm
-                .guest_memory
-                .get_host_address(shm_region.guest_addr)
-                .map_err(StartMicrovmError::ShmHostAddr)? as u64,
-            guest_addr: shm_region.guest_addr.raw_value(),
-            size: shm_region.size,
-        });
+        let id = String::from(gpu.lock().unwrap().id());
+
+        if let Some(region) = ctx.resolved_gpu_shm_region() {
+            gpu.lock().unwrap().set_shm_region(region.into());
+        }
+
+        #[cfg(not(feature = "tee"))]
+        if let Some(export_table) = self.export_table {
+            gpu.lock().unwrap().set_export_table(export_table);
+        }
+
+        ctx.register_mmio_device(&id, gpu)
+            .map_err(RegisterGpuDevice)?;
+
+        Ok(())
     }
-
-    #[cfg(not(feature = "tee"))]
-    if let Some(export_table) = export_table.take() {
-        gpu.lock().unwrap().set_export_table(export_table);
-    }
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc, gpu).map_err(RegisterGpuDevice)?;
-
-    Ok(())
 }
 
 #[cfg(feature = "input")]
-fn attach_input_devices(
-    vmm: &mut Vmm,
-    input_backends: &[(
-        krun_input::InputConfigBackend<'static>,
-        krun_input::InputEventProviderBackend<'static>,
-    )],
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use StartMicrovmError::*;
+struct InputAttach {
+    index: usize,
+    config_backend: krun_input::InputConfigBackend<'static>,
+    events_backend: krun_input::InputEventProviderBackend<'static>,
+}
 
-    for (index, (config_backend, events_backend)) in input_backends.iter().enumerate() {
+#[cfg(feature = "input")]
+impl AttachDevice for InputAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
         let input_device = Arc::new(Mutex::new(
-            devices::virtio::input::Input::new(*config_backend, *events_backend).unwrap(),
+            devices::virtio::input::Input::new(self.config_backend, self.events_backend).unwrap(),
         ));
+        let id = format!("input{}", self.index);
+        ctx.register_mmio_device(&id, input_device)
+            .map_err(StartMicrovmError::RegisterInputDevice)?;
+        Ok(())
+    }
+}
 
-        let id = format!("input{}", index);
-        attach_mmio_device(vmm, id, intc.clone(), input_device).map_err(RegisterInputDevice)?;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+struct FsAttach {
+    index: usize,
+    config: FsDeviceConfig,
+    export_table: Option<ExportTable>,
+    exit_code: Arc<AtomicI32>,
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl AttachDevice for FsAttach {
+    fn device_index(&self) -> usize {
+        self.index
     }
 
-    Ok(())
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
+
+        let fs = Arc::new(Mutex::new(
+            devices::virtio::Fs::new(
+                self.config.fs_id.clone(),
+                PermissionSemantics::LinuxComplete,
+                self.config.shared_dir.clone(),
+                self.exit_code,
+                self.config.read_only,
+                self.config.virtual_entries.clone(),
+            )
+            .unwrap(),
+        ));
+
+        let id = format!("{}{}", String::from(fs.lock().unwrap().id()), self.index);
+
+        if let Some(region) = ctx.resolved_shm_region() {
+            fs.lock().unwrap().set_shm_region(region.into());
+        }
+
+        if let Some(export_table) = self.export_table {
+            fs.lock().unwrap().set_export_table(export_table);
+        }
+
+        #[cfg(target_os = "macos")]
+        fs.lock()
+            .unwrap()
+            .set_map_sender(ctx.map_sender().expect("fs device requires a map sender"));
+
+        ctx.register_mmio_device(&id, fs)
+            .map_err(RegisterFsDevice)?;
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "blk")]
+struct BlockAttach {
+    device: Arc<Mutex<devices::virtio::Block>>,
+}
+
+#[cfg(feature = "blk")]
+impl AttachDevice for BlockAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        let id = String::from(self.device.lock().unwrap().id());
+        ctx.register_mmio_device(&id, self.device)
+            .map_err(StartMicrovmError::RegisterBlockDevice)?;
+        Ok(())
+    }
+}
+
+struct VsockAttach {
+    device: Arc<Mutex<Vsock>>,
+}
+
+impl AttachDevice for VsockAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        use StartMicrovmError::*;
+
+        ctx.subscribe_events(self.device.clone())
+            .map_err(RegisterEvent)?;
+        let id = String::from(self.device.lock().unwrap().id());
+        ctx.register_mmio_device(&id, self.device)
+            .map_err(RegisterVsockDevice)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "net")]
+struct NetAttach {
+    device: Arc<Mutex<devices::virtio::Net>>,
+}
+
+#[cfg(feature = "net")]
+impl AttachDevice for NetAttach {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), StartMicrovmError> {
+        let id = String::from(self.device.lock().unwrap().id());
+        ctx.register_mmio_device(&id, self.device)
+            .map_err(StartMicrovmError::RegisterNetDevice)?;
+        Ok(())
+    }
 }

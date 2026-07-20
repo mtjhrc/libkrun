@@ -137,8 +137,22 @@ impl<'a> AttachContext<'a> {
         vmm::signal_handler::register_sigwinch_handler(fd)
     }
 
-    pub(crate) fn setup_terminal_raw_mode(&mut self, fd: BorrowedFd<'_>) {
-        setup_terminal_raw_mode(self.vmm, Some(fd), false);
+    #[cfg(unix)]
+    pub(crate) fn setup_terminal_raw_mode(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        handle_signals_by_terminal: bool,
+    ) {
+        setup_terminal_raw_mode(self.vmm, Some(fd), handle_signals_by_terminal);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn setup_terminal_raw_mode(
+        &mut self,
+        handle: utils::windows::SendHandle,
+        handle_signals_by_terminal: bool,
+    ) {
+        setup_terminal_raw_mode(self.vmm, Some(handle), handle_signals_by_terminal);
     }
 
     #[cfg(target_os = "macos")]

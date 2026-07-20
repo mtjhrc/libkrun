@@ -118,7 +118,7 @@ impl<'a> AttachContext<'a> {
     /// Set up terminal raw mode for the given fd, registering a cleanup
     /// observer to restore the terminal on VM shutdown.
     pub fn setup_terminal_raw_mode(&mut self, fd: BorrowedFd<'_>) {
-        self.0.setup_terminal_raw_mode(fd);
+        self.0.setup_terminal_raw_mode(fd, false);
     }
 
     /// Get the macOS memory mapping channel sender, if available.

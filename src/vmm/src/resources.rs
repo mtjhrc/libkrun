@@ -127,6 +127,7 @@ pub struct SerialConsoleConfig {
 }
 
 #[cfg(unix)]
+#[derive(Clone)]
 pub struct DefaultVirtioConsoleConfig {
     pub input_fd: RawFd,
     pub output_fd: RawFd,
@@ -134,18 +135,21 @@ pub struct DefaultVirtioConsoleConfig {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone)]
 pub struct DefaultVirtioConsoleConfig {
     pub input_handle: SendHandle,
     pub output_handle: SendHandle,
     pub err_handle: SendHandle,
 }
 
+#[derive(Clone)]
 pub enum VirtioConsoleConfigMode {
     Autoconfigure(DefaultVirtioConsoleConfig),
     Explicit(Vec<PortConfig>),
 }
 
 #[cfg(unix)]
+#[derive(Clone)]
 pub enum PortConfig {
     Tty {
         name: String,
@@ -159,6 +163,7 @@ pub enum PortConfig {
 }
 
 #[cfg(windows)]
+#[derive(Clone)]
 pub enum PortConfig {
     Tty {
         name: String,
