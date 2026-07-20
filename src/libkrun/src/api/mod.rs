@@ -6,7 +6,7 @@ pub mod vmm_builder;
 
 pub use devices::{
     AttachContext, AttachDevice, BalloonDevice, ConsoleBuilder, ConsoleDevice, DeviceManager,
-    DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion,
+    DeviceRequirements, FsDevice, FsOverlay, MmioDeviceManager, ResolvedShmRegion, RngDevice,
 };
 pub use error::{DetailedError, Error};
 pub use logging::{LOG_OPTION_NO_ENV, LogLevel, LogStyle, init_log};
@@ -27,7 +27,9 @@ ffier::library_definition!("krun", library_tag = 1,
     crate::api::devices::BalloonDevice = 15,
     crate::api::devices::AttachDevice for crate::api::devices::FsDevice,
     crate::api::devices::AttachDevice for crate::api::devices::ConsoleDevice,
+    crate::api::devices::RngDevice = 16,
     crate::api::devices::AttachDevice for crate::api::devices::BalloonDevice,
+    crate::api::devices::AttachDevice for crate::api::devices::RngDevice,
     trait ffier_builtins::PushStr = 12,
     trait ffier_builtins::Error = 13,
     Error for crate::api::error::Error,
