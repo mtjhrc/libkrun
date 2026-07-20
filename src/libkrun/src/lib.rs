@@ -2,6 +2,7 @@
 extern crate log;
 
 mod attach;
+mod boot;
 pub mod api;
 pub use api::{DetailedError, Error, LogLevel, LogStyle, LogTarget, init_log};
 
@@ -2978,7 +2979,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
 
     let (sender, _receiver) = unbounded();
 
-    let _vmm = match vmm::builder::build_microvm(
+    let _vmm = match crate::boot::build_microvm(
         &ctx_cfg.vmr,
         &mut event_manager,
         ctx_cfg.shutdown_efd,
