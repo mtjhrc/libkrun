@@ -16,14 +16,15 @@ typedef void* KrunPayload;
 typedef void* KrunVmmBuilder;
 typedef void* KrunVmm;
 typedef void* KrunFsOverlay;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice */
+typedef void* KrunBalloonDevice;
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunPayload | KrunVmmBuilder | KrunVmm | KrunFsOverlay */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunPayload | KrunVmmBuilder | KrunVmm | KrunFsOverlay | KrunBalloonDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -366,6 +367,13 @@ void krun_fs_overlay_add_file(KrunFsOverlay handle, KrunStr path, KrunBytes data
 typedef void (*krun_fs_overlay_add_file_fn)(KrunFsOverlay handle, KrunStr path, KrunBytes data, uint32_t mode, bool one_shot);
 void krun_fs_overlay_destroy(KrunFsOverlay handle);
 typedef void (*krun_fs_overlay_destroy_fn)(KrunFsOverlay handle);
+
+/* BalloonDevice ----------------------------------------------------- */
+
+KrunBalloonDevice krun_balloon_device_new(KrunError* err_out);
+typedef KrunBalloonDevice (*krun_balloon_device_new_fn)(KrunError* err_out);
+void krun_balloon_device_destroy(KrunBalloonDevice handle);
+typedef void (*krun_balloon_device_destroy_fn)(KrunBalloonDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 
