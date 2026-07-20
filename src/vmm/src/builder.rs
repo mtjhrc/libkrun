@@ -1764,7 +1764,6 @@ pub mod tests {
             None,
             &[],
             None,
-            None,
             false,
             &Payload::Empty,
         )
