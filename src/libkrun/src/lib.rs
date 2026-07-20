@@ -1,6 +1,8 @@
 #[macro_use]
 extern crate log;
 
+mod attach;
+
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
 use devices::virtio::CacheType;
