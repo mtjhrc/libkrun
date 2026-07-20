@@ -62,6 +62,7 @@ def assisted_by(msg: str) -> Iterator[tuple[str, str | None, str | None]]:
 BANNED_CO_AUTHOR_EMAILS = [
     _re(r"^noreply@anthropic\.com$"),
     _re(r"^(\d+\+)?copilot@(github\.com|users\.noreply\.github\.com)$"),
+    _re(r"^cursoragent@cursor\.com$"),
 ]
 NON_STANDARD_AI_ATRIBUTION = [
     _re(r"^[^\x00-\x7F]*\s*Generated with \[Claude Code\]"),
@@ -81,6 +82,8 @@ def suggest_assisted_by(name: str, email: str) -> str | None:
         return "Assisted-by: Claude Code:<model>"
     if "github" in email:
         return "Assisted-by: Copilot:<model>"
+    if email.lower() == "cursoragent@cursor.com":
+        return "Assisted-by: Cursor:<model>"
     return None
 
 
@@ -206,6 +209,8 @@ def tests() -> None:
         "Co-authored-by: Copilot <999999+Copilot@users.noreply.github.com>",
         "Co-authored-by: 🤖 Claude <noreply@anthropic.com>",
         "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+        "Co-authored-by: Cursor <cursoragent@cursor.com>",
+        "Co-Authored-By: Cursor <cursoragent@cursor.com>",
     ]:
         expect("banned co-author", v, errors=1)
 
@@ -214,6 +219,7 @@ def tests() -> None:
         "Co-authored-by: John Doe <john@example.com>",
         "Co-authored-by: Claude Bernard <claude.bernard@anthropic.com>",
         "Co-authored-by: Mike Copilot <mike.copilot@github.com>",
+        "Co-authored-by: Alice Cursor <alice@cursor.com>",
     ]:
         expect("human co-author", v)
 
@@ -238,6 +244,7 @@ def tests() -> None:
         ("\N{ROBOT FACE} Claude", "noreply@anthropic.com", "Assisted-by: Claude Code:<model>"),
         ("Copilot", "copilot@github.com", "Assisted-by: Copilot:<model>"),
         ("Copilot", "223556219+Copilot@users.noreply.github.com", "Assisted-by: Copilot:<model>"),
+        ("Cursor", "cursoragent@cursor.com", "Assisted-by: Cursor:<model>"),
     ]
     for name, email, expected in suggestion_cases:
         got = suggest_assisted_by(name, email)
