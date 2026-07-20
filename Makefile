@@ -1,4 +1,3 @@
-LIBRARY_HEADER = include/libkrun.h
 LIBRARY_HEADER_DISPLAY = include/libkrun_display.h
 LIBRARY_HEADER_INPUT = include/libkrun_input.h
 LIBRARY_HEADER_INIT = include/libkrun_init.h
@@ -269,7 +268,6 @@ install: libkrun.pc libkrun_init.pc
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
 	install -d $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER) $(DESTDIR)$(PREFIX)/include
 	install -m 644 $(LIBRARY_HEADER_DISPLAY) $(DESTDIR)$(PREFIX)/include
 	install -m 644 $(LIBRARY_HEADER_INPUT) $(DESTDIR)$(PREFIX)/include
 	install -m 644 $(LIBRARY_HEADER_INIT) $(DESTDIR)$(PREFIX)/include
