@@ -1320,3 +1320,66 @@ impl<'a> AttachDevice<'a> for InputDevice {
         ctx.register(&id, inner)
     }
 }
+
+// ---------------------------------------------------------------------------
+// VhostUserDevice
+// ---------------------------------------------------------------------------
+
+/// A vhost-user device backed by an external process.
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+pub struct VhostUserDevice {
+    inner: Arc<Mutex<devices::virtio::VhostUserDevice>>,
+    name: String,
+}
+
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+#[ffier::export]
+impl VhostUserDevice {
+    pub fn new(
+        device_type: u32,
+        socket_path: &str,
+        name: &str,
+        num_queues: u16,
+        queue_sizes: &[u16],
+    ) -> Result<Self, Error> {
+        let device_name = if name.is_empty() {
+            format!("vhost-user-{device_type}")
+        } else {
+            name.to_string()
+        };
+        let name = device_name.clone();
+        let device = devices::virtio::VhostUserDevice::new(
+            socket_path,
+            device_type,
+            device_name,
+            num_queues,
+            queue_sizes,
+        )
+        .map_err(|e| {
+            log::error!("vhost-user: {e}");
+            Error::Internal()
+        })?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(device)),
+            name,
+        })
+    }
+}
+
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+#[ffier::export]
+impl<'a> AttachDevice<'a> for VhostUserDevice {
+    #[ffier(skip)]
+    fn requirements(&self) -> DeviceRequirements {
+        DeviceRequirements {
+            process_shareable_memory: true,
+            ..Default::default()
+        }
+    }
+
+    #[ffier(skip)]
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
+        ctx.subscribe_events(self.inner.clone())?;
+        ctx.register(&self.name, self.inner)
+    }
+}
