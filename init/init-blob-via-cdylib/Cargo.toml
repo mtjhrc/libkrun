@@ -14,8 +14,9 @@ test = false
 doctest = false
 
 [build-dependencies]
-ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "9ee67e2" }
+ffier-gen-rust-client = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }
 pkg-config = "0.3"
 
 [dependencies]
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "9ee67e2" }
+ffier = { git = "file:///home/mhrica/Dev2/ffier/ffier.git", rev = "aaafc8a8ad351ec1b05eae7c5f929e275273bc4d" }
+krun-via-cdylib-weak = { path = "../../src/libkrun-via-cdylib-weak" }
