@@ -286,6 +286,7 @@ impl Default for FsOverlay {
     }
 }
 
+#[ffier::export]
 impl FsOverlay {
     /// Create a new empty overlay.
     pub fn new() -> Self {
@@ -322,7 +323,9 @@ impl FsOverlay {
         };
         self.add_at_path(path, entry);
     }
+}
 
+impl FsOverlay {
     /// Consume the overlay and return the raw virtual directory entries.
     pub fn into_entries(self) -> Vec<VirtualDirEntry> {
         self.entries

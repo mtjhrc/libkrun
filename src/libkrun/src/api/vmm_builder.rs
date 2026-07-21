@@ -126,7 +126,20 @@ impl<'a> VmmBuilder<'a> {
         self
     }
 
-    #[cfg(feature = "tee")]
+    /// Build the VM, creating guest memory, attaching devices, and starting
+    /// vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
+    /// must have been set.
+    pub fn build(self) -> Result<Vmm<'a>, Error> {
+        build_vm(self).map_err(|e| {
+            log::error!("{e}");
+            e.code
+        })
+    }
+}
+
+#[cfg(feature = "tee")]
+#[ffier::export]
+impl<'a> VmmBuilder<'a> {
     pub fn tee_config_file(mut self, path: &str) -> Result<Self, Error> {
         let tee_config = vmm::resources::load_tee_config(Path::new(path)).map_err(|e| {
             log::error!("tee config: {e:?}");
@@ -142,16 +155,6 @@ impl<'a> VmmBuilder<'a> {
         })?;
         self.tee_config = Some(tee_config);
         Ok(self)
-    }
-
-    /// Build the VM, creating guest memory, attaching devices, and starting
-    /// vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
-    /// must have been set.
-    pub fn build(self) -> Result<Vmm<'a>, Error> {
-        build_vm(self).map_err(|e| {
-            log::error!("{e}");
-            e.code
-        })
     }
 }
 
