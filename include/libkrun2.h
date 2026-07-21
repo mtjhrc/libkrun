@@ -335,6 +335,15 @@ typedef void (*krun_vmm_builder_payload_fn)(KrunVmmBuilder* handle, KrunPayload 
 void krun_vmm_builder_devices(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
 typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
 /**
+ * Set a file descriptor to use as the serial console (COM1) input.
+ *
+ * Ownership of the fd is transferred to the VM on [`build`](Self::build).
+ * Used for FreeBSD guests that require serial console input (e.g. a pipe
+ * read end to prevent kqueue busy-spin on macOS).
+ */
+void krun_vmm_builder_serial_input_fd(KrunVmmBuilder* handle, int fd);
+typedef void (*krun_vmm_builder_serial_input_fd_fn)(KrunVmmBuilder* handle, int fd);
+/**
  * Build the VM, creating guest memory, attaching devices, and starting
  * vCPUs. All required fields (`vcpus`, `ram_mib`, `kernel`, `devices`)
  * must have been set.

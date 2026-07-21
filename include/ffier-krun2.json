@@ -944,6 +944,29 @@
           "ffi_name": "krun_vmm_builder_devices"
         },
         {
+          "name": "serial_input_fd",
+          "doc": [
+            " Set a file descriptor to use as the serial console (COM1) input.",
+            "",
+            " Ownership of the fd is transferred to the VM on [`build`](Self::build).",
+            " Used for FreeBSD guests that require serial console input (e.g. a pipe",
+            " read end to prevent kqueue busy-spin on macOS)."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "fd",
+              "param_kind": "regular",
+              "type": "RawFd"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_vmm_builder_serial_input_fd"
+        },
+        {
           "name": "build",
           "doc": [
             " Build the VM, creating guest memory, attaching devices, and starting",

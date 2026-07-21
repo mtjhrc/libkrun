@@ -1519,6 +1519,23 @@ pub unsafe fn krun_vmm_builder_devices(
     }
 }
 
+static KRUN_VMM_BUILDER_SERIAL_INPUT_FD: std::sync::OnceLock<
+    unsafe extern "C" fn(*mut core::ffi::c_void, <RawFd as FfiType>::CRepr),
+> = std::sync::OnceLock::new();
+#[allow(non_snake_case)]
+pub unsafe fn krun_vmm_builder_serial_input_fd(
+    handle: *mut core::ffi::c_void,
+    fd: <RawFd as FfiType>::CRepr,
+) {
+    unsafe {
+        (KRUN_VMM_BUILDER_SERIAL_INPUT_FD
+            .get()
+            .expect("symbol `krun_vmm_builder_serial_input_fd` not loaded; call require() first"))(
+            handle, fd,
+        )
+    }
+}
+
 static KRUN_VMM_BUILDER_BUILD: std::sync::OnceLock<
     unsafe extern "C" fn(
         *mut core::ffi::c_void,
@@ -1658,6 +1675,24 @@ impl<'a> VmmBuilder<'a> {
             krun_vmm_builder_devices(
                 &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
                 <MmioDeviceManager<'a> as FfiType>::into_c(devices),
+            )
+        };
+        Self(__handle, std::marker::PhantomData)
+    }
+    #[doc = " Set a file descriptor to use as the serial console (COM1) input."]
+    #[doc = ""]
+    #[doc = " Ownership of the fd is transferred to the VM on [`build`](Self::build)."]
+    #[doc = " Used for FreeBSD guests that require serial console input (e.g. a pipe"]
+    #[doc = " read end to prevent kqueue busy-spin on macOS)."]
+    pub fn serial_input_fd(self, fd: RawFd) -> Self {
+        let mut __handle = {
+            let this = std::mem::ManuallyDrop::new(self);
+            this.0
+        };
+        unsafe {
+            krun_vmm_builder_serial_input_fd(
+                &mut __handle as *mut *mut core::ffi::c_void as *mut core::ffi::c_void,
+                <RawFd as FfiType>::into_c(fd),
             )
         };
         Self(__handle, std::marker::PhantomData)
@@ -3027,6 +3062,8 @@ pub enum Symbol {
     KrunVmmBuilderPayload,
     /// `krun_vmm_builder_devices`
     KrunVmmBuilderDevices,
+    /// `krun_vmm_builder_serial_input_fd`
+    KrunVmmBuilderSerialInputFd,
     /// `krun_vmm_builder_build`
     KrunVmmBuilderBuild,
     /// `krun_vmm_destroy`
@@ -3122,6 +3159,7 @@ impl Symbol {
             Symbol::KrunVmmBuilderRamMib => "krun_vmm_builder_ram_mib",
             Symbol::KrunVmmBuilderPayload => "krun_vmm_builder_payload",
             Symbol::KrunVmmBuilderDevices => "krun_vmm_builder_devices",
+            Symbol::KrunVmmBuilderSerialInputFd => "krun_vmm_builder_serial_input_fd",
             Symbol::KrunVmmBuilderBuild => "krun_vmm_builder_build",
             Symbol::KrunVmmDestroy => "krun_vmm_destroy",
             Symbol::KrunVmmRun => "krun_vmm_run",
@@ -3577,6 +3615,19 @@ pub fn require(
                             )>(b"krun_vmm_builder_devices\0")?
                         };
                         let _ = KRUN_VMM_BUILDER_DEVICES.set(f);
+                    }
+                }
+                Symbol::KrunVmmBuilderSerialInputFd => {
+                    if KRUN_VMM_BUILDER_SERIAL_INPUT_FD.get().is_none() {
+                        let f = unsafe {
+                            *lib.get::<unsafe extern "C" fn(
+                                *mut core::ffi::c_void,
+                                <RawFd as FfiType>::CRepr,
+                            )>(
+                                b"krun_vmm_builder_serial_input_fd\0"
+                            )?
+                        };
+                        let _ = KRUN_VMM_BUILDER_SERIAL_INPUT_FD.set(f);
                     }
                 }
                 Symbol::KrunVmmBuilderBuild => {
