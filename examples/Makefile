@@ -1,12 +1,15 @@
 ARCH = $(shell uname -m)
 OS = $(shell uname -s)
-LDFLAGS_x86_64_Linux = -lkrun -lkrun_init
-LDFLAGS_aarch64_Linux = -lkrun -lkrun_init
-LDFLAGS_riscv64_Linux = -lkrun -lkrun_init
-LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib -lkrun -lkrun_init
-LDFLAGS_sev = -lkrun-sev
-LDFLAGS_tdx = -lkrun-tdx
-LDFLAGS_nitro = -lkrun-awsnitro
+# Prefer the in-tree build when present so examples match the headers in ../include.
+LIBDIR ?= $(abspath ../target/release)
+LDFLAGS_COMMON = -L$(LIBDIR) -Wl,-rpath,$(LIBDIR) -lkrun -lkrun_init
+LDFLAGS_x86_64_Linux = $(LDFLAGS_COMMON)
+LDFLAGS_aarch64_Linux = $(LDFLAGS_COMMON)
+LDFLAGS_riscv64_Linux = $(LDFLAGS_COMMON)
+LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib $(LDFLAGS_COMMON)
+LDFLAGS_sev = -L$(LIBDIR) -Wl,-rpath,$(LIBDIR) -lkrun-sev
+LDFLAGS_tdx = -L$(LIBDIR) -Wl,-rpath,$(LIBDIR) -lkrun-tdx
+LDFLAGS_nitro = -L$(LIBDIR) -Wl,-rpath,$(LIBDIR) -lkrun-awsnitro
 CFLAGS = -O2 -g -I../include
 ROOTFS_DISTRO := fedora
 ROOTFS_DIR = rootfs_$(ROOTFS_DISTRO)
