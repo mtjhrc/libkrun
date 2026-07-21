@@ -770,6 +770,14 @@ unsafe extern "C" {
         stderr: <RawFd as FfiType>::CRepr,
         err_out: *mut *mut core::ffi::c_void,
     ) -> ffier::FfierResult;
+    pub fn krun_console_builder_add_inout_port(
+        handle: *mut core::ffi::c_void,
+        name: <&'static str as FfiType>::CRepr,
+        input_fd: <i32 as FfiType>::CRepr,
+        output_fd: <i32 as FfiType>::CRepr,
+        result: *mut <u32 as FfiType>::CRepr,
+        err_out: *mut *mut core::ffi::c_void,
+    ) -> ffier::FfierResult;
 }
 
 pub struct ConsoleBuilder<'a>(*mut core::ffi::c_void, std::marker::PhantomData<&'a ()>);
@@ -911,6 +919,33 @@ impl<'a> ConsoleBuilder<'a> {
         };
         if __r == 0 {
             Ok(())
+        } else {
+            Err(Error::from_ffi(__r, __err))
+        }
+    }
+    #[doc = " Add a port with separate input and output fds (no terminal properties)."]
+    #[doc = ""]
+    #[doc = " Pass -1 for `input_fd` or `output_fd` to disable that direction."]
+    pub fn add_inout_port(
+        &mut self,
+        name: &str,
+        input_fd: i32,
+        output_fd: i32,
+    ) -> Result<u32, Error> {
+        let mut __out = std::mem::MaybeUninit::uninit();
+        let mut __err: *mut core::ffi::c_void = core::ptr::null_mut();
+        let __r = unsafe {
+            krun_console_builder_add_inout_port(
+                self.0,
+                <&str as FfiType>::into_c(name),
+                <i32 as FfiType>::into_c(input_fd),
+                <i32 as FfiType>::into_c(output_fd),
+                __out.as_mut_ptr(),
+                &mut __err as *mut *mut core::ffi::c_void,
+            )
+        };
+        if __r == 0 {
+            Ok(unsafe { <u32 as FfiType>::from_c(__out.assume_init()) })
         } else {
             Err(Error::from_ffi(__r, __err))
         }

@@ -693,6 +693,42 @@
             "c_convention": "out_param"
           },
           "ffi_name": "krun_console_builder_add_default_console"
+        },
+        {
+          "name": "add_inout_port",
+          "doc": [
+            " Add a port with separate input and output fds (no terminal properties).",
+            "",
+            " Pass -1 for `input_fd` or `output_fd` to disable that direction."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "name",
+              "param_kind": "regular",
+              "type": "str",
+              "ref_kind": "shared"
+            },
+            {
+              "name": "input_fd",
+              "param_kind": "regular",
+              "type": "i32"
+            },
+            {
+              "name": "output_fd",
+              "param_kind": "regular",
+              "type": "i32"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "u32"
+            },
+            "err_type": "Error",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_console_builder_add_inout_port"
         }
       ]
     },

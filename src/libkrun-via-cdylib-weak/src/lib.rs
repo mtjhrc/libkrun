@@ -1037,6 +1037,32 @@ pub unsafe fn krun_console_builder_add_default_console(
     }
 }
 
+static KRUN_CONSOLE_BUILDER_ADD_INOUT_PORT: std::sync::OnceLock<
+    unsafe extern "C" fn(
+        *mut core::ffi::c_void,
+        <&'static str as FfiType>::CRepr,
+        <i32 as FfiType>::CRepr,
+        <i32 as FfiType>::CRepr,
+        *mut <u32 as FfiType>::CRepr,
+        *mut *mut core::ffi::c_void,
+    ) -> ffier::FfierResult,
+> = std::sync::OnceLock::new();
+#[allow(non_snake_case)]
+pub unsafe fn krun_console_builder_add_inout_port(
+    handle: *mut core::ffi::c_void,
+    name: <&'static str as FfiType>::CRepr,
+    input_fd: <i32 as FfiType>::CRepr,
+    output_fd: <i32 as FfiType>::CRepr,
+    result: *mut <u32 as FfiType>::CRepr,
+    err_out: *mut *mut core::ffi::c_void,
+) -> ffier::FfierResult {
+    unsafe {
+        (KRUN_CONSOLE_BUILDER_ADD_INOUT_PORT.get().expect(
+            "symbol `krun_console_builder_add_inout_port` not loaded; call require() first",
+        ))(handle, name, input_fd, output_fd, result, err_out)
+    }
+}
+
 pub struct ConsoleBuilder<'a>(*mut core::ffi::c_void, std::marker::PhantomData<&'a ()>);
 
 impl<'a> ConsoleBuilder<'a> {
@@ -1176,6 +1202,33 @@ impl<'a> ConsoleBuilder<'a> {
         };
         if __r == 0 {
             Ok(())
+        } else {
+            Err(Error::from_ffi(__r, __err))
+        }
+    }
+    #[doc = " Add a port with separate input and output fds (no terminal properties)."]
+    #[doc = ""]
+    #[doc = " Pass -1 for `input_fd` or `output_fd` to disable that direction."]
+    pub fn add_inout_port(
+        &mut self,
+        name: &str,
+        input_fd: i32,
+        output_fd: i32,
+    ) -> Result<u32, Error> {
+        let mut __out = std::mem::MaybeUninit::uninit();
+        let mut __err: *mut core::ffi::c_void = core::ptr::null_mut();
+        let __r = unsafe {
+            krun_console_builder_add_inout_port(
+                self.0,
+                <&str as FfiType>::into_c(name),
+                <i32 as FfiType>::into_c(input_fd),
+                <i32 as FfiType>::into_c(output_fd),
+                __out.as_mut_ptr(),
+                &mut __err as *mut *mut core::ffi::c_void,
+            )
+        };
+        if __r == 0 {
+            Ok(unsafe { <u32 as FfiType>::from_c(__out.assume_init()) })
         } else {
             Err(Error::from_ffi(__r, __err))
         }
@@ -2506,6 +2559,8 @@ pub enum Symbol {
     KrunConsoleBuilderBuild,
     /// `krun_console_builder_add_default_console`
     KrunConsoleBuilderAddDefaultConsole,
+    /// `krun_console_builder_add_inout_port`
+    KrunConsoleBuilderAddInoutPort,
     /// `krun_payload_destroy`
     KrunPayloadDestroy,
     /// `krun_payload_load_krunfw`
@@ -2595,6 +2650,7 @@ impl Symbol {
             Symbol::KrunConsoleBuilderAddDefaultConsole => {
                 "krun_console_builder_add_default_console"
             }
+            Symbol::KrunConsoleBuilderAddInoutPort => "krun_console_builder_add_inout_port",
             Symbol::KrunPayloadDestroy => "krun_payload_destroy",
             Symbol::KrunPayloadLoadKrunfw => "krun_payload_load_krunfw",
             Symbol::KrunPayloadLoadExternal => "krun_payload_load_external",
@@ -2902,6 +2958,24 @@ pub fn require(
                             )?
                         };
                         let _ = KRUN_CONSOLE_BUILDER_ADD_DEFAULT_CONSOLE.set(f);
+                    }
+                }
+                Symbol::KrunConsoleBuilderAddInoutPort => {
+                    if KRUN_CONSOLE_BUILDER_ADD_INOUT_PORT.get().is_none() {
+                        let f = unsafe {
+                            *lib.get::<unsafe extern "C" fn(
+                                *mut core::ffi::c_void,
+                                <&'static str as FfiType>::CRepr,
+                                <i32 as FfiType>::CRepr,
+                                <i32 as FfiType>::CRepr,
+                                *mut <u32 as FfiType>::CRepr,
+                                *mut *mut core::ffi::c_void,
+                            )
+                                -> ffier::FfierResult>(
+                                b"krun_console_builder_add_inout_port\0"
+                            )?
+                        };
+                        let _ = KRUN_CONSOLE_BUILDER_ADD_INOUT_PORT.set(f);
                     }
                 }
                 Symbol::KrunPayloadDestroy => {

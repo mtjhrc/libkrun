@@ -672,74 +672,43 @@ impl<'a> ConsoleBuilder<'a> {
 
         // Named redirect ports for non-terminal fds
         if stdin >= 0 && !stdin_is_tty {
-            self.add_io_port("krun-stdin", Some(stdin), None)?;
+            self.add_inout_port("krun-stdin", stdin, -1)?;
         }
         if stdout >= 0 && !stdout_is_tty {
-            self.add_io_port("krun-stdout", None, Some(stdout))?;
+            self.add_inout_port("krun-stdout", -1, stdout)?;
         }
         if stderr >= 0 && !stderr_is_tty {
-            self.add_io_port("krun-stderr", None, Some(stderr))?;
+            self.add_inout_port("krun-stderr", -1, stderr)?;
         }
 
         Ok(())
     }
-}
-
-#[allow(dead_code)]
-impl ConsoleBuilder<'_> {
-    /// Add an output-only port (no input, no terminal).
-    pub(crate) fn add_output_port(
-        &mut self,
-        name: &str,
-        output: Box<dyn devices::virtio::port_io::PortOutput + Send>,
-    ) -> u32 {
-        let index = self.ports.len() as u32;
-        self.ports.push(PortDescription {
-            name: name.to_string().into(),
-            input: None,
-            output: Some(output),
-            terminal: None,
-        });
-        index
-    }
-
-    /// Add an output-only console port with fake terminal properties.
-    pub fn add_console_port(
-        &mut self,
-        name: &str,
-        output: Box<dyn devices::virtio::port_io::PortOutput + Send>,
-    ) -> u32 {
-        let index = self.ports.len() as u32;
-        self.ports.push(PortDescription {
-            name: name.to_string().into(),
-            input: None,
-            output: Some(output),
-            terminal: Some(port_io::term_fixed_size(80, 24)),
-        });
-        index
-    }
 
     /// Add a port with separate input and output fds (no terminal properties).
-    pub fn add_io_port(
+    ///
+    /// Pass -1 for `input_fd` or `output_fd` to disable that direction.
+    pub fn add_inout_port(
         &mut self,
         name: &str,
-        input_fd: Option<i32>,
-        output_fd: Option<i32>,
+        input_fd: i32,
+        output_fd: i32,
     ) -> Result<u32, Error> {
         let index = self.ports.len() as u32;
-        let input = match input_fd {
-            Some(fd) if fd >= 0 => Some(port_io::input_to_raw_fd_dup(fd).map_err(|e| {
+        let input = if input_fd >= 0 {
+            Some(port_io::input_to_raw_fd_dup(input_fd).map_err(|e| {
                 log::error!("dup input fd: {e}");
                 Error::BadFd()
-            })?),
-            _ => None,
+            })?)
+        } else {
+            None
         };
-        let output = match output_fd {
-            Some(fd) if fd >= 0 => Some(port_io::output_to_raw_fd_dup(fd).map_err(|e| {
+        let output = if output_fd >= 0 {
+            Some(port_io::output_to_raw_fd_dup(output_fd).map_err(|e| {
                 log::error!("dup output fd: {e}");
                 Error::BadFd()
-            })?),
-            _ => None,
+            })?)
+        } else {
+            None
         };
         self.ports.push(PortDescription {
             name: name.to_string().into(),
@@ -749,7 +718,9 @@ impl ConsoleBuilder<'_> {
         });
         Ok(index)
     }
+}
 
+impl ConsoleBuilder<'_> {
     fn add_tty_port_inner(&mut self, name: &str, tty_fd: BorrowedFd<'_>) -> Result<(), Error> {
         let raw_fd = tty_fd.as_raw_fd();
 

@@ -281,6 +281,13 @@ typedef KrunConsoleDevice (*krun_console_builder_build_fn)(KrunConsoleBuilder ha
  */
 KrunResult krun_console_builder_add_default_console(KrunConsoleBuilder handle, int stdin, int stdout, int stderr, KrunError* err_out);
 typedef KrunResult (*krun_console_builder_add_default_console_fn)(KrunConsoleBuilder handle, int stdin, int stdout, int stderr, KrunError* err_out);
+/**
+ * Add a port with separate input and output fds (no terminal properties).
+ *
+ * Pass -1 for `input_fd` or `output_fd` to disable that direction.
+ */
+KrunResult krun_console_builder_add_inout_port(KrunConsoleBuilder handle, KrunStr name, int32_t input_fd, int32_t output_fd, uint32_t* result, KrunError* err_out);
+typedef KrunResult (*krun_console_builder_add_inout_port_fn)(KrunConsoleBuilder handle, KrunStr name, int32_t input_fd, int32_t output_fd, uint32_t* result, KrunError* err_out);
 void krun_console_builder_destroy(KrunConsoleBuilder handle);
 typedef void (*krun_console_builder_destroy_fn)(KrunConsoleBuilder handle);
 
