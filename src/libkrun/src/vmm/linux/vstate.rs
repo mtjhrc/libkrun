@@ -1832,8 +1832,6 @@ mod tests {
     use crate::vmm::builder::Payload;
     #[cfg(target_arch = "aarch64")]
     use crate::vmm::builder::create_guest_memory;
-    #[cfg(target_arch = "aarch64")]
-    use crate::vmm::resources::VmResources;
     use devices;
     #[cfg(target_arch = "x86_64")]
     use devices::legacy::KvmIoapic;
@@ -1962,9 +1960,22 @@ mod tests {
     #[test]
     fn test_configure_vcpu() {
         let kvm = KvmContext::new().unwrap();
-        let vm_resources = VmResources::default();
-        let (guest_memory, arch_memory_info, _shm_manager, _payload_config) =
-            create_guest_memory(128, &vm_resources, &Payload::Empty).unwrap();
+        let (guest_memory, arch_memory_info, _shm_manager, _payload_config) = create_guest_memory(
+            128,
+            None,
+            #[cfg(feature = "tee")]
+            None,
+            #[cfg(feature = "tee")]
+            None,
+            None,
+            &[],
+            None,
+            false,
+            &Payload::Empty,
+            #[cfg(feature = "tee")]
+            None,
+        )
+        .unwrap();
         let mut vm = Vm::new(kvm.fd()).expect("new vm failed");
         assert!(vm.memory_init(&guest_memory, kvm.max_memslots()).is_ok());
 
