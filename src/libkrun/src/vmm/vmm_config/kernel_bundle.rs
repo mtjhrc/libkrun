@@ -1,35 +1,17 @@
 // Copyright 2020, Red Hat Inc. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "tee")]
 use std::fmt::{Display, Formatter, Result};
 
 /// Data structure holding the attributes read from the `libkrunfw` kernel config.
 #[derive(Debug, Default)]
-#[allow(unused)]
 pub struct KernelBundle {
     pub host_addr: u64,
     pub guest_addr: u64,
+    #[cfg_attr(all(feature = "amd-sev", not(feature = "tdx")), allow(dead_code))]
     pub entry_addr: u64,
     pub size: usize,
-}
-
-/// Structure used to specify the parameters for the `libkrunfw` kernel bundle.
-#[derive(Debug)]
-pub enum KernelBundleError {
-    /// Guest address is not page-aligned.
-    InvalidGuestAddress,
-    /// Host address is zero or not page-aligned.
-    InvalidHostAddress,
-}
-
-impl Display for KernelBundleError {
-    fn fmt(&self, f: &mut Formatter) -> Result {
-        use self::KernelBundleError::*;
-        match *self {
-            InvalidGuestAddress => write!(f, "Guest address is not page-aligned"),
-            InvalidHostAddress => write!(f, "Host address is zero or not page-aligned"),
-        }
-    }
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` qboot config.
