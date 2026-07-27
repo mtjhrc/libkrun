@@ -219,13 +219,13 @@ pub struct Vmm {
     // notify-driven, so a frozen guest leaves them idle without explicit
     // handling.
     #[cfg(target_os = "macos")]
-    vm_ctl_tx: PollableChannelSender<VmCtl>,
+    pub vm_ctl_tx: PollableChannelSender<VmCtl>,
     #[cfg(target_os = "macos")]
-    vm_ctl_rx: PollableChannelReciever<VmCtl>,
+    pub vm_ctl_rx: PollableChannelReciever<VmCtl>,
     #[cfg(target_os = "macos")]
-    paused: bool,
+    pub paused: bool,
     #[cfg(target_os = "macos")]
-    paused_at: u64,
+    pub paused_at: u64,
 }
 
 /// Out-of-band request to the running VM's event loop.
