@@ -13,11 +13,12 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Default)]
 pub struct IntelTdx {}
 
 impl IntelTdx {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 
     pub fn vm_prepare(&self, vm_fd: &VmFd, cpuid: kvm_bindings::CpuId) -> Result<Launcher> {
