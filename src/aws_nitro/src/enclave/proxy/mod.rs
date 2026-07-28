@@ -105,7 +105,7 @@ impl DeviceProxyList {
                                             continue;
                                         } else {
                                             // Error in fetching message from receiver thread.
-                                            return Err(Error::ShutdownSignalReceive(e))?;
+                                            return Err(Error::ShutdownSignalReceive(e));
                                         }
                                     }
                                 }
