@@ -368,9 +368,7 @@ impl TryFrom<ContextConfig> for NitroEnclave {
             return Err(-libc::EINVAL);
         };
 
-        let rootfs = if let Some(path) = &ctx.vmr.fs.first() {
-            path.shared_dir.clone()
-        } else {
+        let Some(rootfs) = ctx.vmr.fs.first().and_then(|p| p.shared_dir.clone()) else {
             error!("rootfs path required");
             return Err(-libc::EINVAL);
         };
