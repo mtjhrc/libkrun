@@ -57,7 +57,7 @@ use vmm::vmm_config::block::{BlockDeviceConfig, BlockRootConfig};
 use vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::firmware::FirmwareConfig;
-#[cfg(not(feature = "tee"))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vmm::vmm_config::fs::FsDeviceConfig;
 use vmm::vmm_config::kernel_bundle::KernelBundle;
 #[cfg(feature = "tee")]
