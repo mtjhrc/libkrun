@@ -25,6 +25,9 @@ jobs:
       
       - name: Clippy (net+blk+gpu+input)
         run: cargo clippy --locked --features net,blk,gpu,input -- -D warnings
+      
+      - name: Clippy (aws-nitro+net)
+        run: cargo clippy --locked --features aws-nitro,net -- -D warnings
 
   code-quality-linux-aarch64:
     name: libkrun (Linux aarch64)
