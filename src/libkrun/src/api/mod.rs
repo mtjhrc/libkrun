@@ -13,7 +13,7 @@ pub use device_builders::FsOverlay;
 pub use device_builders::RngDevice;
 pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
-    MmioDeviceManager, ResolvedShmRegion,
+    MmioDeviceManager, ResolvedShmRegion, VsockDevice,
 };
 pub use error::{DetailedError, Error};
 pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
