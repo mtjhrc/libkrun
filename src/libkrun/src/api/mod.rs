@@ -37,6 +37,8 @@ pub use device_builders::{
 };
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
 pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
+#[cfg(feature = "gpu")]
+pub use device_builders::{GpuDevice, VirglRendererFlags};
 pub use error::VmmError;
 pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
