@@ -35,6 +35,8 @@ pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
     MmioDeviceManager, ResolvedShmRegion, TsiFlags, VsockDevice,
 };
+#[cfg(any(feature = "gpu", feature = "vhost-user"))]
+pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
 pub use error::VmmError;
 pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
