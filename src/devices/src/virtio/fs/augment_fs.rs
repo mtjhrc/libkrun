@@ -55,7 +55,7 @@ pub struct AugmentFs<T> {
     name_to_inode: RwLock<HashMap<(Inode, CString), Inode>>,
     /// Maps virtual inode number → (mode, inode data). One-shot entries are
     /// removed from this map on release.
-    inodes: RwLock<HashMap<Inode, VirtualEntry>>,
+    inodes: RwLock<HashMap<Inode, VirtualEntry<'static>>>,
 }
 
 impl<T: FileSystem<Inode = Inode, Handle = Handle>> AugmentFs<T> {
@@ -64,7 +64,11 @@ impl<T: FileSystem<Inode = Inode, Handle = Handle>> AugmentFs<T> {
     /// `entries` are registered as virtual inodes in the root directory.
     /// Inode numbers are obtained from `inode_alloc`, the same allocator
     /// used by the inner filesystem.
-    pub fn new(inner: T, inode_alloc: &InodeAllocator, entries: Vec<VirtualDirEntry>) -> Self {
+    pub fn new(
+        inner: T,
+        inode_alloc: &InodeAllocator,
+        entries: Vec<VirtualDirEntry<'static>>,
+    ) -> Self {
         let mut name_to_inode = HashMap::new();
         let mut inodes = HashMap::new();
 
@@ -85,10 +89,10 @@ impl<T: FileSystem<Inode = Inode, Handle = Handle>> AugmentFs<T> {
 
     fn register_entries(
         parent: Inode,
-        entries: Vec<VirtualDirEntry>,
+        entries: Vec<VirtualDirEntry<'static>>,
         inode_alloc: &InodeAllocator,
         name_to_inode: &mut HashMap<(Inode, CString), Inode>,
-        inodes: &mut HashMap<Inode, VirtualEntry>,
+        inodes: &mut HashMap<Inode, VirtualEntry<'static>>,
     ) {
         for entry in entries {
             let ino = inode_alloc.next();
