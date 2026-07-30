@@ -785,6 +785,31 @@ impl<'a> AttachDevice<'a> for ConsoleDevice<'a> {
     }
 }
 
+/// A virtio balloon device for dynamic memory management.
+#[cfg(not(feature = "tee"))]
+pub struct BalloonDevice {
+    pub(crate) inner: Arc<Mutex<devices::virtio::Balloon>>,
+}
+
+#[cfg(not(feature = "tee"))]
+impl BalloonDevice {
+    pub fn new() -> Result<Self, Error> {
+        let balloon = devices::virtio::Balloon::new()
+            .map_err(|e| Error::Internal(format!("balloon: {e:?}")))?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(balloon)),
+        })
+    }
+}
+
+#[cfg(not(feature = "tee"))]
+impl<'a> AttachDevice<'a> for BalloonDevice {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), Error> {
+        ctx.subscribe_events(self.inner.clone())?;
+        ctx.register("balloon", self.inner)
+    }
+}
+
 /// Walk parent directory components in a virtual entry tree, returning the
 /// children vec of the deepest parent.
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
