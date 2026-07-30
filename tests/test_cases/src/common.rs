@@ -219,6 +219,7 @@ pub fn setup_standard_devices_from(
     let mut devices = krun::MmioDeviceManager::new();
     devices.add(rootfs);
     devices.add(console);
+    devices.add(krun::BalloonDevice::new().map_err(|e| anyhow::anyhow!("BalloonDevice: {e:?}"))?);
 
     Ok((devices, payload))
 }
@@ -256,6 +257,7 @@ pub fn build_and_run(
     let mut devices = krun::MmioDeviceManager::new();
     devices.add(rootfs);
     devices.add(console);
+    devices.add(krun::BalloonDevice::new().map_err(|e| anyhow::anyhow!("BalloonDevice: {e:?}"))?);
 
     let vmm = krun::VmmBuilder::new()
         .vcpus(num_cpus)
