@@ -104,6 +104,7 @@ pub fn build_and_run(
     devices.add(rootfs);
     devices.add(console);
     devices.add(krun::BalloonDevice::new().map_err(|e| anyhow::anyhow!("BalloonDevice: {e:?}"))?);
+    devices.add(krun::RngDevice::new().map_err(|e| anyhow::anyhow!("RngDevice: {e:?}"))?);
 
     let mut vmm = krun::VmmBuilder::new()
         .vcpus(num_cpus)
