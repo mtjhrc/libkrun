@@ -1,16 +1,24 @@
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use std::ffi::CString;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use std::marker::PhantomData;
 use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex};
 
 use devices::legacy::IrqChip;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualEntryContent};
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use devices::virtio::passthrough::PermissionSemantics;
 use devices::virtio::{VirtioDevice, VirtioShmRegion, VmmExitObserver};
+use polly::event_manager::{EventManager, Subscriber};
+use vm_memory::GuestMemoryMmap;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vm_memory::{Address, GuestMemory};
-use vm_memory::GuestMemoryMmap;
 use vmm::Vmm;
 use vmm::builder::{attach_mmio_device, setup_terminal_raw_mode};
 use vmm::device_manager::shm::ShmManager;
-use polly::event_manager::{EventManager, Subscriber};
 
 use super::error::{DetailedError, Error};
 
@@ -327,4 +335,263 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
         }
         Ok(())
     }
+}
+
+/// A set of virtual filesystem entries to overlay on a virtiofs device.
+///
+/// Entries are synthetic files/directories that exist only in memory,
+/// overlaid on top of the real (or null) host filesystem. They are
+/// visible to the guest but do not exist on the host.
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub struct FsOverlay {
+    entries: Vec<VirtualDirEntry>,
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl Default for FsOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl FsOverlay {
+    /// Create a new empty overlay.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add a virtual directory entry.
+    ///
+    /// `path` may contain `/` separators for nested entries (e.g. `"etc/nested"`).
+    /// Intermediate directories must already exist in the overlay.
+    pub fn add_dir(&mut self, path: &str, mode: u32) {
+        let entry = VirtualEntry {
+            mode,
+            one_shot: false,
+            content: VirtualEntryContent::Dir {
+                children: Vec::new(),
+            },
+        };
+        self.add_at_path(path, entry);
+    }
+
+    /// Add a virtual file entry.
+    ///
+    /// `path` may contain `/` separators for nested entries (e.g. `"etc/nested/file.txt"`).
+    /// Intermediate directories must already exist in the overlay.
+    pub fn add_file(&mut self, path: &str, data: &[u8], mode: u32, one_shot: bool) {
+        let data: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
+        let entry = VirtualEntry {
+            mode,
+            one_shot,
+            content: VirtualEntryContent::File { data },
+        };
+        self.add_at_path(path, entry);
+    }
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl FsOverlay {
+    /// Consume the overlay and return the raw virtual directory entries.
+    pub fn into_entries(self) -> Vec<VirtualDirEntry> {
+        self.entries
+    }
+
+    fn add_at_path(&mut self, path: &str, entry: VirtualEntry) {
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let components: Vec<&str> = path.split('/').collect();
+        let (leaf, parents) = components
+            .split_last()
+            .expect("overlay path must not be empty");
+
+        let target = resolve_parent_dirs(&mut self.entries, parents);
+        target.push(VirtualDirEntry {
+            name: CString::new(*leaf).unwrap(),
+            entry,
+        });
+    }
+}
+
+/// A virtio-fs (virtiofs) shared filesystem device.
+///
+/// Exposes a host directory to the guest as a shared filesystem.
+/// The `tag` is used by the guest to mount the filesystem
+/// (e.g. `mount -t virtiofs /dev/root /mnt`).
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub struct FsDevice<'a> {
+    pub(crate) inner: Arc<Mutex<devices::virtio::Fs>>,
+    #[allow(dead_code)]
+    pub(crate) tag: String,
+    pub(crate) shm_size: Option<usize>,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl<'a> FsDevice<'a> {
+    /// Create a new virtiofs device sharing a host directory.
+    ///
+    /// # Arguments
+    ///
+    /// - `tag`: the filesystem tag visible to the guest (e.g. `"/dev/root"`).
+    /// - `host_path`: the host directory to share.
+    pub fn new(tag: &str, host_path: &str) -> Result<Self, Error> {
+        Self::new_inner(tag, Some(host_path.to_string()), false)
+    }
+
+    /// Create a read-only virtiofs device sharing a host directory.
+    pub fn new_read_only(tag: &str, host_path: &str) -> Result<Self, Error> {
+        Self::new_inner(tag, Some(host_path.to_string()), true)
+    }
+
+    /// Create a virtiofs device with no host directory (NullFs).
+    ///
+    /// The guest sees an empty filesystem. Use
+    /// [`add_overlay_dir`](Self::add_overlay_dir) and
+    /// [`add_overlay_file`](Self::add_overlay_file) to populate it
+    /// with virtual entries.
+    pub fn new_null(tag: &str) -> Result<Self, Error> {
+        Self::new_inner(tag, None, false)
+    }
+
+    /// Add a virtual directory overlay entry.
+    ///
+    /// `path` may contain `/` separators for nested entries (e.g.
+    /// `"etc/nested"`). Intermediate directories must already exist.
+    pub fn add_overlay_dir(&mut self, path: &str, mode: u32) {
+        let entry = VirtualEntry {
+            mode,
+            one_shot: false,
+            content: VirtualEntryContent::Dir {
+                children: Vec::new(),
+            },
+        };
+        self.add_overlay_at_path(path, entry);
+    }
+
+    /// Add a virtual file overlay entry.
+    ///
+    /// `path` may contain `/` separators for nested entries (e.g.
+    /// `"etc/nested/deep.txt"`). Intermediate directories must already
+    /// exist.
+    pub fn add_overlay_file(&mut self, path: &str, data: &[u8], mode: u32, one_shot: bool) {
+        let data: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
+        let entry = VirtualEntry {
+            mode,
+            one_shot,
+            content: VirtualEntryContent::File { data },
+        };
+        self.add_overlay_at_path(path, entry);
+    }
+
+    /// Apply a pre-built [`FsOverlay`] to this device.
+    ///
+    /// All entries from the overlay are added as virtual entries into
+    /// the underlying virtiofs device.
+    pub fn set_overlay(&mut self, overlay: FsOverlay) {
+        let mut fs = self.inner.lock().unwrap();
+        for entry in overlay.into_entries() {
+            fs.add_virtual_entry(entry);
+        }
+    }
+
+    /// Set the size of the DAX (direct access) shared memory window.
+    ///
+    /// When set, the guest can memory-map files from the shared filesystem
+    /// directly into its address space, avoiding data copies. If not set,
+    /// no DAX window is allocated.
+    pub fn set_dax_window_size(&mut self, bytes: u64) {
+        self.shm_size = Some(bytes as usize);
+    }
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl<'a> FsDevice<'a> {
+    fn new_inner(tag: &str, host_path: Option<String>, read_only: bool) -> Result<Self, Error> {
+        let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+        let fs = devices::virtio::Fs::new(
+            tag.to_string(),
+            PermissionSemantics::LinuxComplete,
+            host_path,
+            exit_code.clone(),
+            read_only,
+            Vec::new(),
+        )
+        .map_err(|e| {
+            log::error!("fs device: {e:?}");
+            Error::Internal()
+        })?;
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(fs)),
+            tag: tag.to_string(),
+            shm_size: None,
+            _lifetime: PhantomData,
+        })
+    }
+
+    fn add_overlay_at_path(&mut self, path: &str, entry: VirtualEntry) {
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let components: Vec<&str> = path.split('/').collect();
+        let (leaf, parents) = components
+            .split_last()
+            .expect("overlay path must not be empty");
+
+        let mut fs = self.inner.lock().unwrap();
+        let entries = fs.virtual_entries_mut();
+
+        let target = resolve_parent_dirs(entries, parents);
+        target.push(VirtualDirEntry {
+            name: CString::new(*leaf).unwrap(),
+            entry,
+        });
+    }
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+impl<'a> AttachDevice<'a> for FsDevice<'a> {
+    fn requirements(&self) -> DeviceRequirements {
+        DeviceRequirements {
+            shm_size: self.shm_size,
+            ..Default::default()
+        }
+    }
+
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
+        {
+            let mut fs = self.inner.lock().unwrap();
+            // Wire exit code from VMM into the fs device
+            fs.set_exit_code(ctx.exit_code().clone());
+            // Set up SHM region if allocated
+            #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+            if let Some(region) = ctx.resolved_shm_region() {
+                fs.set_shm_region(region.into());
+            }
+        }
+
+        ctx.register(&format!("virtiofs{}", ctx.device_index()), self.inner)
+    }
+}
+
+/// Walk parent directory components in a virtual entry tree, returning the
+/// children vec of the deepest parent.
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+fn resolve_parent_dirs<'a>(
+    entries: &'a mut Vec<VirtualDirEntry>,
+    parents: &[&str],
+) -> &'a mut Vec<VirtualDirEntry> {
+    let mut current = entries;
+    for component in parents {
+        let dir = current
+            .iter_mut()
+            .find(|e| e.name.as_c_str().to_bytes() == component.as_bytes())
+            .unwrap_or_else(|| panic!("overlay parent directory {component:?} not found"));
+        match &mut dir.entry.content {
+            VirtualEntryContent::Dir { children } => current = children,
+            _ => panic!("overlay path component {component:?} is not a directory"),
+        }
+    }
+    current
 }

@@ -3,6 +3,10 @@ pub mod error;
 pub mod logging;
 pub mod payload;
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub use device_builders::FsDevice;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub use device_builders::FsOverlay;
 pub use device_builders::{
     AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
     ResolvedShmRegion,
