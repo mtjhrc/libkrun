@@ -45,6 +45,8 @@ use utils::worker_message::WorkerMessage;
 use vm_memory::GuestAddress;
 #[cfg(feature = "tee")]
 use vm_memory::GuestMemory;
+#[cfg(feature = "tdx")]
+use vm_memory::{Address, Bytes, GuestMemoryRegion};
 
 use kernel::cmdline::Cmdline;
 
@@ -67,10 +69,33 @@ pub(crate) fn build_microvm(
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
+    device_manager: Box<dyn crate::api::device_builders::DeviceManager<'_> + '_>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = vmm::builder::choose_payload(vm_resources)?;
 
-    let fs_shm_sizes: Vec<Option<usize>> = Vec::new();
+    let requirements = device_manager.requirements();
+    let fs_shm_sizes: Vec<Option<usize>> = requirements.iter().map(|r| r.shm_size).collect();
+    #[cfg(feature = "gpu")]
+    let gpu_shm_size = requirements.iter().filter_map(|r| r.gpu_shm).next();
+    #[cfg(not(feature = "gpu"))]
+    let gpu_shm_size: Option<usize> = None;
+    let use_vhost_user = requirements.iter().any(|r| r.process_shareable_memory);
+
+    #[cfg(feature = "tdx")]
+    let td_shim_parsed = if let Some(ref fw_cfg) = vm_resources.tee_firmware_config {
+        Some(
+            vmm::linux::tee::tdshim::TdShim::parse(&fw_cfg.path)
+                .map_err(|e| StartMicrovmError::TdShimError(format!("{e}")))?,
+        )
+    } else {
+        None
+    };
+
+    #[cfg(feature = "tdx")]
+    let firmware_range = td_shim_parsed
+        .as_ref()
+        .and_then(|t| t.high_firmware_range())
+        .map(|(start, end)| (start, (end - start) as usize));
 
     let (guest_memory, arch_memory_info, _shm_manager, payload_config) =
         vmm::builder::create_guest_memory(
@@ -85,10 +110,12 @@ pub(crate) fn build_microvm(
             vm_resources.initrd_bundle.as_ref(),
             vm_resources.firmware_config.as_ref(),
             &fs_shm_sizes,
-            None,
-            false,
+            gpu_shm_size,
+            use_vhost_user,
             &payload,
-            #[cfg(feature = "tee")]
+            #[cfg(feature = "tdx")]
+            firmware_range,
+            #[cfg(all(feature = "tee", not(feature = "tdx")))]
             None,
         )?;
 
@@ -220,31 +247,115 @@ pub(crate) fn build_microvm(
     };
 
     #[cfg(feature = "tdx")]
+    let td_shim_parsed = if let Some(ref fw_cfg) = vm_resources.tee_firmware_config {
+        Some(
+            vmm::linux::tee::tdshim::TdShim::parse(&fw_cfg.path)
+                .map_err(|e| StartMicrovmError::TdShimError(format!("{e}")))?,
+        )
+    } else {
+        None
+    };
+
+    #[cfg(feature = "tdx")]
+    if let Some(ref td_shim) = td_shim_parsed {
+        td_shim
+            .load_sections(&guest_memory)
+            .map_err(|e| StartMicrovmError::TdShimError(format!("{e}")))?;
+
+        arch::x86_64::setup_mptable_for_tdshim(
+            &guest_memory,
+            vm_resources.vm_config().vcpu_count.unwrap_or(1),
+        )
+        .map_err(|e| StartMicrovmError::Internal(Error::ConfigureSystem(e)))?;
+
+        if let (Some(kernel_bundle), Some(initrd_bundle)) =
+            (&vm_resources.kernel_bundle, &vm_resources.initrd_bundle)
+        {
+            let trampoline_addr =
+                kernel_bundle.entry_addr - vmm::linux::tee::tdshim::TRAMPOLINE_SIZE;
+            let trampoline = vmm::linux::tee::tdshim::build_boot_params_trampoline(
+                arch::x86_64::layout::INITRD_SEV_START as u32,
+                initrd_bundle.size.try_into().unwrap(),
+                arch::x86_64::layout::CMDLINE_START as u32,
+            );
+            guest_memory
+                .write(&trampoline, GuestAddress(trampoline_addr))
+                .map_err(|e| StartMicrovmError::TdShimError(format!("{e}")))?;
+        }
+    }
+
+    #[cfg(feature = "tdx")]
     let (measured_regions, tdx_hob_address) = {
         println!("Injecting and measuring memory regions. This may take a while.");
-        let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
-            qboot_bundle.size
-        } else {
-            return Err(StartMicrovmError::MissingKernelConfig);
-        };
-        let m = vec![
-            MeasuredRegion {
+        if let Some(ref td_shim) = td_shim_parsed {
+            let mut measured_regions: Vec<MeasuredRegion> = td_shim
+                .sections
+                .iter()
+                .map(|s| MeasuredRegion {
+                    guest_addr: s.memory_address,
+                    host_addr: guest_memory
+                        .get_host_address(GuestAddress(s.memory_address))
+                        .unwrap() as u64,
+                    size: s.memory_data_size as usize,
+                    attributes: if vmm::linux::tee::tdshim::is_bfv(s) {
+                        1
+                    } else {
+                        0
+                    },
+                })
+                .collect();
+
+            let ram_regions: Vec<(u64, u64)> = guest_memory
+                .iter()
+                .map(|region| (region.start_addr().raw_value(), region.len()))
+                .collect();
+
+            let startup_64 = vm_resources
+                .kernel_bundle
+                .as_ref()
+                .ok_or(StartMicrovmError::MissingKernelConfig)?
+                .entry_addr;
+            let hob_entry_point = if vm_resources.initrd_bundle.is_some() {
+                startup_64 - vmm::linux::tee::tdshim::TRAMPOLINE_SIZE
+            } else {
+                startup_64
+            };
+            td_shim
+                .generate_hobs(&guest_memory, hob_entry_point, &ram_regions)
+                .map_err(|e| StartMicrovmError::TdShimError(format!("{e}")))?;
+
+            let mut m = vec![MeasuredRegion {
                 guest_addr: 0,
                 host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
                 size: 0x8000_0000,
                 attributes: 0,
-            },
-            MeasuredRegion {
-                guest_addr: arch::FIRMWARE_START,
-                host_addr: guest_memory
-                    .get_host_address(GuestAddress(arch::FIRMWARE_START))
-                    .unwrap() as u64,
-                size: qboot_size,
-                attributes: 1,
-            },
-        ];
-
-        (m, 0u64)
+            }];
+            m.append(&mut measured_regions);
+            (m, td_shim.hob_address)
+        } else {
+            let qboot_size = if let Some(qboot_bundle) = &vm_resources.qboot_bundle {
+                qboot_bundle.size
+            } else {
+                return Err(StartMicrovmError::MissingKernelConfig);
+            };
+            let m = vec![
+                MeasuredRegion {
+                    guest_addr: 0,
+                    host_addr: guest_memory.get_host_address(GuestAddress(0)).unwrap() as u64,
+                    size: 0x8000_0000,
+                    attributes: 0,
+                },
+                MeasuredRegion {
+                    guest_addr: arch::FIRMWARE_START,
+                    host_addr: guest_memory
+                        .get_host_address(GuestAddress(arch::FIRMWARE_START))
+                        .unwrap() as u64,
+                    size: qboot_size,
+                    attributes: 1,
+                },
+            ];
+            (m, 0u64)
+        }
     };
 
     let mut serial_devices = Vec::new();
@@ -528,6 +639,21 @@ pub(crate) fn build_microvm(
     // Set raw mode for FDs that are connected to legacy serial devices.
     for serial_tty in serial_ttys {
         vmm::builder::setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
+    }
+
+    device_manager
+        .attach_all(
+            &mut vmm,
+            event_manager,
+            &_shm_manager,
+            intc.clone(),
+            #[cfg(target_os = "macos")]
+            Some(_sender.clone()),
+        )
+        .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
+
+    if let Some(s) = &vm_resources.kernel_cmdline.epilog {
+        vmm.kernel_cmdline.insert_str(s).unwrap();
     }
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
