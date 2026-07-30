@@ -1353,6 +1353,93 @@ impl<'a> AttachDevice<'a> for GpuDevice {
     }
 }
 
+/// A vhost-user device that connects to an external backend via a Unix socket.
+///
+/// The backend process handles device I/O on behalf of the guest. Because the
+/// backend must access guest memory directly, this device requires
+/// process-shareable (file-backed) guest memory — the requirement is declared
+/// via [`AttachDevice::requirements`] and flows into
+/// `create_guest_memory`'s `use_vhost_user` argument automatically.
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+pub struct VhostUserDevice {
+    device_type: u32,
+    socket_path: String,
+    name: String,
+    num_queues: u16,
+    queue_sizes: Vec<u16>,
+    backend: Option<DisplayBackend>,
+}
+
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+impl VhostUserDevice {
+    /// Create a new vhost-user device.
+    ///
+    /// # Arguments
+    ///
+    /// - `device_type`: virtio device type ID (e.g. 4 for RNG, 32 for Sound).
+    /// - `socket_path`: path to the vhost-user Unix domain socket.
+    /// - `name`: human-readable name for logging. If empty, defaults to
+    ///   `"vhost-user-{device_type}"`.
+    /// - `num_queues`: number of queues (0 = query backend via MQ protocol).
+    /// - `queue_sizes`: size for each queue (empty slice = use default of 256).
+    pub fn new(
+        device_type: u32,
+        socket_path: &str,
+        name: &str,
+        num_queues: u16,
+        queue_sizes: &[u16],
+    ) -> Result<Self, VmmError> {
+        let name = if name.is_empty() {
+            format!("vhost-user-{device_type}")
+        } else {
+            name.to_string()
+        };
+        Ok(Self {
+            device_type,
+            socket_path: socket_path.to_string(),
+            name,
+            num_queues,
+            queue_sizes: queue_sizes.to_vec(),
+            backend: None,
+        })
+    }
+
+    /// Set the display backend for this device (for vhost-user GPU devices).
+    pub fn set_display_backend(&mut self, backend: DisplayBackend) {
+        self.backend = Some(backend);
+    }
+}
+
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+impl<'a> AttachDevice<'a> for VhostUserDevice {
+    fn requirements(&self) -> DeviceRequirements {
+        DeviceRequirements {
+            process_shareable_memory: true,
+            ..Default::default()
+        }
+    }
+
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
+        let (gpu_display, display_backend) = match self.backend {
+            Some(b) => (b.displays.first().cloned(), Some(b.inner)),
+            None => (None, None),
+        };
+        let device = devices::virtio::VhostUserDevice::new(
+            &self.socket_path,
+            self.device_type,
+            self.name.clone(),
+            self.num_queues,
+            &self.queue_sizes,
+            gpu_display,
+            display_backend,
+        )
+        .map_err(|e| VmmError::Internal(format!("vhost-user: {e}")))?;
+        let inner = Arc::new(Mutex::new(device));
+        ctx.subscribe_events(inner.clone())?;
+        ctx.register(&self.name, inner)
+    }
+}
+
 /// A virtio input device forwarding host input events to the guest.
 #[cfg(feature = "input")]
 pub struct InputDevice<'a> {
