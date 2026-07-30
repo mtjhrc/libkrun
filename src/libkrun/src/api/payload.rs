@@ -6,8 +6,6 @@ pub use crate::vmm::vmm_config::external_kernel::KernelFormat;
 #[cfg(feature = "aws-nitro")]
 use crate::NitroConfig;
 
-// Fields are consumed by VmmBuilder once that API lands in a later commit.
-#[allow(dead_code)]
 pub(crate) enum PayloadKind {
     Kernel {
         bundle: crate::vmm::vmm_config::kernel_bundle::KernelBundle,
@@ -32,7 +30,6 @@ pub(crate) enum PayloadKind {
 }
 
 pub struct Payload {
-    #[allow(dead_code)] // consumed by VmmBuilder in a later commit
     pub(crate) kind: PayloadKind,
     pub(crate) cmdline: String,
 }
