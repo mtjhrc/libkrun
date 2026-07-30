@@ -3,7 +3,7 @@ name = "test_cases"
 edition = "2024"
 
 [features]
-host = ["krun", "krun-init-blob", "libloading", "serde", "serde_json"]
+host = ["krun", "krun/blk", "krun/net", "krun-init-blob", "libloading", "serde", "serde_json"]
 guest = []
 
 [lib]
