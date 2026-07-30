@@ -9,6 +9,8 @@ pub use device_builders::{
 };
 pub use error::{DetailedError, Error};
 pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
+#[cfg(feature = "aws-nitro")]
+pub use crate::NitroConfig;
 pub use payload::{KernelFormat, Payload};
 
 pub use devices::virtio::TsiFlags;
