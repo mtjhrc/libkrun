@@ -12,6 +12,8 @@ pub use device_builders::BlockDevice;
 pub use device_builders::FsDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsOverlay;
+#[cfg(feature = "net")]
+pub use device_builders::NetDevice;
 pub use device_builders::RngDevice;
 pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
