@@ -16,9 +16,11 @@ pub use device_builders::FsOverlay;
 pub use device_builders::NetDevice;
 pub use device_builders::RngDevice;
 #[cfg(feature = "gpu")]
-pub use device_builders::{DisplayBackend, DisplayInfoBuilder, GpuDevice};
+pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
 #[cfg(feature = "input")]
 pub use device_builders::InputDevice;
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+pub use device_builders::VhostUserDevice;
 pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
     MmioDeviceManager, ResolvedShmRegion, VsockDevice,
