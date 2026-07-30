@@ -17,6 +17,8 @@ pub use device_builders::NetDevice;
 pub use device_builders::RngDevice;
 #[cfg(feature = "gpu")]
 pub use device_builders::{DisplayBackend, DisplayInfoBuilder, GpuDevice};
+#[cfg(feature = "input")]
+pub use device_builders::InputDevice;
 pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
     MmioDeviceManager, ResolvedShmRegion, VsockDevice,
