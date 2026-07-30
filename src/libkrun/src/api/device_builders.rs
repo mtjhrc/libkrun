@@ -11,6 +11,8 @@ use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex};
 
 use devices::legacy::IrqChip;
+#[cfg(feature = "blk")]
+use devices::virtio::block::{DiskFormat, SyncMode};
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualEntryContent};
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
@@ -936,6 +938,76 @@ impl<'a> AttachDevice<'a> for VsockDevice {
         }
 
         Ok(())
+    }
+}
+
+/// A virtio block device backed by a disk image.
+#[cfg(feature = "blk")]
+pub struct BlockDevice {
+    id: String,
+    disk_image_path: String,
+    format: DiskFormat,
+    is_read_only: bool,
+    direct_io: bool,
+    sync_mode: SyncMode,
+}
+
+#[cfg(feature = "blk")]
+impl BlockDevice {
+    /// Create a new block device.
+    ///
+    /// Defaults to read-write (`read_only = false`), cached I/O (`direct_io = false`),
+    /// and [`SyncMode::Relaxed`].
+    pub fn new(id: &str, disk_image_path: &str, format: DiskFormat) -> Result<Self, Error> {
+        Ok(Self {
+            id: id.to_string(),
+            disk_image_path: disk_image_path.to_string(),
+            format,
+            is_read_only: false,
+            direct_io: false,
+            sync_mode: SyncMode::default(),
+        })
+    }
+
+    /// Set whether the block device is read-only.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.is_read_only = read_only;
+    }
+
+    /// Set whether to bypass the host caches.
+    pub fn set_direct_io(&mut self, direct_io: bool) {
+        self.direct_io = direct_io;
+    }
+
+    /// Set whether to enable VIRTIO_BLK_F_FLUSH.
+    ///
+    /// On macOS, an additional relaxed sync mode is available, which is enabled by default,
+    /// and will not ask the drive to flush its buffered data.
+    pub fn set_sync_mode(&mut self, sync_mode: SyncMode) {
+        self.sync_mode = sync_mode;
+    }
+}
+
+#[cfg(feature = "blk")]
+impl<'a> AttachDevice<'a> for BlockDevice {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), Error> {
+        use devices::virtio::CacheType;
+
+        let block = devices::virtio::Block::new(
+            self.id,
+            None,
+            CacheType::auto(&self.disk_image_path),
+            self.disk_image_path,
+            self.format,
+            self.is_read_only,
+            self.direct_io,
+            self.sync_mode,
+        )
+        .map_err(|e| Error::Internal(format!("block: {e}")))?;
+
+        let inner = Arc::new(Mutex::new(block));
+        let id = inner.lock().unwrap().id().to_string();
+        ctx.register(&id, inner)
     }
 }
 
