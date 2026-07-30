@@ -79,6 +79,17 @@ impl<'a> VmmBuilder<'a> {
         self
     }
 
+    /// Set the fd used as input for the legacy serial console (e.g. a pipe read end).
+    ///
+    /// When set, a serial console device is created with this fd as input and the
+    /// corresponding output duplicated to stdout. This is required for FreeBSD guests
+    /// which use the legacy serial console instead of the virtio console.
+    #[cfg(unix)]
+    pub fn serial_input_fd(mut self, fd: i32) -> Self {
+        self.serial_input_fd = Some(fd);
+        self
+    }
+
     pub fn nested_virt(mut self, enabled: bool) -> Self {
         self.nested_virt = enabled;
         self
@@ -102,14 +113,6 @@ impl<'a> VmmBuilder<'a> {
             log::error!("{e}");
             e.code
         })
-    }
-}
-
-impl<'a> VmmBuilder<'a> {
-    #[cfg(unix)]
-    pub fn serial_input_fd(mut self, fd: RawFd) -> Self {
-        self.serial_input_fd = Some(fd);
-        self
     }
 }
 
