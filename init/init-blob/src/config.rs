@@ -5,22 +5,8 @@
 //! A [`Builder`] can be constructed from scratch or from an OCI runtime-spec
 //! config.json via [`Builder::from_oci_json`]. The internal serialization
 //! format is an implementation detail — callers should not rely on it.
-//!
-//! ```ignore
-//! let config = Config::builder()
-//!     .args(&["/usr/bin/bash", "--login"])
-//!     .env(&["HOME=/root"])
-//!     .workdir("/home/user")
-//!     .build();
-//! unsafe { config.apply(std::ptr::null_mut(), ctx_id, "/dev/root").unwrap() };
-//! // config must remain alive until the VM exits.
-//! ```
 
 use std::borrow::Cow;
-use std::ffi::{CString, c_char, c_void};
-use std::mem::ManuallyDrop;
-
-use libloading::os::unix::Library;
 
 use crate::init_schema::{ConfigSchema, Mount};
 use crate::oci_schema::OciSchema;
@@ -43,20 +29,10 @@ pub enum ConfigError {
 #[cfg_attr(feature = "ffi", derive(ffier::FfiError))]
 #[non_exhaustive]
 pub enum ApplyError {
-    /// A required libkrun symbol could not be found via dlsym.
+    /// Reserved for future ffier foreign-handle apply variant.
     #[error("{0}")]
     #[cfg_attr(feature = "ffi", ffier(code = 1))]
-    SymbolNotFound(Box<str>),
-
-    /// `krun_fs_add_overlay_file` failed.
-    #[error("overlay file: {}", std::io::Error::from_raw_os_error(*.0))]
-    #[cfg_attr(feature = "ffi", ffier(code = 2))]
-    OverlayFile(i32),
-
-    /// `krun_append_kernel_cmdline` failed.
-    #[error("kernel cmdline: {}", std::io::Error::from_raw_os_error(*.0))]
-    #[cfg_attr(feature = "ffi", ffier(code = 3))]
-    KernelCmdline(i32),
+    FfiError(Box<str>),
 }
 
 /// Guest-side path of the init binary (e.g. for `init=` kernel arg).
@@ -76,9 +52,7 @@ pub(crate) struct GuestFile {
 /// Built init configuration. Immutable after construction.
 ///
 /// Holds the init binary and serialized config JSON as guest files.
-/// [`apply`](Self::apply) passes pointers to this data into libkrun — the
-/// caller **must keep this value alive for the entire lifetime of the VM**.
-/// Dropping it while the VM is running causes dangling pointers.
+/// The caller **must keep this value alive for the entire lifetime of the VM**.
 pub struct Config {
     files: Vec<GuestFile>,
 }
@@ -89,85 +63,23 @@ impl Config {
     pub fn builder() -> Builder {
         Builder::default()
     }
+}
 
-    /// Apply this init configuration to a libkrun VM context.
+#[cfg(feature = "direct")]
+impl Config {
+    /// Apply this init configuration to a VM's filesystem overlay and payload.
     ///
-    /// Adds the init binary and associated configuration file(s) as
-    /// overlay files on the specified virtiofs device, and appends
-    /// the appropriate kernel command line argument to specify the
-    /// init binary.
-    ///
-    /// `lib_handle` is the result of `dlopen("libkrun.so")`. Pass NULL to
-    /// search the global symbol namespace (requires libkrun was linked or
-    /// opened with `RTLD_GLOBAL`).
-    ///
-    /// # Safety
-    ///
-    /// - If `lib_handle` is non-null it must be a valid handle returned by
-    ///   `dlopen` (or equivalent) that remains open for the duration of
-    ///   this call.
-    /// - The caller must keep this `Config` alive for the entire lifetime
-    ///   of the VM. `apply` passes data pointers to libkrun that remain
-    ///   borrowed until the VM exits.
-    pub unsafe fn apply(
+    /// Adds the init binary and associated configuration file(s) as overlay
+    /// files, and appends the init kernel command line argument to the payload.
+    pub fn apply(
         &self,
-        lib_handle: *mut c_void,
-        ctx_id: u32,
-        fs_tag: &str,
+        overlay: &mut krun::FsOverlay,
+        payload: &mut krun::Payload,
     ) -> Result<(), ApplyError> {
-        type AddOverlayFileFn = unsafe extern "C" fn(
-            u32,
-            *const c_char,
-            *const c_char,
-            *const u8,
-            usize,
-            u32,
-            bool,
-        ) -> i32;
-        type AppendKernelCmdlineFn = unsafe extern "C" fn(u32, *const c_char) -> i32;
-
-        fn load_sym<T: Copy>(lib_handle: *mut c_void, name: &[u8]) -> Result<T, ApplyError> {
-            if lib_handle.is_null() {
-                let lib = Library::this();
-                unsafe { lib.get(name) }.map(|s| *s)
-            } else {
-                let lib = ManuallyDrop::new(unsafe { Library::from_raw(lib_handle) });
-                unsafe { lib.get(name) }.map(|s| *s)
-            }
-            .map_err(|e| ApplyError::SymbolNotFound(e.to_string().into()))
-        }
-
-        let add_overlay_file: AddOverlayFileFn =
-            load_sym(lib_handle, b"krun_fs_add_overlay_file\0")?;
-        let append_kernel_cmdline: AppendKernelCmdlineFn =
-            load_sym(lib_handle, b"krun_append_kernel_cmdline\0")?;
-
-        let c_fs_tag = CString::new(fs_tag).expect("fs_tag must not contain NUL bytes");
-
         for file in &self.files {
-            let c_path = CString::new(file.path).expect("path must not contain NUL bytes");
-            let ret = unsafe {
-                add_overlay_file(
-                    ctx_id,
-                    c_fs_tag.as_ptr(),
-                    c_path.as_ptr(),
-                    file.data.as_ptr(),
-                    file.data.len(),
-                    file.mode,
-                    file.one_shot,
-                )
-            };
-            if ret != 0 {
-                return Err(ApplyError::OverlayFile(-ret));
-            }
+            overlay.add_file(file.path, &file.data, file.mode, file.one_shot);
         }
-
-        let c_init_arg = CString::new(KERNEL_INIT_ARG).unwrap();
-        let ret = unsafe { append_kernel_cmdline(ctx_id, c_init_arg.as_ptr()) };
-        if ret != 0 {
-            return Err(ApplyError::KernelCmdline(-ret));
-        }
-
+        payload.append_cmdline(KERNEL_INIT_ARG);
         Ok(())
     }
 }
