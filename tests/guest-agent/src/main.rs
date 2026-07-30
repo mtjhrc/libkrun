@@ -11,13 +11,11 @@ fn run_guest_agent(test_name: &str) -> anyhow::Result<()> {
     let TestCase { test, .. } = test_case;
     test.in_guest();
 
-    /*
     #[cfg(target_os = "freebsd")]
     {
         use test_cases::freebsd_guest;
         freebsd_guest::halt_vm();
     }
-    */
 
     #[allow(unreachable_code)]
     Ok(())
