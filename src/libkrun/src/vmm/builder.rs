@@ -15,7 +15,7 @@ use std::io::{self, IsTerminal, Read};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
-use std::os::fd::{BorrowedFd, FromRawFd};
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle};
 use std::sync::atomic::AtomicI32;
@@ -2205,11 +2205,15 @@ pub fn setup_terminal_raw_mode(
     if let Some(term_fd) = term_fd {
         match term_set_raw_mode(term_fd, handle_signals_by_terminal) {
             Ok(old_mode) => {
-                let raw_fd = term_fd.as_raw_fd();
+                let owned_fd = match term_fd.try_clone_to_owned() {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        log::error!("Failed to clone terminal fd: {e}");
+                        return;
+                    }
+                };
                 vmm.exit_observers.push(Arc::new(Mutex::new(move || {
-                    if let Err(e) =
-                        term_restore_mode(unsafe { BorrowedFd::borrow_raw(raw_fd) }, &old_mode)
-                    {
+                    if let Err(e) = term_restore_mode(owned_fd.as_fd(), &old_mode) {
                         log::error!("Failed to restore terminal mode: {e}")
                     }
                 })));
