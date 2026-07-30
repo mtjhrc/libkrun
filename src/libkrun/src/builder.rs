@@ -65,10 +65,17 @@ pub(crate) fn build_microvm(
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
+    device_manager: Box<dyn crate::api::device_builders::DeviceManager<'_> + '_>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = vmm::builder::choose_payload(vm_resources)?;
 
-    let fs_shm_sizes: Vec<Option<usize>> = Vec::new();
+    let requirements = device_manager.requirements();
+    let fs_shm_sizes: Vec<Option<usize>> = requirements.iter().map(|r| r.shm_size).collect();
+    #[cfg(feature = "gpu")]
+    let gpu_shm_size = requirements.iter().filter_map(|r| r.gpu_shm).next();
+    #[cfg(not(feature = "gpu"))]
+    let gpu_shm_size: Option<usize> = None;
+    let use_vhost_user = requirements.iter().any(|r| r.process_shareable_memory);
 
     let (guest_memory, arch_memory_info, _shm_manager, payload_config) =
         vmm::builder::create_guest_memory(
@@ -83,8 +90,8 @@ pub(crate) fn build_microvm(
             vm_resources.initrd_bundle.as_ref(),
             vm_resources.firmware_config.as_ref(),
             &fs_shm_sizes,
-            None,
-            false,
+            gpu_shm_size,
+            use_vhost_user,
             &payload,
         )?;
 
@@ -511,6 +518,20 @@ pub(crate) fn build_microvm(
         vmm::builder::setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
     }
 
+    device_manager
+        .attach_all(
+            &mut vmm,
+            event_manager,
+            &_shm_manager,
+            intc.clone(),
+            #[cfg(target_os = "macos")]
+            Some(_sender.clone()),
+        )
+        .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
+
+    if let Some(s) = &vm_resources.kernel_cmdline.epilog {
+        vmm.kernel_cmdline.insert_str(s).unwrap();
+    }
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
