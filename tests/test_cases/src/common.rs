@@ -77,6 +77,17 @@ pub fn setup_and_run_with_env(
         .map_err(|e| anyhow::anyhow!("Config::apply: {e}"))?;
     rootfs.set_overlay(overlay);
 
+    build_and_run(num_cpus, ram_mib, rootfs, payload)
+}
+
+/// Build a VM with the given rootfs device and payload, add a default console,
+/// and run it. Does not return.
+pub fn build_and_run(
+    num_cpus: u8,
+    ram_mib: u32,
+    rootfs: krun::FsDevice<'static>,
+    payload: krun::Payload,
+) -> anyhow::Result<()> {
     let mut console_builder = krun::ConsoleDevice::builder();
     console_builder
         .add_default_console(
