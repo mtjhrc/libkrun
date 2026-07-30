@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use super::error::Error;
+#[cfg(feature = "aws-nitro")]
+use crate::NitroConfig;
 
 // Fields are consumed by VmmBuilder once that API lands in a later commit.
 #[allow(dead_code)]
@@ -21,6 +23,8 @@ pub(crate) enum PayloadKind {
         initrd_bundle: vmm::vmm_config::kernel_bundle::InitrdBundle,
         tee_config_path: PathBuf,
     },
+    #[cfg(feature = "aws-nitro")]
+    Nitro(NitroConfig),
 }
 
 pub struct Payload {
@@ -112,6 +116,16 @@ impl Payload {
             self.cmdline.push(' ');
             self.cmdline.push_str(extra);
         }
+    }
+}
+
+#[cfg(feature = "aws-nitro")]
+impl Payload {
+    pub fn nitro_enclave(config: NitroConfig) -> Result<Self, Error> {
+        Ok(Payload {
+            kind: PayloadKind::Nitro(config),
+            cmdline: String::new(),
+        })
     }
 }
 
