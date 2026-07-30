@@ -4,10 +4,28 @@ pub mod logging;
 pub mod payload;
 pub mod vmm_builder;
 
+#[cfg(feature = "ffi")]
+pub(crate) use ffier::export_bitflags;
+
+#[cfg(not(feature = "ffi"))]
+#[allow(unused_macros)]
+macro_rules! export_bitflags {
+    ($(#[cfg($($cfg:tt)*)])? bitflags::bitflags! { $($body:tt)* }) => {
+        $(#[cfg($($cfg)*)])?
+        bitflags::bitflags! { $($body)* }
+    };
+}
+#[cfg(not(feature = "ffi"))]
+pub(crate) use export_bitflags;
+
 #[cfg(feature = "aws-nitro")]
 pub use crate::NitroConfig;
 #[cfg(not(feature = "tee"))]
 pub use device_builders::BalloonDevice;
+#[cfg(feature = "blk")]
+pub use device_builders::BlockDevice;
+#[cfg(feature = "blk")]
+pub use devices::virtio::block::{DiskFormat, SyncMode};
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
