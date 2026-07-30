@@ -27,7 +27,7 @@ pub use device_builders::{
     MmioDeviceManager, ResolvedShmRegion, TsiFlags, VsockDevice,
 };
 #[cfg(feature = "gpu")]
-pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
+pub use device_builders::{DisplayBackend, DisplayInfoBuilder, GpuDevice, VirglRendererFlags};
 pub use error::Error;
 pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
