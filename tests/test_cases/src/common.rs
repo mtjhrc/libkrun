@@ -225,10 +225,10 @@ pub fn setup_standard_devices_from<'a>(
 
 /// Build a VM with the given rootfs device and payload, add a default console,
 /// and run it. Does not return.
-pub fn build_and_run(
+pub fn build_and_run<'a>(
     num_cpus: u8,
     ram_mib: u32,
-    rootfs: krun::FsDevice<'static>,
+    rootfs: krun::FsDevice<'a>,
     payload: krun::Payload,
 ) -> anyhow::Result<()> {
     let mut console_builder = krun::ConsoleDevice::builder();
