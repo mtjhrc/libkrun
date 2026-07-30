@@ -10,8 +10,8 @@ pub use device_builders::FsDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsOverlay;
 pub use device_builders::{
-    AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
-    ResolvedShmRegion,
+    AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
+    MmioDeviceManager, ResolvedShmRegion,
 };
 pub use error::Error;
 pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
