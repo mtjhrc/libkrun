@@ -22,6 +22,8 @@ pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
     MmioDeviceManager, ResolvedShmRegion, VsockDevice,
 };
+#[cfg(feature = "gpu")]
+pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
 pub use error::Error;
 pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
