@@ -5,6 +5,10 @@ pub mod payload;
 
 #[cfg(feature = "aws-nitro")]
 pub use crate::NitroConfig;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub use device_builders::FsDevice;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+pub use device_builders::FsOverlay;
 pub use device_builders::{
     AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
     ResolvedShmRegion,
