@@ -16,7 +16,7 @@ pub use device_builders::FsOverlay;
 pub use device_builders::NetDevice;
 pub use device_builders::RngDevice;
 #[cfg(feature = "gpu")]
-pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
+pub use device_builders::{DisplayBackend, DisplayInfoBuilder, GpuDevice};
 pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
     MmioDeviceManager, ResolvedShmRegion, VsockDevice,
