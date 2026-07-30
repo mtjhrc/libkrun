@@ -2,6 +2,7 @@ pub mod device_builders;
 pub mod error;
 pub mod logging;
 pub mod payload;
+pub mod vmm_builder;
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsDevice;
@@ -16,6 +17,7 @@ pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
 #[cfg(feature = "aws-nitro")]
 pub use crate::NitroConfig;
 pub use payload::{KernelFormat, Payload};
+pub use vmm_builder::{Vmm, VmmBuilder};
 
 pub use devices::virtio::TsiFlags;
 #[cfg(feature = "net")]
