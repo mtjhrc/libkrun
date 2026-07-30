@@ -4,6 +4,8 @@ pub mod logging;
 pub mod payload;
 pub mod vmm_builder;
 
+#[cfg(not(feature = "tee"))]
+pub use device_builders::BalloonDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
