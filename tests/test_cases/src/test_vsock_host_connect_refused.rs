@@ -11,18 +11,14 @@ const READY_PORT: u32 = 1234;
 #[host]
 mod host {
     use super::*;
-    use crate::common::setup_fs_and_enter;
-    use crate::{Test, TestOutcome, TestSetup};
-    use crate::{krun_call, krun_call_u32};
-    use krun_sys::*;
-    use std::ffi::CString;
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::os::unix::prelude::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use std::{mem, thread};
+
+    use crate::common::{build_init_config, init_krun, setup_standard_devices};
+    use crate::{Test, TestOutcome, TestSetup};
 
     /// Registered with `listen=true`, but nothing in the guest ever binds it, so
     /// the guest replies OP_RST to libkrun's OP_REQUEST.
@@ -84,41 +80,39 @@ mod host {
 
     impl Test for TestVsockHostConnectRefused {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
+            init_krun()?;
+
             let ready_sock = test_setup.tmp_dir.join("ready.sock");
-            let ready_cstr = CString::new(ready_sock.as_os_str().as_bytes())?;
-            // libkrun binds this one itself, so it must not exist yet.
             let refused_sock = test_setup.tmp_dir.join("refused.sock");
-            let refused_cstr = CString::new(refused_sock.as_os_str().as_bytes())?;
 
             let listener = UnixListener::bind(&ready_sock)?;
-            thread::spawn(move || run(listener, refused_sock));
+            let refused_sock_clone = refused_sock.clone();
+            thread::spawn(move || run(listener, refused_sock_clone));
 
-            unsafe {
-                krun_call!(krun_init_log(
-                    KRUN_LOG_TARGET_DEFAULT,
-                    KRUN_LOG_LEVEL_TRACE,
-                    KRUN_LOG_STYLE_AUTO,
-                    0
-                ))?;
-                let ctx = krun_call_u32!(krun_create_ctx())?;
-                krun_call!(krun_add_vsock(ctx, 0))?;
-                krun_call!(krun_add_vsock_port(ctx, READY_PORT, ready_cstr.as_ptr()))?;
-                krun_call!(krun_add_vsock_port2(
-                    ctx,
-                    REFUSED_PORT,
-                    refused_cstr.as_ptr(),
-                    true
-                ))?;
-                krun_call!(krun_set_vm_config(ctx, 1, 1024))?;
-                krun_call!(krun_add_virtio_console_default(
-                    ctx,
-                    std::io::stdin().as_raw_fd(),
-                    std::io::stdout().as_raw_fd(),
-                    std::io::stderr().as_raw_fd(),
-                ))?;
-                setup_fs_and_enter(ctx, test_setup)?;
-            }
-            Ok(())
+            let init_config = build_init_config(&test_setup.test_case, &[]);
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let (mut devices, payload) =
+                setup_standard_devices(&test_setup, &init_config, &stdin, &stdout, &stderr)?;
+            let mut vsock = krun::VsockDevice::new(3, krun::TsiFlags::empty())
+                .map_err(|e| anyhow::anyhow!("VsockDevice: {e:?}"))?;
+            vsock.add_unix_port(READY_PORT, ready_sock.to_str().unwrap(), false);
+            vsock.add_unix_port(REFUSED_PORT, refused_sock.to_str().unwrap(), true);
+            devices.add(vsock);
+
+            let vmm = krun::VmmBuilder::new()
+                .vcpus(1)
+                .map_err(|e| anyhow::anyhow!("vcpus: {e:?}"))?
+                .ram_mib(1024)
+                .map_err(|e| anyhow::anyhow!("ram_mib: {e:?}"))?
+                .payload(payload)
+                .devices(devices)
+                .build()
+                .map_err(|e| anyhow::anyhow!("build: {e:?}"))?;
+
+            vmm.run();
+            unreachable!()
         }
 
         fn check(self: Box<Self>, stdout: Vec<u8>, _test_setup: TestSetup) -> TestOutcome {
