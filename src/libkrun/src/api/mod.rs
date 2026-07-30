@@ -8,6 +8,8 @@ pub mod vmm_builder;
 pub use crate::NitroConfig;
 #[cfg(not(feature = "tee"))]
 pub use device_builders::BalloonDevice;
+#[cfg(feature = "blk")]
+pub use device_builders::BlockDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
