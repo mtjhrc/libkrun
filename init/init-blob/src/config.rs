@@ -165,6 +165,48 @@ impl Builder {
         self
     }
 
+    /// Enable DHCP client in the guest.
+    pub fn dhcp(mut self, enable: bool) -> Self {
+        if enable {
+            self.inner
+                .process
+                .env
+                .retain(|e| !e.starts_with("KRUN_DHCP="));
+            self.inner.process.env.push("KRUN_DHCP=1".to_string());
+        }
+        self
+    }
+
+    /// Set the root disk to remount on boot.
+    pub fn set_root_disk_remount(
+        mut self,
+        device: &str,
+        fstype: Option<&str>,
+        options: Option<&str>,
+    ) -> Self {
+        self.inner
+            .process
+            .env
+            .retain(|e| !e.starts_with("KRUN_BLOCK_ROOT_"));
+        self.inner
+            .process
+            .env
+            .push(format!("KRUN_BLOCK_ROOT_DEVICE={device}"));
+        if let Some(fs) = fstype {
+            self.inner
+                .process
+                .env
+                .push(format!("KRUN_BLOCK_ROOT_FSTYPE={fs}"));
+        }
+        if let Some(opts) = options {
+            self.inner
+                .process
+                .env
+                .push(format!("KRUN_BLOCK_ROOT_OPTIONS={opts}"));
+        }
+        self
+    }
+
     /// Consume the builder, serialize the config, and return the
     /// finished [`Config`].
     pub fn build(mut self) -> Config {
