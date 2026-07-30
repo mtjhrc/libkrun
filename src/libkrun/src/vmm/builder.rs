@@ -175,6 +175,8 @@ pub enum StartMicrovmError {
     PeGzInvalid,
     /// Cannot open the file containing the kernel code.
     RawOpenKernel(io::Error),
+    /// Cannot attach a device via the device manager.
+    AttachDevice(String),
     /// Cannot initialize a MMIO Balloon device or add a device to the MMIO Bus.
     RegisterBalloonDevice(device_manager::mmio::Error),
     /// Cannot initialize a MMIO Block Device or add a device to the MMIO Bus.
@@ -369,6 +371,7 @@ impl Display for StartMicrovmError {
             RawOpenKernel(ref err) => {
                 write!(f, "Cannot open the file containing the kernel code: {err}")
             }
+            AttachDevice(ref err) => write!(f, "Cannot attach device: {err}"),
             RegisterBalloonDevice(ref err) => {
                 let mut err_msg = format!("{err}");
                 err_msg = err_msg.replace('\"', "");
@@ -675,8 +678,17 @@ pub fn build_microvm(
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
+    device_manager: Box<dyn crate::api::device_builders::DeviceManager<'_> + '_>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;
+
+    let requirements = device_manager.requirements();
+    let fs_shm_sizes: Vec<Option<usize>> = requirements.iter().map(|r| r.shm_size).collect();
+    #[cfg(feature = "gpu")]
+    let gpu_shm_size = requirements.iter().filter_map(|r| r.gpu_shm).next();
+    #[cfg(not(feature = "gpu"))]
+    let gpu_shm_size: Option<usize> = None;
+    let use_vhost_user = requirements.iter().any(|r| r.process_shareable_memory);
 
     #[cfg(feature = "tdx")]
     let td_shim_parsed = match &vm_resources.tee_firmware_config {
@@ -697,9 +709,7 @@ pub fn build_microvm(
     #[cfg(all(feature = "tee", not(feature = "tdx")))]
     let fw_range_for_mem: Option<(u64, usize)> = None;
 
-    let fs_shm_sizes: Vec<Option<usize>> = Vec::new();
-
-    let (guest_memory, arch_memory_info, mut _shm_manager, payload_config) = create_guest_memory(
+    let (guest_memory, arch_memory_info, _shm_manager, payload_config) = create_guest_memory(
         vm_resources
             .vm_config()
             .mem_size_mib
@@ -711,8 +721,8 @@ pub fn build_microvm(
         vm_resources.initrd_bundle.as_ref(),
         vm_resources.firmware_config.as_ref(),
         &fs_shm_sizes,
-        None,
-        false,
+        gpu_shm_size,
+        use_vhost_user,
         &payload,
         #[cfg(feature = "tee")]
         fw_range_for_mem,
@@ -1159,6 +1169,21 @@ pub fn build_microvm(
     // Set raw mode for FDs that are connected to legacy serial devices.
     for serial_tty in serial_ttys {
         setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
+    }
+
+    device_manager
+        .attach_all(
+            &mut vmm,
+            event_manager,
+            &_shm_manager,
+            intc.clone(),
+            #[cfg(target_os = "macos")]
+            Some(_sender.clone()),
+        )
+        .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
+
+    if let Some(s) = &vm_resources.kernel_cmdline.epilog {
+        vmm.kernel_cmdline.insert_str(s).unwrap();
     }
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
@@ -2246,7 +2271,6 @@ pub fn setup_terminal_raw_mode(
         };
     }
 }
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
