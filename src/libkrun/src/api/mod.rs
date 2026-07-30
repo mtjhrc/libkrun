@@ -24,6 +24,8 @@ pub use device_builders::NetDevice;
 pub use device_builders::NetFlags;
 #[cfg(not(feature = "tee"))]
 pub use device_builders::RngDevice;
+#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+pub use device_builders::VhostUserDevice;
 pub use device_builders::{
     AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
     MmioDeviceManager, ResolvedShmRegion, VsockDevice,
