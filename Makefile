@@ -43,8 +43,8 @@ endif
 ifeq ($(VIRGL_RESOURCE_MAP2),1)
 	FEATURE_FLAGS += --features virgl_resource_map2
 endif
-# Test targets require the block device (BLK) feature for FreeBSD disk tests
-# and the NET feature for gvproxy-based network tests.
+# Test targets require the block device (BLK) feature for FreeBSD disk tests,
+# the NET feature for gvproxy-based network tests, and FFI for weak linking tests.
 # Enable automatically unless the user explicitly set them to a value.
 ifeq ($(BLK),)
     ifneq ($(filter test test-prefix,$(MAKECMDGOALS)),)
@@ -76,6 +76,9 @@ ifeq ($(VHOST_USER),1)
 endif
 ifeq ($(TIMESYNC),1)
     FEATURE_FLAGS += --features timesync
+endif
+ifeq ($(FFI),1)
+    FEATURE_FLAGS += --features ffi
 endif
 ifeq ($(AWS_NITRO),1)
 	VARIANT = -awsnitro
@@ -334,4 +337,4 @@ EXTRA_LIBPATH_Darwin = /opt/homebrew/opt/libkrunfw/lib:/opt/homebrew/opt/llvm/li
 # On macOS, SIP strips DYLD_LIBRARY_PATH when executing scripts via a shebang,
 # so we pass the path via LIBKRUN_LIB_PATH and let run.sh set the real variable.
 test: test-prefix
-	cd tests; RUST_LOG=trace LIBKRUN_LIB_PATH="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/):$(EXTRA_LIBPATH_$(OS))" PKG_CONFIG_PATH="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/pkgconfig/)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
+	cd tests; RUST_LOG=trace KRUN_TEST_FFI=$(FFI) LIBKRUN_LIB_PATH="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/):$(EXTRA_LIBPATH_$(OS))" PKG_CONFIG_PATH="$$(realpath ../test-prefix/$(LIBDIR_$(OS))/pkgconfig/)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
