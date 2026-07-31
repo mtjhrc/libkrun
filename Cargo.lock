@@ -412,6 +412,15 @@ dependencies = [
 [[package]]
 name = "ffier-gen-rust-client"
 version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=289162e#289162eb9a5d6c9752edfe02c09f851bf1c60748"
+dependencies = [
+ "ffier-schema 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=289162e)",
+ "serde_json",
+]
+
+[[package]]
+name = "ffier-gen-rust-client"
+version = "0.2.0"
 source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
 dependencies = [
  "ffier-schema 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2)",
@@ -830,7 +839,8 @@ version = "0.1.0-1.18.1"
 dependencies = [
  "anyhow",
  "ffier 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2)",
- "ffier-gen-rust-client",
+ "ffier-gen-rust-client 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2)",
+ "krun-via-cdylib-weak",
  "pkg-config",
 ]
 
@@ -884,6 +894,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "krun-via-cdylib-weak"
+version = "2.0.0-dev"
+dependencies = [
+ "bitflags 2.11.0",
+ "ffier 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=289162e)",
+ "ffier-gen-rust-client 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=289162e)",
+ "libloading",
+]
+
+[[package]]
 name = "krun-whp"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
@@ -933,6 +953,8 @@ dependencies = [
  "bzip2",
  "crossbeam-channel",
  "env_logger",
+ "ffier 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=289162e)",
+ "ffier-builtins 0.2.0 (git+https://github.com/mtjhrc/ffier.git?rev=289162e)",
  "flate2",
  "iocuddle",
  "kbs-types",

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[macro_use]
 extern crate log;
 
@@ -5,6 +7,12 @@ pub mod api;
 pub use api::*;
 
 pub(crate) mod vmm;
+
+#[cfg(feature = "ffi")]
+ffier::generate_bridge!(
+    local = __ffier_krun_metadata,
+    schema_output = "../../target/ffier-krun.json"
+);
 
 #[cfg(feature = "aws-nitro")]
 use std::path::PathBuf;
@@ -22,7 +30,8 @@ pub struct NitroConfig {
     debug: bool,
 }
 
-#[cfg(feature = "aws-nitro")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"aws-nitro\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "aws-nitro"))]
 impl NitroConfig {
     pub fn new() -> Self {
         Self::default()

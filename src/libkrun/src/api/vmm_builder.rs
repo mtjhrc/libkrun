@@ -36,6 +36,7 @@ pub struct VmmBuilder<'a> {
     shutdown_support: bool,
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> VmmBuilder<'a> {
     pub fn new() -> Self {
         Self::default()
@@ -170,6 +171,7 @@ impl Clone for VmmHandle {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl VmmHandle {
     pub fn pause(&self) -> Result<(), Error> {
         #[cfg(target_os = "macos")]
@@ -215,6 +217,7 @@ impl VmmHandle {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> Vmm<'a> {
     /// Obtain a thread-safe handle to the inner VMM.
     ///
@@ -263,6 +266,7 @@ impl<'a> Vmm<'a> {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 pub fn check_nested_virt() -> bool {
     #[cfg(target_os = "macos")]
     {
