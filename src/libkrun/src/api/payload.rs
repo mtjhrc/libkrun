@@ -34,6 +34,7 @@ pub struct Payload {
     pub(crate) cmdline: String,
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl Payload {
     pub fn load_krunfw() -> Result<Self, VmmError> {
         let lib = KRUNFW.as_ref().ok_or_else(|| {
