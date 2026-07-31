@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::unbounded;
 use polly::event_manager::EventManager;
+#[cfg(target_os = "macos")]
+use utils::eventfd::EventFd;
 use vmm::Vmm as InnerVmm;
 #[cfg(unix)]
 use vmm::resources::SerialConsoleConfig;
@@ -113,6 +115,8 @@ enum VmmInner {
         event_manager: EventManager,
         #[allow(dead_code)]
         _worker_sender: crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
+        #[cfg(target_os = "macos")]
+        shutdown_efd: Arc<EventFd>,
     },
     #[cfg(feature = "aws-nitro")]
     Nitro(aws_nitro::enclave::NitroEnclave),
@@ -123,7 +127,87 @@ pub struct Vmm<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
+/// Handle to the inner VMM, usable from another thread while the
+/// event loop runs on the main thread via [`Vmm::run`].
+///
+/// Obtain via [`Vmm::handle`] before calling `run()`.
+// FIXME: make Vmm::run() non-blocking (requires making EventManager Send)
+// so that run() returns a RunningVmm with wait(). Then this handle
+// can be obtained from RunningVmm instead of requiring a pre-run call.
+#[derive(Clone)]
+pub struct VmmHandle {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    vmm: Arc<Mutex<InnerVmm>>,
+    #[cfg(target_os = "macos")]
+    shutdown_efd: Arc<EventFd>,
+}
+
+impl VmmHandle {
+    pub fn pause(&self) -> Result<(), Error> {
+        #[cfg(target_os = "macos")]
+        {
+            self.vmm
+                .lock()
+                .unwrap()
+                .pause()
+                .map_err(|e| Error::Internal(format!("pause: {e}")))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
+    }
+
+    pub fn resume(&self) -> Result<(), Error> {
+        #[cfg(target_os = "macos")]
+        {
+            self.vmm
+                .lock()
+                .unwrap()
+                .resume()
+                .map_err(|e| Error::Internal(format!("resume: {e}")))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
+    }
+
+    /// Signal the guest to perform an orderly ACPI shutdown.
+    ///
+    /// On macOS this writes to the GPIO device's eventfd, which triggers
+    /// a restart-key press in the guest. On other platforms this is not
+    /// supported.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        #[cfg(target_os = "macos")]
+        {
+            self.shutdown_efd
+                .write(1)
+                .map_err(|e| Error::Internal(format!("shutdown: {e}")))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
+    }
+}
+
 impl<'a> Vmm<'a> {
+    /// Obtain a thread-safe handle to the inner VMM.
+    ///
+    /// Must be called before [`run`](Self::run) which consumes `self`.
+    /// The handle can be moved to another thread for pause/resume.
+    pub fn handle(&self) -> Result<VmmHandle, Error> {
+        match &self.inner {
+            VmmInner::Vmm {
+                vmm,
+                #[cfg(target_os = "macos")]
+                shutdown_efd,
+                ..
+            } => Ok(VmmHandle {
+                vmm: vmm.clone(),
+                #[cfg(target_os = "macos")]
+                shutdown_efd: shutdown_efd.clone(),
+            }),
+            #[cfg(feature = "aws-nitro")]
+            VmmInner::Nitro(_) => Err(Error::FeatureDisabled()),
+        }
+    }
+
     pub fn run(self) {
         match self.inner {
             VmmInner::Vmm {
@@ -278,9 +362,16 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, Error> {
 
     let (sender, _receiver) = unbounded();
 
+    #[cfg(target_os = "macos")]
+    let shutdown_efd =
+        Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(|_| Error::ResourceAlloc())?);
+
     let inner = crate::builder::build_microvm(
         &vm_resources,
         &mut event_manager,
+        #[cfg(target_os = "macos")]
+        Some(EventFd::try_clone(&shutdown_efd).expect("dup shutdown_efd")),
+        #[cfg(not(target_os = "macos"))]
         None,
         sender.clone(),
         device_manager,
@@ -292,6 +383,8 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, Error> {
             vmm: inner,
             event_manager,
             _worker_sender: sender,
+            #[cfg(target_os = "macos")]
+            shutdown_efd,
         },
         _lifetime: PhantomData,
     })
