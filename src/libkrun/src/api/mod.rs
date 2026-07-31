@@ -30,7 +30,7 @@ pub use logging::{LogLevel, LogStyle, LogTarget, init_log};
 #[cfg(feature = "aws-nitro")]
 pub use crate::NitroConfig;
 pub use payload::{KernelFormat, Payload};
-pub use vmm_builder::{Vmm, VmmBuilder};
+pub use vmm_builder::{Vmm, VmmBuilder, VmmHandle};
 
 pub use devices::virtio::TsiFlags;
 #[cfg(feature = "net")]
