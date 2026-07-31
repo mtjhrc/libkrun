@@ -139,7 +139,51 @@ pub struct Vmm<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
+/// Handle to the inner VMM, usable from another thread while the
+/// event loop runs on the main thread via [`Vmm::run`].
+///
+/// Obtain via [`Vmm::handle`] before calling `run()`.
+// FIXME: make Vmm::run() non-blocking (requires making EventManager Send)
+// so that run() returns a RunningVmm with wait(). Then this handle
+// can be obtained from RunningVmm instead of requiring a pre-run call.
+#[derive(Clone)]
+pub struct VmmHandle {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    vmm: Arc<Mutex<InnerVmm>>,
+}
+
+#[cfg(target_os = "macos")]
+impl VmmHandle {
+    pub fn pause(&self) -> Result<(), Error> {
+        self.vmm
+            .lock()
+            .unwrap()
+            .pause()
+            .map_err(|e| Error::Internal(format!("pause: {e}")))
+    }
+
+    pub fn resume(&self) -> Result<(), Error> {
+        self.vmm
+            .lock()
+            .unwrap()
+            .resume()
+            .map_err(|e| Error::Internal(format!("resume: {e}")))
+    }
+}
+
 impl<'a> Vmm<'a> {
+    /// Obtain a thread-safe handle to the inner VMM.
+    ///
+    /// Must be called before [`run`](Self::run) which consumes `self`.
+    /// The handle can be moved to another thread for pause/resume.
+    pub fn handle(&self) -> Result<VmmHandle, Error> {
+        match &self.inner {
+            VmmInner::Vmm { vmm, .. } => Ok(VmmHandle { vmm: vmm.clone() }),
+            #[cfg(feature = "aws-nitro")]
+            VmmInner::Nitro(_) => Err(Error::FeatureDisabled()),
+        }
+    }
+
     pub fn run(self) {
         match self.inner {
             VmmInner::Vmm {

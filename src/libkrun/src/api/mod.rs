@@ -31,7 +31,7 @@ pub use device_builders::{DisplayBackend, DisplayInfoBuilder, GpuDevice, VirglRe
 pub use error::Error;
 pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
 pub use payload::{KernelFormat, Payload};
-pub use vmm_builder::{Vmm, VmmBuilder};
+pub use vmm_builder::{Vmm, VmmBuilder, VmmHandle};
 
 pub use devices::virtio::TsiFlags;
 #[cfg(feature = "net")]
