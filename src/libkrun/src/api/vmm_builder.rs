@@ -32,6 +32,7 @@ impl Default for VmmBuilder<'_> {
     }
 }
 
+#[ffier::export]
 impl<'a> VmmBuilder<'a> {
     pub fn new() -> Self {
         VmmBuilder {
@@ -145,23 +146,30 @@ pub struct VmmHandle {
     vmm: Arc<Mutex<InnerVmm>>,
 }
 
-#[cfg(target_os = "macos")]
+#[ffier::export]
 impl VmmHandle {
     pub fn pause(&self) -> Result<(), Error> {
-        self.vmm.lock().unwrap().pause().map_err(|e| {
+        #[cfg(target_os = "macos")]
+        { self.vmm.lock().unwrap().pause().map_err(|e| {
             log::error!("pause: {e}");
             Error::Internal()
-        })
+        }) }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
     }
 
     pub fn resume(&self) -> Result<(), Error> {
-        self.vmm.lock().unwrap().resume().map_err(|e| {
+        #[cfg(target_os = "macos")]
+        { self.vmm.lock().unwrap().resume().map_err(|e| {
             log::error!("resume: {e}");
             Error::Internal()
-        })
+        }) }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
     }
 }
 
+#[ffier::export]
 impl<'a> Vmm<'a> {
     /// Obtain a thread-safe handle to the inner VMM.
     ///

@@ -2,6 +2,7 @@ use env_logger::Env;
 
 use super::error::Error;
 
+#[ffier::export]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -13,6 +14,7 @@ pub enum LogLevel {
     Trace = 5,
 }
 
+#[ffier::export]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStyle {
@@ -21,6 +23,7 @@ pub enum LogStyle {
     Never = 2,
 }
 
+#[ffier::export]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogTarget {
@@ -29,6 +32,7 @@ pub enum LogTarget {
     Stderr = 2,
 }
 
+#[ffier::export]
 pub fn init_log(target: LogTarget, level: LogLevel, style: LogStyle) -> Result<(), Error> {
     let target = match target {
         LogTarget::Default => env_logger::Target::default(),

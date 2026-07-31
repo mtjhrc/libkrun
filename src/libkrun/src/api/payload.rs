@@ -30,6 +30,7 @@ pub struct Payload {
     pub(crate) cmdline: String,
 }
 
+#[ffier::export]
 impl Payload {
     pub fn load_krunfw() -> Result<Self, Error> {
         let lib = KRUNFW.as_ref().ok_or_else(|| {
@@ -208,6 +209,7 @@ fn load_tee_bundles(
     Ok((qboot_bundle, initrd_bundle))
 }
 
+#[ffier::export]
 #[repr(u32)]
 #[derive(Clone, Copy, Debug)]
 pub enum KernelFormat {

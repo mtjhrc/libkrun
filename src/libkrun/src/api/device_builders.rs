@@ -291,6 +291,7 @@ impl Default for MmioDeviceManager<'_> {
     }
 }
 
+#[ffier::export]
 impl<'a> MmioDeviceManager<'a> {
     /// Create an empty device manager.
     pub fn new() -> Self {
@@ -361,6 +362,7 @@ impl Default for FsOverlay {
 }
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[ffier::export]
 impl FsOverlay {
     /// Create a new empty overlay.
     pub fn new() -> Self {
@@ -436,6 +438,7 @@ pub struct FsDevice<'a> {
 }
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[ffier::export]
 impl<'a> FsDevice<'a> {
     /// Create a new virtiofs device sharing a host directory.
     ///
@@ -557,7 +560,9 @@ impl<'a> FsDevice<'a> {
 }
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for FsDevice<'a> {
+    #[ffier(skip)]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements {
             shm_size: self.shm_size,
@@ -565,6 +570,7 @@ impl<'a> AttachDevice<'a> for FsDevice<'a> {
         }
     }
 
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         {
             let mut fs = self.inner.lock().unwrap();
@@ -605,6 +611,7 @@ pub struct ConsoleBuilder<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
+#[ffier::export]
 impl<'a> ConsoleDevice<'a> {
     /// Create a new console builder.
     pub fn builder() -> ConsoleBuilder<'a> {
@@ -616,6 +623,7 @@ impl<'a> ConsoleDevice<'a> {
     }
 }
 
+#[ffier::export]
 impl<'a> ConsoleBuilder<'a> {
     /// Add a TTY-backed port to the console.
     ///
@@ -815,7 +823,9 @@ impl ConsoleBuilder<'_> {
     }
 }
 
+#[ffier::export]
 impl<'a> AttachDevice<'a> for ConsoleDevice<'a> {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         let tty_fds = self.tty_fds.clone();
 
@@ -847,6 +857,7 @@ pub struct BalloonDevice {
 }
 
 #[cfg(not(feature = "tee"))]
+#[ffier::export]
 impl BalloonDevice {
     pub fn new() -> Result<Self, Error> {
         let balloon = devices::virtio::Balloon::new().map_err(|e| {
@@ -860,7 +871,9 @@ impl BalloonDevice {
 }
 
 #[cfg(not(feature = "tee"))]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for BalloonDevice {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         ctx.subscribe_events(self.inner.clone())?;
         ctx.register("balloon", self.inner)
@@ -874,6 +887,7 @@ pub struct RngDevice {
 }
 
 #[cfg(not(feature = "tee"))]
+#[ffier::export]
 impl RngDevice {
     pub fn new() -> Result<Self, Error> {
         let rng = devices::virtio::Rng::new().map_err(|e| {
@@ -887,7 +901,9 @@ impl RngDevice {
 }
 
 #[cfg(not(feature = "tee"))]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for RngDevice {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         ctx.subscribe_events(self.inner.clone())?;
         ctx.register("rng", self.inner)
@@ -902,6 +918,7 @@ pub struct VsockDevice {
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
 }
 
+#[ffier::export]
 impl VsockDevice {
     /// Create a new vsock device.
     ///
@@ -935,7 +952,9 @@ impl VsockDevice {
     }
 }
 
+#[ffier::export]
 impl<'a> AttachDevice<'a> for VsockDevice {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         let host_port_map = if self.host_port_map.is_empty() {
             None
@@ -982,6 +1001,7 @@ pub struct BlockDevice {
 }
 
 #[cfg(feature = "blk")]
+#[ffier::export]
 impl BlockDevice {
     pub fn new(id: &str, disk_image_path: &str, is_read_only: bool) -> Result<Self, Error> {
         use devices::virtio::CacheType;
@@ -1010,7 +1030,9 @@ impl BlockDevice {
 }
 
 #[cfg(feature = "blk")]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for BlockDevice {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         let id = self.inner.lock().unwrap().id().to_string();
         ctx.register(&id, self.inner)
@@ -1024,6 +1046,7 @@ pub struct NetDevice {
 }
 
 #[cfg(feature = "net")]
+#[ffier::export]
 impl NetDevice {
     /// Create a net device backed by a Unix datagram socket path.
     pub fn new_unixgram_path(
@@ -1112,7 +1135,9 @@ impl NetDevice {
 }
 
 #[cfg(feature = "net")]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for NetDevice {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         let id = self.inner.lock().unwrap().id().to_string();
         ctx.register(&id, self.inner)
@@ -1126,6 +1151,7 @@ pub struct DisplayInfoBuilder {
 }
 
 #[cfg(feature = "gpu")]
+#[ffier::export]
 impl DisplayInfoBuilder {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
@@ -1215,6 +1241,7 @@ pub struct GpuDevice {
 }
 
 #[cfg(feature = "gpu")]
+#[ffier::export]
 impl GpuDevice {
     const DEFAULT_SHM_SIZE: usize = 1 << 33;
 
@@ -1233,7 +1260,9 @@ impl GpuDevice {
 }
 
 #[cfg(feature = "gpu")]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for GpuDevice {
+    #[ffier(skip)]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements {
             gpu_shm: Some(self.shm_size),
@@ -1241,6 +1270,7 @@ impl<'a> AttachDevice<'a> for GpuDevice {
         }
     }
 
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         let displays: Box<[DisplayInfo]> = self.backend.displays.into_boxed_slice();
 
@@ -1281,6 +1311,7 @@ pub struct VhostUserDevice {
 }
 
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+#[ffier::export]
 impl VhostUserDevice {
     /// Create a new vhost-user device.
     ///
@@ -1315,7 +1346,9 @@ impl VhostUserDevice {
 }
 
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for VhostUserDevice {
+    #[ffier(skip)]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements {
             process_shareable_memory: true,
@@ -1323,6 +1356,7 @@ impl<'a> AttachDevice<'a> for VhostUserDevice {
         }
     }
 
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         let device = devices::virtio::VhostUserDevice::new(
             &self.socket_path,
@@ -1350,6 +1384,7 @@ pub struct InputDevice {
 }
 
 #[cfg(feature = "input")]
+#[ffier::export]
 impl InputDevice {
     /// Create from opaque config/events backend vtables.
     ///
@@ -1418,7 +1453,9 @@ impl InputDevice {
 }
 
 #[cfg(feature = "input")]
+#[ffier::export]
 impl<'a> AttachDevice<'a> for InputDevice {
+    #[ffier(skip)]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), DetailedError> {
         use devices::virtio::input::Input;
         let input = Input::new(self.config_backend, self.events_backend)

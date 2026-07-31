@@ -1,6 +1,11 @@
 pub mod api;
 pub use api::*;
 
+ffier::generate_bridge!(
+    local = __ffier_krun_metadata,
+    schema_output = "../../target/ffier-krun.json"
+);
+
 #[allow(dead_code)]
 mod builder;
 
@@ -26,6 +31,7 @@ pub struct NitroConfig {
 static NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
 
 #[cfg(feature = "aws-nitro")]
+#[ffier::export]
 impl NitroConfig {
     pub fn new() -> Self {
         Self::default()

@@ -1,34 +1,52 @@
 use std::fmt;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, ffier::FfiError)]
 #[non_exhaustive]
 pub enum Error {
     // Configuration (100-199)
+    #[ffier(code = 100)]
     InvalidParam(),
+    #[ffier(code = 101)]
     DuplicateDevice(),
+    #[ffier(code = 102)]
     DeviceLimitExceeded(),
+    #[ffier(code = 103)]
     MissingConfig(),
+    #[ffier(code = 104)]
     ConflictingConfig(),
+    #[ffier(code = 105)]
     OutOfRange(),
 
     // Resources (200-299)
+    #[ffier(code = 200)]
     FileNotFound(),
+    #[ffier(code = 201)]
     PermissionDenied(),
+    #[ffier(code = 202)]
     ResourceAlloc(),
+    #[ffier(code = 203)]
     BadFd(),
 
     // Devices (300-399)
+    #[ffier(code = 300)]
     BackendUnavailable(),
+    #[ffier(code = 301, message = "feature not enabled in this build")]
     FeatureDisabled(),
+    #[ffier(code = 302)]
     DiskFormatError(),
 
     // Runtime (400-499)
+    #[ffier(code = 400)]
     AlreadyStarted(),
+    #[ffier(code = 401)]
     ValidationFailed(),
+    #[ffier(code = 402)]
     HypervisorError(),
+    #[ffier(code = 403)]
     BootError(),
 
     // Internal (900-999)
+    #[ffier(code = 900)]
     Internal(),
 }
 
