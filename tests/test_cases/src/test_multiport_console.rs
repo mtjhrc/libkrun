@@ -13,7 +13,13 @@ mod host {
     use std::thread;
 
     use crate::common::{build_init_config, init_krun, setup_rootfs};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
+
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(None, &[krun::Symbol::KrunConsoleBuilderAddInoutPort])
+    }
 
     fn spawn_ping_pong_responder(stream: UnixStream) {
         thread::spawn(move || {
@@ -45,8 +51,18 @@ mod host {
     }
 
     impl Test for TestMultiportConsole {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
 
             let root_dir = setup_rootfs(&test_setup)?;
             let init_config = build_init_config(&test_setup.test_case, &[]);
@@ -66,7 +82,12 @@ mod host {
             default_console
                 .add_default_console(
                     None,
-                    Some(std::io::stdout().as_fd().try_clone_to_owned().expect("dup stdout")),
+                    Some(
+                        std::io::stdout()
+                            .as_fd()
+                            .try_clone_to_owned()
+                            .expect("dup stdout"),
+                    ),
                     None,
                 )
                 .map_err(|e| anyhow::anyhow!("add_default_console: {e:?}"))?;

@@ -42,18 +42,18 @@ pub fn setup_and_run(num_cpus: u8, ram_mib: u32, test_setup: TestSetup) -> anyho
     setup_and_run_with_env(num_cpus, ram_mib, test_setup, &[])
 }
 
-#[cfg(feature = "host-ffi")]
+#[cfg(feature = "dynamic-linking")]
 use std::sync::OnceLock;
 
-#[cfg(feature = "host-ffi")]
+#[cfg(feature = "dynamic-linking")]
 use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
 
-#[cfg(feature = "host-ffi")]
+#[cfg(feature = "dynamic-linking")]
 static LIBKRUN: OnceLock<Library> = OnceLock::new();
 
 /// Load libkrun (dlopen in ffi mode) and initialize logging.
 pub fn init_krun() -> anyhow::Result<()> {
-    #[cfg(feature = "host-ffi")]
+    #[cfg(feature = "dynamic-linking")]
     LIBKRUN.get_or_init(|| {
         let name = if cfg!(target_os = "macos") {
             "libkrun.dylib"
@@ -64,7 +64,7 @@ pub fn init_krun() -> anyhow::Result<()> {
             .expect("failed to dlopen libkrun")
     });
 
-    #[cfg(feature = "host-ffi")]
+    #[cfg(feature = "dynamic-linking")]
     require_vm_symbols().context("failed to load core VM symbols")?;
 
     krun::init_log(
@@ -79,7 +79,7 @@ pub fn init_krun() -> anyhow::Result<()> {
 
 /// Load core VM symbols. Safe to call multiple times.
 /// In static mode this is a no-op (if it compiles, symbols are available).
-#[cfg(feature = "host-ffi")]
+#[cfg(feature = "dynamic-linking")]
 pub fn require_vm_symbols() -> Result<(), libloading::Error> {
     LIBKRUN.get_or_init(|| {
         let name = if cfg!(target_os = "macos") {

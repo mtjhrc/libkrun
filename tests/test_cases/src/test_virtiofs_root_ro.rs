@@ -19,9 +19,17 @@ mod host {
     use std::fs;
 
     use crate::common::{build_and_run, build_init_config, init_krun, setup_rootfs};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
 
     impl Test for TestVirtiofsRootRo {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if crate::common::require_vm_symbols().is_err() {
+                return ShouldRun::No("core VM symbols not available");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
 
@@ -32,15 +40,12 @@ mod host {
             fs::create_dir(root_dir.join(EMPTY_DIR))?;
             fs::write(root_dir.join(TEST_FILE), TEST_CONTENT)?;
 
-            let mut rootfs = krun::FsDevice::new_read_only(
-                "/dev/root",
-                root_dir.to_str().unwrap(),
-            )
-            .map_err(|e| anyhow::anyhow!("FsDevice::new_read_only: {e:?}"))?;
+            let mut rootfs = krun::FsDevice::new_read_only("/dev/root", root_dir.to_str().unwrap())
+                .map_err(|e| anyhow::anyhow!("FsDevice::new_read_only: {e:?}"))?;
 
             let init_config = build_init_config(&test_setup.test_case, &[]);
-            let mut payload = krun::Payload::load_krunfw()
-                .map_err(|e| anyhow::anyhow!("load_krunfw: {e:?}"))?;
+            let mut payload =
+                krun::Payload::load_krunfw().map_err(|e| anyhow::anyhow!("load_krunfw: {e:?}"))?;
             let mut overlay = krun::FsOverlay::new();
             init_config
                 .apply(&mut overlay, &mut payload)

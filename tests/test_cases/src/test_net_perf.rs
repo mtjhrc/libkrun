@@ -153,8 +153,23 @@ impl TestNetPerf {
 mod host {
     use super::*;
     use crate::common::{init_config_builder, init_krun, setup_standard_devices_from};
+
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(
+            None,
+            &[
+                krun::Symbol::KrunNetDeviceNewUnixgramPath,
+                krun::Symbol::KrunNetDeviceNewUnixgramFd,
+                krun::Symbol::KrunNetDeviceNewUnixstreamFd,
+                krun::Symbol::KrunNetDeviceNewTap,
+                krun::Symbol::KrunNetDeviceDestroy,
+            ],
+        )
+    }
     use crate::{Test, TestOutcome, TestSetup};
-    
+
     use std::process::{Child, Command, Stdio};
 
     const CONTAINERFILE: &str = "\
@@ -313,6 +328,10 @@ RUN dnf install -y iperf3 && dnf clean all
             if option_env!("IPERF_DURATION").is_none() {
                 return ShouldRun::No("IPERF_DURATION not set");
             }
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
             let backend_result = (self.should_run)();
             if let ShouldRun::No(_) = backend_result {
                 return backend_result;
@@ -347,6 +366,8 @@ RUN dnf install -y iperf3 && dnf clean all
             }
 
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
 
             let init_config = init_config_builder(&test_setup, &[]).dhcp(true).build();
             let (mut devices, payload) = setup_standard_devices_from(&test_setup, &init_config)?;
