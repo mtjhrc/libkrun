@@ -3,22 +3,23 @@
 
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Default)]
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(unused)]
 pub enum KernelFormat {
+    // ELF image, need to locale sections be loaded.
+    Elf = 0,
     // Raw image, ready to be loaded into the VM.
     #[default]
-    Raw,
-    // ELF image, need to locale sections be loaded.
-    Elf,
+    Raw = 1,
     // Raw image compressed with GZIP, embedded into a PE file.
-    PeGz,
+    PeGz = 2,
     // ELF image compressed with BZIP2, embedded into an Image file.
-    ImageBz2,
+    ImageBz2 = 3,
     // ELF image compressed with GZIP, embedded into an Image file.
-    ImageGz,
+    ImageGz = 4,
     // ELF image compressed with ZSTD, embedded into an Image file.
-    ImageZstd,
+    ImageZstd = 5,
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` kernel config.
