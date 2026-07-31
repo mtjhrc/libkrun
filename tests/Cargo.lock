@@ -80,17 +80,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "async-trait"
-version = "0.1.91"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -365,6 +354,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffier-gen-rust-client"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+dependencies = [
+ "ffier-schema",
+ "serde_json",
+]
+
+[[package]]
 name = "ffier-impl"
 version = "0.2.0"
 source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
@@ -457,19 +455,18 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "imago"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae7cfee876c698a1a2ed9c705ab18f21acbed82110f19b51cc458de73426fe2c"
+checksum = "404f567d70cd6d288e43f95ea8f2d6e8fe6156dd07df7da955cb9b147c4ab2a5"
 dependencies = [
- "async-trait",
  "bincode",
  "cfg-if",
  "libc",
+ "maybe-async",
  "miniz_oxide",
  "nix 0.30.1",
  "page_size",
  "rustc_version",
- "tokio",
  "tracing",
  "vm-memory",
  "windows-sys",
@@ -612,6 +609,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "krun-init-blob-via-cdylib"
+version = "0.1.0-1.18.1"
+dependencies = [
+ "anyhow",
+ "ffier",
+ "ffier-gen-rust-client",
+ "krun-via-cdylib-weak",
+ "pkg-config",
+]
+
+[[package]]
 name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
@@ -649,30 +657,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "krun-vmm"
-version = "0.1.0-2.0.0-dev"
+name = "krun-via-cdylib-weak"
+version = "2.0.0-dev"
 dependencies = [
- "bzip2",
- "crossbeam-channel",
- "flate2",
- "krun-arch",
- "krun-arch-gen",
- "krun-cpuid",
- "krun-devices",
- "krun-hvf",
- "krun-kernel",
- "krun-polly",
- "krun-utils",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "linux-loader",
- "log",
- "nix 0.30.1",
- "vm-memory",
- "vmm-sys-util",
- "windows-sys",
- "zstd",
+ "bitflags 2.13.1",
+ "ffier",
+ "ffier-gen-rust-client",
+ "libloading",
 ]
 
 [[package]]
@@ -694,9 +685,9 @@ dependencies = [
 
 [[package]]
 name = "kvm-ioctls"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "333f77a20344a448f3f70664918135fddeb804e938f28a99d685bd92926e0b19"
+checksum = "06ac372c120eb893b086d1a12027669cf2b478d1f71204021ffa7adf57948d63"
 dependencies = [
  "bitflags 2.13.1",
  "kvm-bindings",
@@ -715,25 +706,31 @@ name = "libkrun"
 version = "2.0.0-dev"
 dependencies = [
  "bitflags 2.13.1",
+ "bzip2",
  "crossbeam-channel",
  "env_logger",
+ "flate2",
  "krun-arch",
+ "krun-arch-gen",
+ "krun-cpuid",
  "krun-devices",
  "krun-hvf",
  "krun-kernel",
  "krun-polly",
  "krun-utils",
- "krun-vmm",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
  "libloading",
+ "linux-loader",
  "log",
  "nix 0.30.1",
  "once_cell",
  "thiserror",
  "vm-memory",
+ "vmm-sys-util",
  "windows-sys",
+ "zstd",
 ]
 
 [[package]]
@@ -748,9 +745,9 @@ dependencies = [
 
 [[package]]
 name = "linux-loader"
-version = "0.13.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de72cb02c55ecffcf75fe78295926f872eb6eb0a58d629c58a8c324dc26380f6"
+checksum = "d54207cb617cd75b10c57ad20235c914ab62b180ceeff2ef3111983670d3b321"
 dependencies = [
  "vm-memory",
 ]
@@ -780,6 +777,17 @@ dependencies = [
 name = "macros"
 version = "0.0.0"
 dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "maybe-async"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "746873a384ad60adc5db74471dfaba74bd278afbdcfd81db93fafcdfc8b5ca0c"
+dependencies = [
+ "proc-macro2",
  "quote",
  "syn 2.0.119",
 ]
@@ -1097,6 +1105,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "krun-init-blob",
+ "krun-init-blob-via-cdylib",
+ "krun-via-cdylib-weak",
  "libkrun",
  "libloading",
  "macros",
@@ -1123,15 +1133,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
-]
-
-[[package]]
-name = "tokio"
-version = "1.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
-dependencies = [
- "pin-project-lite",
 ]
 
 [[package]]
@@ -1203,9 +1204,9 @@ checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
 
 [[package]]
 name = "vm-memory"
-version = "0.17.1"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f39348a049689cabd3377cdd9182bf526ec76a6f823b79903896452e9d7a7380"
+checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
 dependencies = [
  "libc",
  "thiserror",

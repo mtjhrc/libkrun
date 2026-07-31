@@ -24,16 +24,34 @@ impl TestFreeBsdGvproxyTcpGuestConnect {
 mod host {
     use super::*;
 
+    use crate::common::init_krun;
+    #[cfg(feature = "dynamic-linking")]
+    use crate::common_freebsd::require_freebsd_symbols;
     use crate::common_freebsd::{
         freebsd_assets, normalize_serial_output, setup_gvproxy_backend, setup_kernel_and_enter,
     };
-    use crate::common::init_krun;
     use crate::test_net::gvproxy::gvproxy_path;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::thread;
 
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        require_freebsd_symbols()?;
+        krun::require(
+            None,
+            &[
+                krun::Symbol::KrunNetDeviceNewUnixgramPath,
+                krun::Symbol::KrunNetDeviceDestroy,
+            ],
+        )
+    }
+
     impl Test for TestFreeBsdGvproxyTcpGuestConnect {
         fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
             if freebsd_assets().is_none() {
                 return ShouldRun::No("freebsd assets missing");
             }
@@ -51,6 +69,8 @@ mod host {
             thread::spawn(move || self.tcp_tester.run_server(listener));
 
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
             let (_, net_device) = setup_gvproxy_backend(&test_setup)?;
             setup_kernel_and_enter(
                 test_setup,
