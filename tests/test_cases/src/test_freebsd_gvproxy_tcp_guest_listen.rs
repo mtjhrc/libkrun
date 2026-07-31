@@ -22,10 +22,12 @@ impl TestFreeBsdGvproxyTcpGuestListen {
 mod host {
     use super::*;
 
+    use crate::common::init_krun;
+    #[cfg(feature = "dynamic-linking")]
+    use crate::common_freebsd::require_freebsd_symbols;
     use crate::common_freebsd::{
         freebsd_assets, normalize_serial_output, setup_gvproxy_backend, setup_kernel_and_enter,
     };
-    use crate::common::init_krun;
     use crate::test_net::gvproxy::{gvproxy_path, setup_gvproxy_port_forward};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::net::Ipv4Addr;
@@ -34,8 +36,24 @@ mod host {
     // Virtual IP assigned to the guest inside gvproxy's network.
     const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 2);
 
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        require_freebsd_symbols()?;
+        krun::require(
+            None,
+            &[
+                krun::Symbol::KrunNetDeviceNewUnixgramPath,
+                krun::Symbol::KrunNetDeviceDestroy,
+            ],
+        )
+    }
+
     impl Test for TestFreeBsdGvproxyTcpGuestListen {
         fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
             if freebsd_assets().is_none() {
                 return ShouldRun::No("freebsd assets missing");
             }
@@ -49,6 +67,8 @@ mod host {
             let assets = freebsd_assets().expect("freebsd assets must be available");
 
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
             let (net_sock, net_device) = setup_gvproxy_backend(&test_setup)?;
 
             // Set up port-forwarding: host :PORT → guest GUEST_IP:PORT.

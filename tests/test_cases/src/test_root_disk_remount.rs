@@ -17,7 +17,19 @@ mod host {
     use std::process::Command;
 
     use crate::common::init_krun;
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
+
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(
+            None,
+            &[
+                krun::Symbol::KrunBlockDeviceNew,
+                krun::Symbol::KrunBlockDeviceDestroy,
+            ],
+        )
+    }
 
     fn create_disk_image(guest_agent_path: &str, output_path: &str) {
         // Populate from a staging directory using mke2fs -d (no root needed).
@@ -46,8 +58,18 @@ mod host {
     }
 
     impl Test for TestRootDiskRemount {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
 
             let guest_agent_path = std::env::var("KRUN_TEST_GUEST_AGENT_PATH")
                 .expect("KRUN_TEST_GUEST_AGENT_PATH not set");
@@ -80,9 +102,24 @@ mod host {
             let mut console_builder = krun::ConsoleDevice::builder();
             console_builder
                 .add_default_console(
-                    Some(std::io::stdin().as_fd().try_clone_to_owned().expect("dup stdin")),
-                    Some(std::io::stdout().as_fd().try_clone_to_owned().expect("dup stdout")),
-                    Some(std::io::stderr().as_fd().try_clone_to_owned().expect("dup stderr")),
+                    Some(
+                        std::io::stdin()
+                            .as_fd()
+                            .try_clone_to_owned()
+                            .expect("dup stdin"),
+                    ),
+                    Some(
+                        std::io::stdout()
+                            .as_fd()
+                            .try_clone_to_owned()
+                            .expect("dup stdout"),
+                    ),
+                    Some(
+                        std::io::stderr()
+                            .as_fd()
+                            .try_clone_to_owned()
+                            .expect("dup stderr"),
+                    ),
                 )
                 .map_err(|e| anyhow::anyhow!("add_default_console: {e:?}"))?;
             let console = console_builder

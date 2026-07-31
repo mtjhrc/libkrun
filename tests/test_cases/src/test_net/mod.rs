@@ -111,8 +111,28 @@ mod host {
 
     use std::thread;
 
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(
+            None,
+            &[
+                krun::Symbol::KrunNetDeviceNewUnixgramPath,
+                krun::Symbol::KrunNetDeviceNewUnixgramFd,
+                krun::Symbol::KrunNetDeviceNewUnixstreamPath,
+                krun::Symbol::KrunNetDeviceNewUnixstreamFd,
+                krun::Symbol::KrunNetDeviceNewTap,
+                krun::Symbol::KrunNetDeviceDestroy,
+            ],
+        )
+    }
+
     impl Test for TestNet {
         fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
             (self.should_run)()
         }
 
@@ -134,6 +154,8 @@ mod host {
             thread::spawn(move || tcp_tester.run_server(listener));
 
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
 
             let builder = init_config_builder(&test_setup, &[]).dhcp(true);
             let (mut devices, payload) = setup_standard_devices_from(&test_setup, builder)?;

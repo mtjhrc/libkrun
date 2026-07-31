@@ -6,12 +6,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-
-use crate::test_net::gvproxy::{Gvproxy, wait_for_socket};
 use crate::TestSetup;
+use crate::test_net::gvproxy::{Gvproxy, wait_for_socket};
 
-type ExtraDevicesFn =
-    Box<dyn FnOnce(&mut krun::MmioDeviceManager<'static>) -> anyhow::Result<()>>;
+type ExtraDevicesFn = Box<dyn FnOnce(&mut krun::MmioDeviceManager<'static>) -> anyhow::Result<()>>;
+
+#[cfg(feature = "dynamic-linking")]
+pub fn require_freebsd_symbols() -> Result<(), libloading::Error> {
+    crate::common::require_vm_symbols()?;
+    krun::require(
+        None,
+        &[
+            krun::Symbol::KrunPayloadLoadExternal,
+            krun::Symbol::KrunBlockDeviceNew,
+            krun::Symbol::KrunBlockDeviceDestroy,
+            krun::Symbol::KrunVmmBuilderAddSerialConsole,
+            krun::Symbol::KrunVmmBuilderSetKernelConsole,
+        ],
+    )
+}
 pub struct FreeBsdAssets {
     pub kernel_path: PathBuf,
     pub iso_path: PathBuf,
@@ -110,9 +123,7 @@ fn random_mac_address() -> [u8; 6] {
 /// Returns the net (HTTP-API) unix socket path so callers can call
 /// `setup_gvproxy_port_forward` afterwards, and the NetDevice to add to the
 /// device manager.
-pub fn setup_gvproxy_backend(
-    test_setup: &TestSetup,
-) -> anyhow::Result<(String, krun::NetDevice)> {
+pub fn setup_gvproxy_backend(test_setup: &TestSetup) -> anyhow::Result<(String, krun::NetDevice)> {
     // Short relative names: macOS `sockaddr_un.sun_path` is 104 bytes (max 103 usable chars),
     // so deep tmp paths plus long socket names can overflow.
     let tmp_dir = test_setup
@@ -172,7 +183,12 @@ pub fn setup_kernel_and_enter(
     extra_devices: Option<ExtraDevicesFn>,
 ) -> anyhow::Result<()> {
     let config_iso = create_config_iso(&test_setup.test_case, &test_setup.tmp_dir)?;
-    do_setup_and_enter(&assets.kernel_path, &assets.iso_path, &config_iso, extra_devices)
+    do_setup_and_enter(
+        &assets.kernel_path,
+        &assets.iso_path,
+        &config_iso,
+        extra_devices,
+    )
 }
 
 /// Shared implementation for entering the guest. Handles serial pipe + v2 API calls.
@@ -220,7 +236,12 @@ fn do_setup_and_enter(
     console_builder
         .add_default_console(
             None,
-            Some(std::io::stdout().as_fd().try_clone_to_owned().expect("dup stdout")),
+            Some(
+                std::io::stdout()
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .expect("dup stdout"),
+            ),
             None,
         )
         .map_err(|e| anyhow::anyhow!("add_default_console: {e:?}"))?;
@@ -260,7 +281,12 @@ fn do_setup_and_enter(
         .map_err(|e| anyhow::anyhow!("ram_mib: {e:?}"))?
         .add_serial_console(
             Some(serial_read_fd),
-            Some(std::io::stdout().as_fd().try_clone_to_owned().expect("dup stdout")),
+            Some(
+                std::io::stdout()
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .expect("dup stdout"),
+            ),
         )
         .payload(payload)
         .devices(devices)
@@ -270,5 +296,3 @@ fn do_setup_and_enter(
     vmm.run();
     unreachable!()
 }
-
-

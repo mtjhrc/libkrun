@@ -3,7 +3,9 @@ name = "test_cases"
 edition = "2024"
 
 [features]
-host = ["krun", "krun/blk", "krun/net", "krun-init-blob", "libloading", "serde", "serde_json"]
+host = ["libloading", "serde", "serde_json"]
+static-linking = ["host", "krun", "krun/blk", "krun/net", "krun-init-blob"]
+dynamic-linking = ["host", "krun-cdylib", "krun-init-cdylib"]
 guest = []
 
 [lib]
@@ -11,7 +13,9 @@ name = "test_cases"
 
 [dependencies]
 krun = { path = "../../src/libkrun", package = "libkrun", optional = true }
+krun-cdylib = { path = "../../src/libkrun-via-cdylib-weak", package = "krun-via-cdylib-weak", optional = true }
 krun-init-blob = { path = "../../init/init-blob", package = "krun-init-blob", features = ["direct"], optional = true }
+krun-init-cdylib = { path = "../../init/init-blob-via-cdylib", package = "krun-init-blob-via-cdylib", optional = true }
 libloading = { version = "0.8", optional = true }
 macros = { path = "../macros" }
 nix = { version = "0.29.0", features = ["fs", "socket", "ioctl", "user"] }
