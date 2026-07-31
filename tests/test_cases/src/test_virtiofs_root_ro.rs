@@ -1,4 +1,4 @@
-#![cfg(any(feature = "host", target_os = "linux"))]
+#![cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 
 // NOTE: This is a smoke test that asserts basic mutation operations fail on a read-only
 // virtiofs root. It is not exhaustive.For a security sensitive test it would also be better
@@ -19,9 +19,17 @@ mod host {
     use std::fs;
 
     use crate::common::{build_and_run, build_init_config, init_krun, setup_rootfs};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
 
     impl Test for TestVirtiofsRootRo {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "host-ffi")]
+            if crate::common::require_vm_symbols().is_err() {
+                return ShouldRun::No("core VM symbols not available");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
 

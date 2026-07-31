@@ -22,17 +22,37 @@ mod host {
     use std::thread;
 
     use crate::common::{init_krun, setup_standard_devices};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
+
+    #[cfg(feature = "host-ffi")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(None, &[
+            krun::Symbol::KrunVsockDeviceNew,
+            krun::Symbol::KrunVsockDeviceDestroy,
+            krun::Symbol::KrunVsockDeviceAddPortForward,
+        ])
+    }
 
     const TSI_HIJACK_INET: u32 = 1;
 
     impl Test for TestTsiTcpGuestListen {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "host-ffi")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             thread::spawn(move || {
                 self.tcp_tester.run_client();
             });
 
             init_krun()?;
+            #[cfg(feature = "host-ffi")]
+            require_symbols().unwrap();
 
             let (mut devices, payload) = setup_standard_devices(&test_setup, &[])?;
             let mut vsock = krun::VsockDevice::new(3, TSI_HIJACK_INET)

@@ -18,9 +18,17 @@ mod host {
     use super::*;
 
     use crate::common::{build_and_run, build_init_config, init_krun};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
 
     impl Test for TestAugmentFs {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "host-ffi")]
+            if crate::common::require_vm_symbols().is_err() {
+                return ShouldRun::No("core VM symbols not available");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
 

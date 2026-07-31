@@ -1,4 +1,4 @@
-#![cfg(any(feature = "host", target_os = "linux"))]
+#![cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 
 use macros::{guest, host};
 use std::io::{ErrorKind, Read};
@@ -41,7 +41,17 @@ mod host {
     use std::thread;
 
     use crate::common::{init_krun, setup_standard_devices};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
+
+    #[cfg(feature = "host-ffi")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(None, &[
+            krun::Symbol::KrunVsockDeviceNew,
+            krun::Symbol::KrunVsockDeviceDestroy,
+            krun::Symbol::KrunVsockDeviceAddUnixPort,
+        ])
+    }
 
     fn server(listener: UnixListener) {
         let (mut stream, _addr) = listener.accept().unwrap();
@@ -54,8 +64,18 @@ mod host {
     }
 
     impl Test for TestVsockGuestConnect {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "host-ffi")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
+            #[cfg(feature = "host-ffi")]
+            require_symbols().unwrap();
 
             let sock_path = test_setup.tmp_dir.join("test.sock");
             let listener = UnixListener::bind(&sock_path).unwrap();

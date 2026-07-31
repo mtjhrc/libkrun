@@ -42,8 +42,27 @@ pub fn setup_and_run(num_cpus: u8, ram_mib: u32, test_setup: TestSetup) -> anyho
     setup_and_run_with_env(num_cpus, ram_mib, test_setup, &[])
 }
 
-/// Initialize logging.
+#[cfg(feature = "host-ffi")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "host-ffi")]
+use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
+
+#[cfg(feature = "host-ffi")]
+static LIBKRUN: OnceLock<Library> = OnceLock::new();
+
+/// Load libkrun (dlopen in ffi mode) and initialize logging.
 pub fn init_krun() -> anyhow::Result<()> {
+    #[cfg(feature = "host-ffi")]
+    LIBKRUN.get_or_init(|| {
+        let name = if cfg!(target_os = "macos") { "libkrun.dylib" } else { "libkrun.so" };
+        unsafe { Library::open(Some(name), RTLD_NOW | RTLD_GLOBAL) }
+            .expect("failed to dlopen libkrun")
+    });
+
+    #[cfg(feature = "host-ffi")]
+    require_vm_symbols().context("failed to load core VM symbols")?;
+
     krun::init_log(
         krun::LogTarget::Default,
         krun::LogLevel::Trace,
@@ -51,6 +70,59 @@ pub fn init_krun() -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("init_log: {e:?}"))?;
     Ok(())
+}
+
+/// Load core VM symbols. Safe to call multiple times.
+/// In static mode this is a no-op (if it compiles, symbols are available).
+#[cfg(feature = "host-ffi")]
+pub fn require_vm_symbols() -> Result<(), libloading::Error> {
+    LIBKRUN.get_or_init(|| {
+        let name = if cfg!(target_os = "macos") { "libkrun.dylib" } else { "libkrun.so" };
+        unsafe { Library::open(Some(name), RTLD_NOW | RTLD_GLOBAL) }
+            .expect("failed to dlopen libkrun")
+    });
+    use krun::Symbol::*;
+    krun::require(
+        None,
+        &[
+            KrunInitLog,
+            KrunFsDeviceNew,
+            KrunFsDeviceNewReadOnly,
+            KrunFsDeviceNewNull,
+            KrunFsDeviceDestroy,
+            KrunFsDeviceSetOverlay,
+            KrunFsOverlayNew,
+            KrunFsOverlayDestroy,
+            KrunFsOverlayAddFile,
+            KrunFsOverlayAddDir,
+            KrunPayloadLoadKrunfw,
+            KrunPayloadDestroy,
+            KrunPayloadAppendCmdline,
+            KrunConsoleDeviceBuilder,
+            KrunConsoleDeviceDestroy,
+            KrunConsoleBuilderDestroy,
+            KrunConsoleBuilderAddDefaultConsole,
+            KrunConsoleBuilderBuild,
+            KrunMmioDeviceManagerNew,
+            KrunMmioDeviceManagerDestroy,
+            KrunMmioDeviceManagerAdd,
+            KrunVmmBuilderNew,
+            KrunVmmBuilderDestroy,
+            KrunVmmBuilderVcpus,
+            KrunVmmBuilderRamMib,
+            KrunVmmBuilderPayload,
+            KrunVmmBuilderDevices,
+            KrunVmmBuilderBuild,
+            KrunVmmDestroy,
+            KrunVmmRun,
+            KrunBalloonDeviceNew,
+            KrunBalloonDeviceDestroy,
+            KrunRngDeviceNew,
+            KrunRngDeviceDestroy,
+            KrunErrorPayload,
+            KrunErrorDestroy,
+        ],
+    )
 }
 
 pub fn setup_and_run_with_env(

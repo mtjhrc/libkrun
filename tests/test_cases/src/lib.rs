@@ -1,17 +1,24 @@
+#[cfg(all(feature = "host", feature = "host-ffi"))]
+compile_error!("Cannot enable both host and host-ffi");
+
 #[cfg(feature = "host")]
 extern crate krun_init_blob as krun_init;
+#[cfg(feature = "host-ffi")]
+extern crate krun_init_cdylib as krun_init;
+#[cfg(feature = "host-ffi")]
+extern crate krun_cdylib as krun;
 
 mod test_vm_config;
 use test_vm_config::TestVmConfig;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(feature = "guest", target_os = "macos"))]
 mod test_vm_pause;
-#[cfg(target_os = "macos")]
+#[cfg(any(feature = "guest", target_os = "macos"))]
 use test_vm_pause::TestVmPause;
 
-#[cfg(any(feature = "host", target_os = "linux"))]
+#[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 mod test_vsock_guest_connect;
-#[cfg(any(feature = "host", target_os = "linux"))]
+#[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 use test_vsock_guest_connect::TestVsockGuestConnect;
 
 mod test_tsi_tcp_guest_connect;
@@ -29,9 +36,9 @@ use test_net_perf::TestNetPerf;
 mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
-#[cfg(any(feature = "host", target_os = "linux"))]
+#[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 mod test_virtiofs_root_ro;
-#[cfg(any(feature = "host", target_os = "linux"))]
+#[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 use test_virtiofs_root_ro::TestVirtiofsRootRo;
 
 mod test_augmentfs;
@@ -43,9 +50,9 @@ use test_root_disk_remount::TestRootDiskRemount;
 mod test_pjdfstest;
 use test_pjdfstest::TestPjdfstest;
 
-#[cfg(any(feature = "host", target_os = "linux"))]
+#[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 mod test_virtiofs_misc;
-#[cfg(any(feature = "host", target_os = "linux"))]
+#[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
 use test_virtiofs_misc::TestVirtioFsMisc;
 
 pub enum TestOutcome {
@@ -99,9 +106,9 @@ pub fn test_cases() -> Vec<TestCase> {
                 ram_mib: 1024,
             }),
         ),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(feature = "guest", target_os = "macos"))]
         TestCase::new("vm-pause", Box::new(TestVmPause)),
-        #[cfg(any(feature = "host", target_os = "linux"))]
+        #[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
         TestCase::new("vsock-guest-connect", Box::new(TestVsockGuestConnect)),
         TestCase::new(
             "tsi-tcp-guest-connect",
@@ -120,11 +127,11 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("net-vmnet-helper", Box::new(TestNet::new_vmnet_helper())),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
-        #[cfg(any(feature = "host", target_os = "linux"))]
+        #[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
         TestCase::new("virtiofs-root-ro", Box::new(TestVirtiofsRootRo)),
         TestCase::new("augmentfs", Box::new(TestAugmentFs)),
         TestCase::new("root-disk-remount", Box::new(TestRootDiskRemount)),
-        #[cfg(any(feature = "host", target_os = "linux"))]
+        #[cfg(any(feature = "host", feature = "host-ffi", target_os = "linux"))]
         TestCase::new("virtiofs-misc", Box::new(TestVirtioFsMisc)),
         TestCase::new("pjdfstest", Box::new(TestPjdfstest)),
         TestCase::new("perf-net-passt-tx", Box::new(TestNetPerf::new_passt_tx())),
@@ -200,16 +207,16 @@ use macros::{guest, host};
 #[host]
 use std::path::PathBuf;
 
-#[cfg(all(feature = "guest", feature = "host"))]
+#[cfg(all(feature = "guest", any(feature = "host", feature = "host-ffi")))]
 compile_error!("Cannot enable both guest and host in the same binary!");
 
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 mod common;
 
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub mod common_freebsd;
 
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub mod rootfs;
 mod tcp_tester;
 

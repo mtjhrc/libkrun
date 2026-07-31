@@ -19,11 +19,11 @@ pub struct TestNetPerf {
     port: u16,
     /// If true, run iperf3 with -R (reverse: server sends, client receives = RX)
     reverse: bool,
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "host-ffi"))]
     should_run: fn() -> ShouldRun,
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "host-ffi"))]
     setup_backend: fn(&TestSetup) -> anyhow::Result<krun::NetDevice>,
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "host-ffi"))]
     cleanup: Option<fn()>,
 }
 
@@ -34,11 +34,11 @@ impl TestNetPerf {
             host_ip: [169, 254, 2, 2],
             port: 15100,
             reverse: false,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::passt::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::passt::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -49,11 +49,11 @@ impl TestNetPerf {
             host_ip: [169, 254, 2, 2],
             port: 15110,
             reverse: true,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::passt::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::passt::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -64,11 +64,11 @@ impl TestNetPerf {
             host_ip: [10, 0, 0, 1],
             port: 15101,
             reverse: false,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::tap::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::tap::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: Some(crate::test_net::tap::cleanup),
         }
     }
@@ -79,11 +79,11 @@ impl TestNetPerf {
             host_ip: [10, 0, 0, 1],
             port: 15111,
             reverse: true,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::tap::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::tap::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: Some(crate::test_net::tap::cleanup),
         }
     }
@@ -94,11 +94,11 @@ impl TestNetPerf {
             host_ip: [192, 168, 127, 254],
             port: 15102,
             reverse: false,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::gvproxy::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::gvproxy::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -109,11 +109,11 @@ impl TestNetPerf {
             host_ip: [192, 168, 127, 254],
             port: 15112,
             reverse: true,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::gvproxy::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::gvproxy::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -124,11 +124,11 @@ impl TestNetPerf {
             host_ip: [192, 168, 105, 1],
             port: 15103,
             reverse: false,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::vmnet_helper::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::vmnet_helper::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -139,11 +139,11 @@ impl TestNetPerf {
             host_ip: [192, 168, 105, 1],
             port: 15113,
             reverse: true,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: crate::test_net::vmnet_helper::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: crate::test_net::vmnet_helper::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -153,6 +153,17 @@ impl TestNetPerf {
 mod host {
     use super::*;
     use crate::common::{init_config_builder, init_krun, setup_standard_devices_from};
+
+    #[cfg(feature = "host-ffi")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(None, &[
+            krun::Symbol::KrunNetDeviceNewUnixgramPath,
+            krun::Symbol::KrunNetDeviceNewUnixgramFd,
+            krun::Symbol::KrunNetDeviceNewTap,
+            krun::Symbol::KrunNetDeviceDestroy,
+        ])
+    }
     use crate::{Test, TestOutcome, TestSetup};
     
     use std::process::{Child, Command, Stdio};
@@ -313,6 +324,10 @@ RUN dnf install -y iperf3 && dnf clean all
             if option_env!("IPERF_DURATION").is_none() {
                 return ShouldRun::No("IPERF_DURATION not set");
             }
+            #[cfg(feature = "host-ffi")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
             let backend_result = (self.should_run)();
             if let ShouldRun::No(_) = backend_result {
                 return backend_result;
@@ -347,6 +362,8 @@ RUN dnf install -y iperf3 && dnf clean all
             }
 
             init_krun()?;
+            #[cfg(feature = "host-ffi")]
+            require_symbols().unwrap();
 
             let builder = init_config_builder(&test_setup, &[]).dhcp(true);
             let (mut devices, payload) = setup_standard_devices_from(&test_setup, builder)?;

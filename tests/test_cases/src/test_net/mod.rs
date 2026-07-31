@@ -11,7 +11,7 @@ use macros::{guest, host};
 use crate::{ShouldRun, TestSetup};
 
 // TODO: export this via ffier from libkrun and use the generated constant instead
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub(crate) const COMPAT_NET_FEATURES: u32 = (1 << 0)  // CSUM
     | (1 << 1)  // GUEST_CSUM
     | (1 << 7)  // GUEST_TSO4
@@ -19,23 +19,23 @@ pub(crate) const COMPAT_NET_FEATURES: u32 = (1 << 0)  // CSUM
     | (1 << 11) // HOST_TSO4
     | (1 << 14); // HOST_UFO
 
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub(crate) mod gvproxy;
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub(crate) mod passt;
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub(crate) mod tap;
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "host-ffi"))]
 pub(crate) mod vmnet_helper;
 
 /// Virtio-net test with configurable backend
 pub struct TestNet {
     tcp_tester: TcpTester,
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "host-ffi"))]
     should_run: fn() -> ShouldRun,
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "host-ffi"))]
     setup_backend: fn(&TestSetup) -> anyhow::Result<krun::NetDevice>,
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "host-ffi"))]
     cleanup: Option<fn()>,
 }
 
@@ -43,11 +43,11 @@ impl TestNet {
     pub fn new_passt() -> Self {
         Self {
             tcp_tester: TcpTester::new([169, 254, 2, 2].into(), 9000),
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: passt::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: passt::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -55,11 +55,11 @@ impl TestNet {
     pub fn new_tap() -> Self {
         Self {
             tcp_tester: TcpTester::new([10, 0, 0, 1].into(), 9001),
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: tap::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: tap::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: Some(tap::cleanup),
         }
     }
@@ -67,11 +67,11 @@ impl TestNet {
     pub fn new_gvproxy() -> Self {
         Self {
             tcp_tester: TcpTester::new([192, 168, 127, 254].into(), 9002),
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: gvproxy::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: gvproxy::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -79,11 +79,11 @@ impl TestNet {
     pub fn new_vmnet_helper() -> Self {
         Self {
             tcp_tester: TcpTester::new([192, 168, 105, 1].into(), 9003),
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: vmnet_helper::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: vmnet_helper::setup_backend,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -93,11 +93,11 @@ impl TestNet {
     pub fn new_gvproxy_long_path() -> Self {
         Self {
             tcp_tester: TcpTester::new([192, 168, 127, 254].into(), 9004),
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             should_run: gvproxy::should_run,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             setup_backend: gvproxy::setup_backend_long_path,
-            #[cfg(feature = "host")]
+            #[cfg(any(feature = "host", feature = "host-ffi"))]
             cleanup: None,
         }
     }
@@ -111,8 +111,25 @@ mod host {
 
     use std::thread;
 
+    #[cfg(feature = "host-ffi")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(None, &[
+            krun::Symbol::KrunNetDeviceNewUnixgramPath,
+            krun::Symbol::KrunNetDeviceNewUnixgramFd,
+            krun::Symbol::KrunNetDeviceNewUnixstreamPath,
+            krun::Symbol::KrunNetDeviceNewUnixstreamFd,
+            krun::Symbol::KrunNetDeviceNewTap,
+            krun::Symbol::KrunNetDeviceDestroy,
+        ])
+    }
+
     impl Test for TestNet {
         fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "host-ffi")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
             (self.should_run)()
         }
 
@@ -134,6 +151,8 @@ mod host {
             thread::spawn(move || tcp_tester.run_server(listener));
 
             init_krun()?;
+            #[cfg(feature = "host-ffi")]
+            require_symbols().unwrap();
 
             let builder = init_config_builder(&test_setup, &[]).dhcp(true);
             let (mut devices, payload) = setup_standard_devices_from(&test_setup, builder)?;

@@ -17,7 +17,16 @@ mod host {
     use std::process::Command;
 
     use crate::common::init_krun;
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
+
+    #[cfg(feature = "host-ffi")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(None, &[
+            krun::Symbol::KrunBlockDeviceNew,
+            krun::Symbol::KrunBlockDeviceDestroy,
+        ])
+    }
 
     fn create_disk_image(guest_agent_path: &str, output_path: &str) {
         // Populate from a staging directory using mke2fs -d (no root needed).
@@ -46,8 +55,18 @@ mod host {
     }
 
     impl Test for TestRootDiskRemount {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "host-ffi")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             init_krun()?;
+            #[cfg(feature = "host-ffi")]
+            require_symbols().unwrap();
 
             let guest_agent_path = std::env::var("KRUN_TEST_GUEST_AGENT_PATH")
                 .expect("KRUN_TEST_GUEST_AGENT_PATH not set");
