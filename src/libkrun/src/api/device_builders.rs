@@ -23,6 +23,8 @@ use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualE
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use devices::virtio::passthrough::PermissionSemantics;
 use devices::virtio::{PortDescription, VirtioDevice, VirtioShmRegion, VmmExitObserver, port_io};
+#[cfg(feature = "input")]
+use krun_input;
 use polly::event_manager::{EventManager, Subscriber};
 use vm_memory::GuestMemoryMmap;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
@@ -1318,6 +1320,110 @@ impl<'a> AttachDevice<'a> for GpuDevice {
             inner.lock().unwrap().set_shm_region(region.into());
         }
 
+        let id = inner.lock().unwrap().id().to_string();
+        ctx.register(&id, inner)
+    }
+}
+
+/// A virtio input device forwarding host input events to the guest.
+#[cfg(feature = "input")]
+pub struct InputDevice<'a> {
+    config_backend: krun_input::InputConfigBackend<'a>,
+    events_backend: krun_input::InputEventProviderBackend<'a>,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+#[cfg(feature = "input")]
+impl<'a> InputDevice<'a> {
+    /// Create from opaque config/events backend vtables.
+    ///
+    /// # Safety
+    ///
+    /// `config_backend` must point to a valid `InputConfigBackend` struct of at
+    /// least `config_backend_size` bytes, and `event_provider_backend` must
+    /// point to a valid `InputEventProviderBackend` struct of at least
+    /// `event_provider_backend_size` bytes. Both structs are copied — the
+    /// caller retains ownership of the originals.
+    pub unsafe fn new(
+        config_backend: *const std::ffi::c_void,
+        config_backend_size: usize,
+        event_provider_backend: *const std::ffi::c_void,
+        event_provider_backend_size: usize,
+    ) -> Result<Self, Error> {
+        if config_backend_size < std::mem::size_of::<krun_input::InputConfigBackend<'_>>() {
+            return Err(Error::InvalidParam());
+        }
+        if event_provider_backend_size
+            < std::mem::size_of::<krun_input::InputEventProviderBackend<'_>>()
+        {
+            return Err(Error::InvalidParam());
+        }
+        let config_backend: krun_input::InputConfigBackend<'a> =
+            unsafe { std::ptr::read_unaligned(config_backend as *const _) };
+        if !config_backend.verify() {
+            return Err(Error::InvalidParam());
+        }
+        let events_backend: krun_input::InputEventProviderBackend<'a> =
+            unsafe { std::ptr::read_unaligned(event_provider_backend as *const _) };
+        if !events_backend.verify() {
+            return Err(Error::InvalidParam());
+        }
+        Ok(Self {
+            config_backend,
+            events_backend,
+            _lifetime: PhantomData,
+        })
+    }
+
+    /// Create a passthrough input device from an evdev fd.
+    ///
+    /// The fd must refer to a Linux `/dev/input/eventN` device and remain open
+    /// for the lifetime of the returned device. The caller retains ownership.
+    #[cfg(target_os = "linux")]
+    pub fn new_from_fd(input_fd: BorrowedFd<'a>) -> Result<Self, Error> {
+        use devices::virtio::input::passthrough::PassthroughInputBackend;
+        use krun_input::{IntoInputConfig, IntoInputEvents};
+
+        // The backend ABI stores userdata as a raw pointer. This leaks only the
+        // borrowed wrapper, not the descriptor; the caller-owned descriptor is
+        // kept alive by `'a`.
+        // FIXME: Remove this wrapper leak when the manual vtable/userdata ABI is
+        // replaced with an ffier-exported input backend type.
+        let userdata: &'a BorrowedFd<'a> = Box::leak(Box::new(input_fd));
+
+        let config_backend = PassthroughInputBackend::into_input_config(Some(userdata));
+        let events_backend = PassthroughInputBackend::into_input_events(Some(userdata));
+
+        Ok(Self {
+            config_backend,
+            events_backend,
+            _lifetime: PhantomData,
+        })
+    }
+}
+
+#[cfg(feature = "input")]
+impl<'a> AttachDevice<'a> for InputDevice<'a> {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), Error> {
+        use devices::virtio::input::Input;
+        // FIXME: Input spawns a worker thread that requires `'static` backends.
+        // Keep the API lifetime above, but extend it internally until the worker
+        // architecture can carry the actual lifetime.
+        let config_backend = unsafe {
+            std::mem::transmute::<
+                krun_input::InputConfigBackend<'a>,
+                krun_input::InputConfigBackend<'static>,
+            >(self.config_backend)
+        };
+        let events_backend = unsafe {
+            std::mem::transmute::<
+                krun_input::InputEventProviderBackend<'a>,
+                krun_input::InputEventProviderBackend<'static>,
+            >(self.events_backend)
+        };
+        let input = Input::new(config_backend, events_backend)
+            .map_err(|e| Error::Internal(format!("input: {e:?}")))?;
+        let inner = Arc::new(Mutex::new(input));
         let id = inner.lock().unwrap().id().to_string();
         ctx.register(&id, inner)
     }
