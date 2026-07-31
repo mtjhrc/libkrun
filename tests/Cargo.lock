@@ -365,6 +365,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffier-gen-rust-client"
+version = "0.2.0"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=289162e#289162eb9a5d6c9752edfe02c09f851bf1c60748"
+dependencies = [
+ "ffier-schema",
+ "serde_json",
+]
+
+[[package]]
 name = "ffier-impl"
 version = "0.2.0"
 source = "git+https://github.com/mtjhrc/ffier.git?rev=289162e#289162eb9a5d6c9752edfe02c09f851bf1c60748"
@@ -612,6 +621,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "krun-init-blob-via-cdylib"
+version = "0.1.0-1.18.1"
+dependencies = [
+ "anyhow",
+ "ffier",
+ "ffier-gen-rust-client",
+ "krun-via-cdylib-weak",
+ "pkg-config",
+]
+
+[[package]]
 name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
@@ -646,6 +666,16 @@ dependencies = [
  "nix 0.30.1",
  "vmm-sys-util",
  "windows-sys",
+]
+
+[[package]]
+name = "krun-via-cdylib-weak"
+version = "2.0.0-dev"
+dependencies = [
+ "bitflags 2.13.1",
+ "ffier",
+ "ffier-gen-rust-client",
+ "libloading",
 ]
 
 [[package]]
@@ -1097,6 +1127,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "krun-init-blob",
+ "krun-init-blob-via-cdylib",
+ "krun-via-cdylib-weak",
  "libkrun",
  "libloading",
  "macros",

@@ -23,16 +23,38 @@ mod host {
     use std::thread;
 
     use crate::common::{init_krun, setup_standard_devices};
-    use crate::{Test, TestSetup};
+    use crate::{ShouldRun, Test, TestSetup};
+
+    #[cfg(feature = "dynamic-linking")]
+    fn require_symbols() -> Result<(), libloading::Error> {
+        crate::common::require_vm_symbols()?;
+        krun::require(
+            None,
+            &[
+                krun::Symbol::KrunVsockDeviceNew,
+                krun::Symbol::KrunVsockDeviceDestroy,
+            ],
+        )
+    }
 
     const TSI_HIJACK_INET: u32 = 1;
 
     impl Test for TestTsiTcpGuestConnect {
+        fn should_run(&self) -> ShouldRun {
+            #[cfg(feature = "dynamic-linking")]
+            if require_symbols().is_err() {
+                return ShouldRun::No("feature not enabled in this libkrun build");
+            }
+            ShouldRun::Yes
+        }
+
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let listener = self.tcp_tester.create_server_socket();
             thread::spawn(move || self.tcp_tester.run_server(listener));
 
             init_krun()?;
+            #[cfg(feature = "dynamic-linking")]
+            require_symbols().unwrap();
 
             let (mut devices, payload) = setup_standard_devices(&test_setup, &[])?;
             devices.add(
