@@ -1,6 +1,9 @@
 #[macro_use]
 extern crate log;
 
+pub mod api;
+pub use api::*;
+
 pub(crate) mod vmm;
 
 #[cfg(feature = "aws-nitro")]

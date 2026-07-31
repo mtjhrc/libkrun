@@ -135,19 +135,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Contains the state and associated methods required for the Firecracker VMM.
 pub struct Vmm {
     // Guest VM core resources.
-    guest_memory: GuestMemoryMmap,
-    arch_memory_info: ArchMemoryInfo,
+    pub(crate) guest_memory: GuestMemoryMmap,
+    pub(crate) arch_memory_info: ArchMemoryInfo,
 
-    kernel_cmdline: KernelCmdline,
+    pub(crate) kernel_cmdline: KernelCmdline,
 
-    vcpus_handles: Vec<VcpuHandle>,
-    exit_evt: EventFd,
-    vm: Vm,
-    exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
-    exit_code: Arc<AtomicI32>,
+    pub(crate) vcpus_handles: Vec<VcpuHandle>,
+    pub(crate) exit_evt: EventFd,
+    pub(crate) vm: Vm,
+    pub(crate) exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
+    pub(crate) exit_code: Arc<AtomicI32>,
 
     // Guest VM devices.
-    mmio_device_manager: MMIODeviceManager,
+    pub(crate) mmio_device_manager: MMIODeviceManager,
 
     // Out-of-band live pause/resume requests: the C API sends `VmCtl` from
     // another thread; the event loop freezes or wakes the vCPUs. A single
@@ -156,13 +156,13 @@ pub struct Vmm {
     // notify-driven, so a frozen guest leaves them idle without explicit
     // handling.
     #[cfg(target_os = "macos")]
-    vm_ctl_tx: PollableChannelSender<VmCtl>,
+    pub(crate) vm_ctl_tx: PollableChannelSender<VmCtl>,
     #[cfg(target_os = "macos")]
-    vm_ctl_rx: PollableChannelReciever<VmCtl>,
+    pub(crate) vm_ctl_rx: PollableChannelReciever<VmCtl>,
     #[cfg(target_os = "macos")]
-    paused: bool,
+    pub(crate) paused: bool,
     #[cfg(target_os = "macos")]
-    paused_at: u64,
+    pub(crate) paused_at: u64,
 }
 
 /// Out-of-band request to the running VM's event loop.
