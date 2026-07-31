@@ -1029,9 +1029,9 @@ impl<'a> AttachDevice<'a> for BlockDevice {
     }
 }
 
+#[cfg(feature = "net")]
 bitflags::bitflags! {
     /// Flags for virtio-net device constructors.
-    #[cfg(feature = "net")]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct NetFlags: u32 {
         /// Send the vfkit magic handshake on a unixgram socket.
