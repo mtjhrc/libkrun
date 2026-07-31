@@ -8,11 +8,11 @@ use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 /// Internal passthrough input backend that forwards host /dev/input/* devices
-pub struct PassthroughInputBackend {
-    fd: BorrowedFd<'static>,
+pub struct PassthroughInputBackend<'a> {
+    fd: BorrowedFd<'a>,
 }
 
-impl InputQueryConfig for PassthroughInputBackend {
+impl InputQueryConfig for PassthroughInputBackend<'_> {
     fn query_serial_name(&self, serial_buf: &mut [u8]) -> Result<u8, InputBackendError> {
         match unsafe { eviocguniq(self.fd.as_raw_fd(), serial_buf) } {
             Ok(len) => Ok(len as u8),
@@ -99,8 +99,8 @@ impl InputQueryConfig for PassthroughInputBackend {
     }
 }
 
-impl ObjectNew<BorrowedFd<'static>> for PassthroughInputBackend {
-    fn new(userdata: Option<&BorrowedFd<'static>>) -> Self {
+impl<'a> ObjectNew<BorrowedFd<'a>> for PassthroughInputBackend<'a> {
+    fn new(userdata: Option<&BorrowedFd<'a>>) -> Self {
         let fd = userdata
             .copied()
             .expect("Missing argument for PassthroughInputBackend::new");
@@ -111,7 +111,7 @@ impl ObjectNew<BorrowedFd<'static>> for PassthroughInputBackend {
     }
 }
 
-impl InputEventsImpl for PassthroughInputBackend {
+impl InputEventsImpl for PassthroughInputBackend<'_> {
     fn get_read_notify_fd(&self) -> Result<BorrowedFd<'_>, InputBackendError> {
         Ok(self.fd)
     }
