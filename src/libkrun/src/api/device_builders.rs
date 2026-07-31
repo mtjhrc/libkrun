@@ -293,6 +293,7 @@ pub struct MmioDeviceManager<'a> {
     devices: Vec<Box<dyn AttachDevice<'a> + 'a>>,
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> MmioDeviceManager<'a> {
     /// Create an empty device manager.
     pub fn new() -> Self {
@@ -354,7 +355,14 @@ pub struct FsOverlay<'a> {
     entries: Vec<VirtualDirEntry<'a>>,
 }
 
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "not(any(feature = \"tee\", feature = \"aws-nitro\"))")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(not(any(feature = "tee", feature = "aws-nitro")))
+)]
 impl<'a> FsOverlay<'a> {
     /// Create a new empty overlay.
     pub fn new() -> Self {
@@ -437,7 +445,14 @@ pub struct FsDevice<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "not(any(feature = \"tee\", feature = \"aws-nitro\"))")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(not(any(feature = "tee", feature = "aws-nitro")))
+)]
 impl<'a> FsDevice<'a> {
     /// Create a new virtiofs device sharing a host directory.
     ///
@@ -505,8 +520,16 @@ impl<'a> FsDevice<'a> {
     }
 }
 
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "not(any(feature = \"tee\", feature = \"aws-nitro\"))")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(not(any(feature = "tee", feature = "aws-nitro")))
+)]
 impl<'a> AttachDevice<'a> for FsDevice<'a> {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements {
             shm_size: self.shm_size,
@@ -514,6 +537,7 @@ impl<'a> AttachDevice<'a> for FsDevice<'a> {
         }
     }
 
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         {
             let mut fs = self.inner.lock().unwrap();
@@ -567,6 +591,7 @@ pub struct ConsoleBuilder<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> ConsoleDevice<'a> {
     /// Create a new console builder.
     pub fn builder() -> ConsoleBuilder<'a> {
@@ -578,6 +603,7 @@ impl<'a> ConsoleDevice<'a> {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> ConsoleBuilder<'a> {
     /// Add a TTY-backed port to the console.
     ///
@@ -825,7 +851,9 @@ impl<'a> ConsoleBuilder<'a> {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> AttachDevice<'a> for ConsoleDevice<'a> {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         let console_dev = Arc::new(Mutex::new(
             devices::virtio::Console::new(self.ports)
@@ -853,7 +881,8 @@ pub struct BalloonDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Balloon>>,
 }
 
-#[cfg(not(feature = "tee"))]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(feature = \"tee\")"))]
+#[cfg_attr(not(feature = "ffi"), cfg(not(feature = "tee")))]
 impl BalloonDevice {
     pub fn new() -> Result<Self, VmmError> {
         let balloon = devices::virtio::Balloon::new()
@@ -864,8 +893,10 @@ impl BalloonDevice {
     }
 }
 
-#[cfg(not(feature = "tee"))]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(feature = \"tee\")"))]
+#[cfg_attr(not(feature = "ffi"), cfg(not(feature = "tee")))]
 impl<'a> AttachDevice<'a> for BalloonDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         ctx.subscribe_events(self.inner.clone())?;
         ctx.register("balloon", self.inner)
@@ -878,7 +909,8 @@ pub struct RngDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Rng>>,
 }
 
-#[cfg(not(feature = "tee"))]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(feature = \"tee\")"))]
+#[cfg_attr(not(feature = "ffi"), cfg(not(feature = "tee")))]
 impl RngDevice {
     pub fn new() -> Result<Self, VmmError> {
         let rng =
@@ -889,8 +921,10 @@ impl RngDevice {
     }
 }
 
-#[cfg(not(feature = "tee"))]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(feature = \"tee\")"))]
+#[cfg_attr(not(feature = "ffi"), cfg(not(feature = "tee")))]
 impl<'a> AttachDevice<'a> for RngDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         ctx.subscribe_events(self.inner.clone())?;
         ctx.register("rng", self.inner)
@@ -915,6 +949,7 @@ pub struct VsockDevice {
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl VsockDevice {
     /// Create a new vsock device.
     ///
@@ -947,7 +982,9 @@ impl VsockDevice {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> AttachDevice<'a> for VsockDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         let host_port_map = (!self.host_port_map.is_empty()).then_some(self.host_port_map);
         let unix_ipc_port_map =
@@ -991,7 +1028,8 @@ pub struct BlockDevice {
     sync_mode: SyncMode,
 }
 
-#[cfg(feature = "blk")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "blk"))]
 impl BlockDevice {
     /// Create a new block device.
     ///
@@ -1027,8 +1065,10 @@ impl BlockDevice {
     }
 }
 
-#[cfg(feature = "blk")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "blk"))]
 impl<'a> AttachDevice<'a> for BlockDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         use devices::virtio::CacheType;
 
@@ -1057,7 +1097,7 @@ export_bitflags! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct NetFlags: u32 {
             /// Send the vfkit magic handshake on a unixgram socket.
-            const VFKIT = 1 << 0;
+            const VFKIT = 1;
         }
     }
 }
@@ -1068,7 +1108,8 @@ pub struct NetDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Net>>,
 }
 
-#[cfg(feature = "net")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"net\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "net"))]
 impl NetDevice {
     /// Create a net device backed by a Unix datagram socket path.
     pub fn new_unixgram_path(
@@ -1146,7 +1187,7 @@ impl NetDevice {
     }
 
     // FIXME: use #[cfg(target_os = "linux")] on the method once ffier supports
-    // per-method cfg inside #[ffier::export] impl blocks.
+    // per-method cfg inside #[cfg_attr(feature = "ffi", ffier::export)] impl blocks.
     pub fn new_tap(id: &str, tap_name: &str, mac: &[u8], features: u32) -> Result<Self, VmmError> {
         #[cfg(target_os = "linux")]
         {
@@ -1183,8 +1224,10 @@ impl NetDevice {
     }
 }
 
-#[cfg(feature = "net")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"net\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "net"))]
 impl<'a> AttachDevice<'a> for NetDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         let id = self.inner.lock().unwrap().id().to_string();
         ctx.register(&id, self.inner)
@@ -1197,7 +1240,14 @@ pub struct DisplayInfoBuilder {
     pub(crate) inner: DisplayInfo,
 }
 
-#[cfg(any(feature = "gpu", feature = "vhost-user"))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "any(feature = \"gpu\", feature = \"vhost-user\")")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(any(feature = "gpu", feature = "vhost-user"))
+)]
 impl DisplayInfoBuilder {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
@@ -1249,7 +1299,14 @@ pub struct DisplayBackend {
     pub(crate) displays: Vec<DisplayInfo>,
 }
 
-#[cfg(any(feature = "gpu", feature = "vhost-user"))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "any(feature = \"gpu\", feature = \"vhost-user\")")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(any(feature = "gpu", feature = "vhost-user"))
+)]
 impl DisplayBackend {
     /// Create from the opaque pre-ffier `krun_display_backend` vtable pointer.
     ///
@@ -1303,7 +1360,8 @@ pub struct GpuDevice {
     shm_size: usize,
 }
 
-#[cfg(feature = "gpu")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"gpu\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "gpu"))]
 impl GpuDevice {
     const DEFAULT_SHM_SIZE: usize = 1 << 33;
 
@@ -1321,8 +1379,10 @@ impl GpuDevice {
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"gpu\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "gpu"))]
 impl<'a> AttachDevice<'a> for GpuDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements {
             gpu_shm: Some(self.shm_size),
@@ -1330,6 +1390,7 @@ impl<'a> AttachDevice<'a> for GpuDevice {
         }
     }
 
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         let displays: Box<[DisplayInfo]> = self.backend.displays.into_boxed_slice();
 
@@ -1370,7 +1431,14 @@ pub struct VhostUserDevice {
     backend: Option<DisplayBackend>,
 }
 
-#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "all(feature = \"vhost-user\", target_os = \"linux\")")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(all(feature = "vhost-user", target_os = "linux"))
+)]
 impl VhostUserDevice {
     /// Create a new vhost-user device.
     ///
@@ -1410,8 +1478,16 @@ impl VhostUserDevice {
     }
 }
 
-#[cfg(all(feature = "vhost-user", target_os = "linux"))]
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "all(feature = \"vhost-user\", target_os = \"linux\")")
+)]
+#[cfg_attr(
+    not(feature = "ffi"),
+    cfg(all(feature = "vhost-user", target_os = "linux"))
+)]
 impl<'a> AttachDevice<'a> for VhostUserDevice {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements {
             process_shareable_memory: true,
@@ -1419,6 +1495,7 @@ impl<'a> AttachDevice<'a> for VhostUserDevice {
         }
     }
 
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         let (gpu_display, display_backend) = match self.backend {
             Some(b) => (b.displays.first().cloned(), Some(b.inner)),
@@ -1448,7 +1525,8 @@ pub struct InputDevice<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-#[cfg(feature = "input")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"input\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "input"))]
 impl<'a> InputDevice<'a> {
     /// Create from opaque config/events backend vtables.
     ///
@@ -1517,8 +1595,10 @@ impl<'a> InputDevice<'a> {
     }
 }
 
-#[cfg(feature = "input")]
+#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"input\""))]
+#[cfg_attr(not(feature = "ffi"), cfg(feature = "input"))]
 impl<'a> AttachDevice<'a> for InputDevice<'a> {
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError> {
         use devices::virtio::input::Input;
         // FIXME: Input spawns a worker thread that requires `'static` backends.

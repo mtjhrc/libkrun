@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(unused)]
