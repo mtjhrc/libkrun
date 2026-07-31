@@ -912,6 +912,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tdx",
+ "thiserror 2.0.18",
  "vm-memory",
  "vmm-sys-util",
  "windows-sys",

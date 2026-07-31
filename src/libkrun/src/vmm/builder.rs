@@ -2169,7 +2169,7 @@ fn create_vcpus_riscv64(
 
 /// Attaches an virtio mmio device to the device manager.
 #[allow(unused)]
-fn attach_mmio_device(
+pub(crate) fn attach_mmio_device(
     vmm: &mut Vmm,
     id: String,
     intc: IrqChip,
