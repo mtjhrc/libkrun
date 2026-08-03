@@ -7,6 +7,10 @@ license = "Apache-2.0"
 repository = "https://github.com/containers/libkrun"
 build = "build.rs"
 
+[features]
+default = ["ffi-client"]
+ffi-client = []
+
 [lib]
 # Tests live in the integration test suite, not here. Disable to avoid
 # requiring libkrun_init.so during `cargo test` in the workspace.

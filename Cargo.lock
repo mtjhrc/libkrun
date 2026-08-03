@@ -816,8 +816,8 @@ name = "krun-init-blob"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
  "ffier",
+ "krun-via-cdylib-weak",
  "libkrun",
- "libloading",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
