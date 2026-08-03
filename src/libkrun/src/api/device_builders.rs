@@ -838,6 +838,31 @@ impl<'a> AttachDevice<'a> for BalloonDevice {
     }
 }
 
+/// A virtio entropy source (RNG) device.
+#[cfg(not(feature = "tee"))]
+pub struct RngDevice {
+    pub(crate) inner: Arc<Mutex<devices::virtio::Rng>>,
+}
+
+#[cfg(not(feature = "tee"))]
+impl RngDevice {
+    pub fn new() -> Result<Self, Error> {
+        let rng =
+            devices::virtio::Rng::new().map_err(|e| Error::Internal(format!("rng: {e:?}")))?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(rng)),
+        })
+    }
+}
+
+#[cfg(not(feature = "tee"))]
+impl<'a> AttachDevice<'a> for RngDevice {
+    fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), Error> {
+        ctx.subscribe_events(self.inner.clone())?;
+        ctx.register("rng", self.inner)
+    }
+}
+
 /// Walk parent directory components in a virtual entry tree, returning the
 /// children vec of the deepest parent.
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
