@@ -167,6 +167,18 @@ impl Builder {
         self
     }
 
+    /// Enable DHCP client in the guest.
+    pub fn dhcp(mut self, enable: bool) -> Self {
+        self.inner
+            .process
+            .env
+            .retain(|e| !e.starts_with("KRUN_DHCP="));
+        if enable {
+            self.inner.process.env.push("KRUN_DHCP=1".to_string());
+        }
+        self
+    }
+
     /// Set the root disk to remount on boot.
     pub fn set_root_disk_remount(
         mut self,
