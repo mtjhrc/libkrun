@@ -20,20 +20,14 @@ typedef void* KrunVmmHandle;
 typedef void* KrunBalloonDevice;
 typedef void* KrunRngDevice;
 typedef void* KrunVsockDevice;
-typedef void* KrunBlockDevice;
-typedef void* KrunNetDevice;
-typedef void* KrunDisplayInfoBuilder;
-typedef void* KrunDisplayBackend;
-typedef void* KrunGpuDevice;
-typedef void* KrunInputDevice;
-typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunNetDevice | KrunGpuDevice | KrunInputDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
+typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 typedef void* KrunError; /* KrunError | KrunVtableError */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunVmmHandle | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice | KrunDisplayInfoBuilder | KrunDisplayBackend | KrunGpuDevice | KrunInputDevice */
+typedef void* KrunObject; /* KrunError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunVmmBuilder | KrunVmm | KrunVmmHandle | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -108,9 +102,11 @@ typedef struct {
 
 /* Free an owned string returned by the library */
 void krun_str_free(KrunStr s);
+typedef void (*krun_str_free_fn)(KrunStr s);
 
 /* Free an object array returned by the library */
 void krun_free_object_array(KrunObjectArray a);
+typedef void (*krun_free_object_array_fn)(KrunObjectArray a);
 
 
 /* KernelFormat ------------------------------------------------------ */
@@ -137,14 +133,6 @@ void krun_free_object_array(KrunObjectArray a);
 
 #define KRUN_LOG_OPTIONS_NO_ENV 1
 
-/* VirglRendererFlags ------------------------------------------------ */
-
-#define KRUN_VIRGL_RENDERER_FLAGS_USE_EGL 1
-#define KRUN_VIRGL_RENDERER_FLAGS_THREAD_SYNC 2
-#define KRUN_VIRGL_RENDERER_FLAGS_VENUS 64
-#define KRUN_VIRGL_RENDERER_FLAGS_USE_ASYNC_FENCE_CB 256
-#define KRUN_VIRGL_RENDERER_FLAGS_RENDER_SERVER 512
-
 /* Error ------------------------------------------------------------- */
 
 #define KRUN_ERROR__INVALID_PARAM ((uint64_t)16777229 << 32 | 1)
@@ -170,6 +158,7 @@ void krun_free_object_array(KrunObjectArray a);
 
 /** Create an empty device manager. */
 KrunMmioDeviceManager krun_mmio_device_manager_new();
+typedef KrunMmioDeviceManager (*krun_mmio_device_manager_new_fn)();
 /**
  * Add a device to this manager.
  *
@@ -178,7 +167,9 @@ KrunMmioDeviceManager krun_mmio_device_manager_new();
  * (`FsDevice`, `ConsoleDevice`, etc.) implement this trait.
  */
 void krun_mmio_device_manager_add(KrunMmioDeviceManager handle, KrunAttachDevice device);
+typedef void (*krun_mmio_device_manager_add_fn)(KrunMmioDeviceManager handle, KrunAttachDevice device);
 void krun_mmio_device_manager_destroy(KrunMmioDeviceManager handle);
+typedef void (*krun_mmio_device_manager_destroy_fn)(KrunMmioDeviceManager handle);
 
 /* FsDevice ---------------------------------------------------------- */
 
@@ -191,8 +182,10 @@ void krun_mmio_device_manager_destroy(KrunMmioDeviceManager handle);
  * - `host_path`: the host directory to share.
  */
 KrunFsDevice krun_fs_device_new(KrunStr tag, KrunStr host_path, KrunError* err_out);
+typedef KrunFsDevice (*krun_fs_device_new_fn)(KrunStr tag, KrunStr host_path, KrunError* err_out);
 /** Create a read-only virtiofs device sharing a host directory. */
 KrunFsDevice krun_fs_device_new_read_only(KrunStr tag, KrunStr host_path, KrunError* err_out);
+typedef KrunFsDevice (*krun_fs_device_new_read_only_fn)(KrunStr tag, KrunStr host_path, KrunError* err_out);
 /**
  * Create a virtiofs device with no host directory (NullFs).
  *
@@ -201,6 +194,7 @@ KrunFsDevice krun_fs_device_new_read_only(KrunStr tag, KrunStr host_path, KrunEr
  * them.
  */
 KrunFsDevice krun_fs_device_new_null(KrunStr tag, KrunError* err_out);
+typedef KrunFsDevice (*krun_fs_device_new_null_fn)(KrunStr tag, KrunError* err_out);
 /**
  * Set a pre-built [`FsOverlay`] on this device.
  *
@@ -208,6 +202,7 @@ KrunFsDevice krun_fs_device_new_null(KrunStr tag, KrunError* err_out);
  * virtiofs device) during [`attach`](AttachDevice::attach).
  */
 void krun_fs_device_set_overlay(KrunFsDevice handle, KrunFsOverlay overlay);
+typedef void (*krun_fs_device_set_overlay_fn)(KrunFsDevice handle, KrunFsOverlay overlay);
 /**
  * Set the size of the DAX (direct access) shared memory window.
  *
@@ -216,13 +211,17 @@ void krun_fs_device_set_overlay(KrunFsDevice handle, KrunFsOverlay overlay);
  * no DAX window is allocated.
  */
 void krun_fs_device_set_dax_window_size(KrunFsDevice handle, uint64_t bytes);
+typedef void (*krun_fs_device_set_dax_window_size_fn)(KrunFsDevice handle, uint64_t bytes);
 void krun_fs_device_destroy(KrunFsDevice handle);
+typedef void (*krun_fs_device_destroy_fn)(KrunFsDevice handle);
 
 /* ConsoleDevice ----------------------------------------------------- */
 
 /** Create a new console builder. */
 KrunConsoleBuilder krun_console_device_builder();
+typedef KrunConsoleBuilder (*krun_console_device_builder_fn)();
 void krun_console_device_destroy(KrunConsoleDevice handle);
+typedef void (*krun_console_device_destroy_fn)(KrunConsoleDevice handle);
 
 /* ConsoleBuilder ---------------------------------------------------- */
 
@@ -242,13 +241,16 @@ void krun_console_device_destroy(KrunConsoleDevice handle);
  * The zero-based port index.
  */
 KrunResult krun_console_builder_add_tty_port(KrunConsoleBuilder handle, KrunStr name, int tty_fd, uint32_t* result, KrunError* err_out);
+typedef KrunResult (*krun_console_builder_add_tty_port_fn)(KrunConsoleBuilder handle, KrunStr name, int tty_fd, uint32_t* result, KrunError* err_out);
 /**
  * Add a port with separate input and output fds (no terminal properties).
  * Pass `None` to disable that direction.
  */
 KrunResult krun_console_builder_add_inout_port(KrunConsoleBuilder handle, KrunStr name, int input_fd, int output_fd, uint32_t* result, KrunError* err_out);
+typedef KrunResult (*krun_console_builder_add_inout_port_fn)(KrunConsoleBuilder handle, KrunStr name, int input_fd, int output_fd, uint32_t* result, KrunError* err_out);
 /** Build the console device. At least one port must have been added. */
 KrunConsoleDevice krun_console_builder_build(KrunConsoleBuilder handle, KrunError* err_out);
+typedef KrunConsoleDevice (*krun_console_builder_build_fn)(KrunConsoleBuilder handle, KrunError* err_out);
 /**
  * Set up the default console: port 0 (hvc0) plus named redirect ports.
  *
@@ -262,12 +264,15 @@ KrunConsoleDevice krun_console_builder_build(KrunConsoleBuilder handle, KrunErro
  * Pass `None` to skip a stream.
  */
 KrunResult krun_console_builder_add_default_console(KrunConsoleBuilder handle, int stdin, int stdout, int stderr, KrunError* err_out);
+typedef KrunResult (*krun_console_builder_add_default_console_fn)(KrunConsoleBuilder handle, int stdin, int stdout, int stderr, KrunError* err_out);
 void krun_console_builder_destroy(KrunConsoleBuilder handle);
+typedef void (*krun_console_builder_destroy_fn)(KrunConsoleBuilder handle);
 
 /* FsOverlay --------------------------------------------------------- */
 
 /** Create a new empty overlay. */
 KrunFsOverlay krun_fs_overlay_new();
+typedef KrunFsOverlay (*krun_fs_overlay_new_fn)();
 /**
  * Add a virtual directory entry.
  *
@@ -275,6 +280,7 @@ KrunFsOverlay krun_fs_overlay_new();
  * Intermediate directories must already exist in the overlay.
  */
 void krun_fs_overlay_add_dir(KrunFsOverlay handle, KrunStr path, uint32_t mode);
+typedef void (*krun_fs_overlay_add_dir_fn)(KrunFsOverlay handle, KrunStr path, uint32_t mode);
 /**
  * Add a virtual file entry.
  *
@@ -282,26 +288,41 @@ void krun_fs_overlay_add_dir(KrunFsOverlay handle, KrunStr path, uint32_t mode);
  * Intermediate directories must already exist in the overlay.
  */
 void krun_fs_overlay_add_file(KrunFsOverlay handle, KrunStr path, KrunBytes data, uint32_t mode, bool one_shot);
+typedef void (*krun_fs_overlay_add_file_fn)(KrunFsOverlay handle, KrunStr path, KrunBytes data, uint32_t mode, bool one_shot);
 void krun_fs_overlay_destroy(KrunFsOverlay handle);
+typedef void (*krun_fs_overlay_destroy_fn)(KrunFsOverlay handle);
 
 /* Payload ----------------------------------------------------------- */
 
 KrunPayload krun_payload_load_krunfw(KrunError* err_out);
+typedef KrunPayload (*krun_payload_load_krunfw_fn)(KrunError* err_out);
 KrunPayload krun_payload_load_krunfw_tee(KrunStr tee_config_path, KrunError* err_out);
+typedef KrunPayload (*krun_payload_load_krunfw_tee_fn)(KrunStr tee_config_path, KrunError* err_out);
 KrunPayload krun_payload_load_external(KrunStr path, uint32_t format, KrunStr cmdline, KrunError* err_out);
+typedef KrunPayload (*krun_payload_load_external_fn)(KrunStr path, uint32_t format, KrunStr cmdline, KrunError* err_out);
 KrunPayload krun_payload_load_firmware(KrunStr path, KrunStr cmdline, KrunError* err_out);
+typedef KrunPayload (*krun_payload_load_firmware_fn)(KrunStr path, KrunStr cmdline, KrunError* err_out);
 KrunStr krun_payload_cmdline(KrunPayload handle);
+typedef KrunStr (*krun_payload_cmdline_fn)(KrunPayload handle);
 void krun_payload_append_cmdline(KrunPayload handle, KrunStr extra);
+typedef void (*krun_payload_append_cmdline_fn)(KrunPayload handle, KrunStr extra);
 void krun_payload_destroy(KrunPayload handle);
+typedef void (*krun_payload_destroy_fn)(KrunPayload handle);
 
 /* VmmBuilder -------------------------------------------------------- */
 
 KrunVmmBuilder krun_vmm_builder_new();
+typedef KrunVmmBuilder (*krun_vmm_builder_new_fn)();
 KrunResult krun_vmm_builder_vcpus(KrunVmmBuilder* handle, uint8_t count, KrunError* err_out);
+typedef KrunResult (*krun_vmm_builder_vcpus_fn)(KrunVmmBuilder* handle, uint8_t count, KrunError* err_out);
 KrunResult krun_vmm_builder_ram_mib(KrunVmmBuilder* handle, uint32_t mib, KrunError* err_out);
+typedef KrunResult (*krun_vmm_builder_ram_mib_fn)(KrunVmmBuilder* handle, uint32_t mib, KrunError* err_out);
 void krun_vmm_builder_payload(KrunVmmBuilder* handle, KrunPayload payload);
+typedef void (*krun_vmm_builder_payload_fn)(KrunVmmBuilder* handle, KrunPayload payload);
 void krun_vmm_builder_devices(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
+typedef void (*krun_vmm_builder_devices_fn)(KrunVmmBuilder* handle, KrunMmioDeviceManager devices);
 void krun_vmm_builder_set_kernel_console(KrunVmmBuilder* handle, KrunStr console);
+typedef void (*krun_vmm_builder_set_kernel_console_fn)(KrunVmmBuilder* handle, KrunStr console);
 /**
  * Add a legacy serial console device with the given input and output file descriptors.
  *
@@ -310,11 +331,17 @@ void krun_vmm_builder_set_kernel_console(KrunVmmBuilder* handle, KrunStr console
  * of the virtio console.
  */
 void krun_vmm_builder_add_serial_console(KrunVmmBuilder* handle, int input_fd, int output_fd);
+typedef void (*krun_vmm_builder_add_serial_console_fn)(KrunVmmBuilder* handle, int input_fd, int output_fd);
 void krun_vmm_builder_nested_virt(KrunVmmBuilder* handle, bool enabled);
+typedef void (*krun_vmm_builder_nested_virt_fn)(KrunVmmBuilder* handle, bool enabled);
 KrunResult krun_vmm_builder_split_irqchip(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
+typedef KrunResult (*krun_vmm_builder_split_irqchip_fn)(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
 void krun_vmm_builder_add_smbios_oem_string(KrunVmmBuilder* handle, KrunStr s);
+typedef void (*krun_vmm_builder_add_smbios_oem_string_fn)(KrunVmmBuilder* handle, KrunStr s);
 KrunVmm krun_vmm_builder_build(KrunVmmBuilder* handle, KrunError* err_out);
+typedef KrunVmm (*krun_vmm_builder_build_fn)(KrunVmmBuilder* handle, KrunError* err_out);
 void krun_vmm_builder_destroy(KrunVmmBuilder handle);
+typedef void (*krun_vmm_builder_destroy_fn)(KrunVmmBuilder handle);
 
 /* Vmm --------------------------------------------------------------- */
 
@@ -325,24 +352,34 @@ void krun_vmm_builder_destroy(KrunVmmBuilder handle);
  * The handle can be moved to another thread for pause/resume.
  */
 KrunVmmHandle krun_vmm_handle(KrunVmm handle, KrunError* err_out);
+typedef KrunVmmHandle (*krun_vmm_handle_fn)(KrunVmm handle, KrunError* err_out);
 void krun_vmm_run(KrunVmm handle);
+typedef void (*krun_vmm_run_fn)(KrunVmm handle);
 void krun_vmm_destroy(KrunVmm handle);
+typedef void (*krun_vmm_destroy_fn)(KrunVmm handle);
 
 /* VmmHandle --------------------------------------------------------- */
 
 KrunResult krun_vmm_handle_pause(KrunVmmHandle handle, KrunError* err_out);
+typedef KrunResult (*krun_vmm_handle_pause_fn)(KrunVmmHandle handle, KrunError* err_out);
 KrunResult krun_vmm_handle_resume(KrunVmmHandle handle, KrunError* err_out);
+typedef KrunResult (*krun_vmm_handle_resume_fn)(KrunVmmHandle handle, KrunError* err_out);
 void krun_vmm_handle_destroy(KrunVmmHandle handle);
+typedef void (*krun_vmm_handle_destroy_fn)(KrunVmmHandle handle);
 
 /* BalloonDevice ----------------------------------------------------- */
 
 KrunBalloonDevice krun_balloon_device_new(KrunError* err_out);
+typedef KrunBalloonDevice (*krun_balloon_device_new_fn)(KrunError* err_out);
 void krun_balloon_device_destroy(KrunBalloonDevice handle);
+typedef void (*krun_balloon_device_destroy_fn)(KrunBalloonDevice handle);
 
 /* RngDevice --------------------------------------------------------- */
 
 KrunRngDevice krun_rng_device_new(KrunError* err_out);
+typedef KrunRngDevice (*krun_rng_device_new_fn)(KrunError* err_out);
 void krun_rng_device_destroy(KrunRngDevice handle);
+typedef void (*krun_rng_device_destroy_fn)(KrunRngDevice handle);
 
 /* VsockDevice ------------------------------------------------------- */
 
@@ -352,94 +389,15 @@ void krun_rng_device_destroy(KrunRngDevice handle);
  * `tsi_features` is a bitmask of TSI flags (0 to disable).
  */
 KrunVsockDevice krun_vsock_device_new(uint64_t cid, uint32_t tsi_features, KrunError* err_out);
+typedef KrunVsockDevice (*krun_vsock_device_new_fn)(uint64_t cid, uint32_t tsi_features, KrunError* err_out);
 /** Add a host port forwarding: `"guest_port:host_port"`. */
 KrunResult krun_vsock_device_add_port_forward(KrunVsockDevice handle, KrunStr mapping, KrunError* err_out);
+typedef KrunResult (*krun_vsock_device_add_port_forward_fn)(KrunVsockDevice handle, KrunStr mapping, KrunError* err_out);
 /** Add a Unix socket port mapping. */
 void krun_vsock_device_add_unix_port(KrunVsockDevice handle, uint32_t port, KrunStr path, bool listen);
+typedef void (*krun_vsock_device_add_unix_port_fn)(KrunVsockDevice handle, uint32_t port, KrunStr path, bool listen);
 void krun_vsock_device_destroy(KrunVsockDevice handle);
-
-/* BlockDevice ------------------------------------------------------- */
-
-KrunBlockDevice krun_block_device_new(KrunStr id, KrunStr disk_image_path, bool is_read_only, KrunError* err_out);
-void krun_block_device_destroy(KrunBlockDevice handle);
-
-/* NetDevice --------------------------------------------------------- */
-
-/** Create a net device backed by a Unix datagram socket path. */
-KrunNetDevice krun_net_device_new_unixgram_path(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, bool vfkit_magic, KrunError* err_out);
-/**
- * Create a net device backed by a Unix datagram socket fd.
- *
- * Takes ownership of `fd`; the caller must not close it after this call.
- */
-KrunNetDevice krun_net_device_new_unixgram_fd(KrunStr id, int fd, KrunBytes mac, uint32_t features, KrunError* err_out);
-/** Create a net device backed by a Unix stream socket path. */
-KrunNetDevice krun_net_device_new_unixstream_path(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, KrunError* err_out);
-/**
- * Create a net device backed by a Unix stream socket fd.
- *
- * Takes ownership of `fd`; the caller must not close it after this call.
- */
-KrunNetDevice krun_net_device_new_unixstream_fd(KrunStr id, int fd, KrunBytes mac, uint32_t features, KrunError* err_out);
-KrunNetDevice krun_net_device_new_tap(KrunStr id, KrunStr tap_name, KrunBytes mac, uint32_t features, KrunError* err_out);
-void krun_net_device_destroy(KrunNetDevice handle);
-
-/* DisplayInfoBuilder ------------------------------------------------ */
-
-KrunDisplayInfoBuilder krun_display_info_builder_new(uint32_t width, uint32_t height);
-void krun_display_info_builder_edid(KrunDisplayInfoBuilder* handle, KrunBytes edid);
-void krun_display_info_builder_dpi(KrunDisplayInfoBuilder* handle, uint32_t dpi);
-void krun_display_info_builder_physical_size(KrunDisplayInfoBuilder* handle, uint16_t width_mm, uint16_t height_mm);
-void krun_display_info_builder_refresh_rate(KrunDisplayInfoBuilder* handle, uint32_t rate);
-void krun_display_info_builder_destroy(KrunDisplayInfoBuilder handle);
-
-/* DisplayBackend ---------------------------------------------------- */
-
-/**
- * Create from the opaque pre-ffier `krun_display_backend` vtable pointer.
- *
- * # Safety
- *
- * `vtable` must point to a valid `krun_display_backend` struct of at least
- * `vtable_size` bytes. The struct is copied — the caller retains ownership
- * of the original.
- */
-KrunDisplayBackend krun_display_backend_new(const void* vtable, size_t vtable_size, KrunError* err_out);
-void krun_display_backend_add_display(KrunDisplayBackend handle, KrunDisplayInfoBuilder display);
-void krun_display_backend_destroy(KrunDisplayBackend handle);
-
-/* GpuDevice --------------------------------------------------------- */
-
-KrunGpuDevice krun_gpu_device_new(uint32_t virgl_flags, KrunDisplayBackend backend);
-void krun_gpu_device_shm_size(KrunGpuDevice* handle, size_t size);
-void krun_gpu_device_destroy(KrunGpuDevice handle);
-
-/* InputDevice ------------------------------------------------------- */
-
-/**
- * Create from opaque config/events backend vtables.
- *
- * # Safety
- *
- * `config_backend` must point to a valid `InputConfigBackend` struct of at
- * least `config_backend_size` bytes, and `event_provider_backend` must
- * point to a valid `InputEventProviderBackend` struct of at least
- * `event_provider_backend_size` bytes. Both structs are copied — the
- * caller retains ownership of the originals.
- */
-KrunInputDevice krun_input_device_new(const void* config_backend, size_t config_backend_size, const void* event_provider_backend, size_t event_provider_backend_size, KrunError* err_out);
-/**
- * Create a passthrough input device from an evdev fd.
- *
- * The fd must refer to a Linux `/dev/input/eventN` device. It is
- * duplicated internally; the caller retains ownership.
- * Create a passthrough input device from an evdev fd.
- *
- * The fd must refer to a Linux `/dev/input/eventN` device. It is
- * duplicated internally; the caller retains ownership.
- */
-KrunInputDevice krun_input_device_new_from_fd(int input_fd, KrunError* err_out);
-void krun_input_device_destroy(KrunInputDevice handle);
+typedef void (*krun_vsock_device_destroy_fn)(KrunVsockDevice handle);
 
 /* KrunPushStrVtable ------------------------------------------------- */
 
@@ -453,7 +411,9 @@ typedef struct {
 /* PushStr (dispatch) ------------------------------------------------ */
 
 bool krun_push_str_push(KrunPushStr handle, KrunStr s);
+typedef bool (*krun_push_str_push_fn)(KrunPushStr handle, KrunStr s);
 void krun_push_str_destroy(KrunPushStr handle);
+typedef void (*krun_push_str_destroy_fn)(KrunPushStr handle);
 
 /* KrunErrorVtable --------------------------------------------------- */
 
@@ -469,16 +429,25 @@ typedef struct {
 /* Error (dispatch) -------------------------------------------------- */
 
 uint32_t krun_error_code(KrunError handle);
+typedef uint32_t (*krun_error_code_fn)(KrunError handle);
 void krun_error_message(KrunError handle, KrunPushStr writer);
+typedef void (*krun_error_message_fn)(KrunError handle, KrunPushStr writer);
 uint64_t krun_error_result(KrunError handle);
+typedef uint64_t (*krun_error_result_fn)(KrunError handle);
 void krun_error_destroy(KrunError handle);
+typedef void (*krun_error_destroy_fn)(KrunError handle);
 uint32_t krun_error_code(KrunError handle);
+typedef uint32_t (*krun_error_code_fn)(KrunError handle);
 void krun_error_message(KrunError handle, KrunPushStr writer);
+typedef void (*krun_error_message_fn)(KrunError handle, KrunPushStr writer);
 
 /* Free functions ---------------------------------------------------- */
 
 KrunResult krun_init_log(int target, uint32_t level, uint32_t style, uint32_t options, KrunError* err_out);
+typedef KrunResult (*krun_init_log_fn)(int target, uint32_t level, uint32_t style, uint32_t options, KrunError* err_out);
 KrunStr krun_result_name(KrunResult r);
+typedef KrunStr (*krun_result_name_fn)(KrunResult r);
 const char* krun_result_name_cstr(KrunResult r);
+typedef const char* (*krun_result_name_cstr_fn)(KrunResult r);
 
 #endif /* LIBKRUN_H */

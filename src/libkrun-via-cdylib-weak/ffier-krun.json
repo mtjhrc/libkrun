@@ -2,13 +2,6 @@
   "prefix": "krun",
   "primitives_prefix": "krun",
   "type_registry": {
-    "*const core::ffi::c_void": {
-      "kind": {
-        "primitive": {
-          "c_type": "const void*"
-        }
-      }
-    },
     "AttachDevice": {
       "kind": {
         "trait": {
@@ -26,14 +19,6 @@
         }
       },
       "type_tag": 16777230
-    },
-    "BlockDevice": {
-      "kind": {
-        "handle": {
-          "c_name": "KrunBlockDevice"
-        }
-      },
-      "type_tag": 16777233
     },
     "BorrowedFd": {
       "kind": {
@@ -67,22 +52,6 @@
       "lifetime_params": [
         "a"
       ]
-    },
-    "DisplayBackend": {
-      "kind": {
-        "handle": {
-          "c_name": "KrunDisplayBackend"
-        }
-      },
-      "type_tag": 16777238
-    },
-    "DisplayInfoBuilder": {
-      "kind": {
-        "handle": {
-          "c_name": "KrunDisplayInfoBuilder"
-        }
-      },
-      "type_tag": 16777235
     },
     "Error": {
       "kind": {
@@ -144,22 +113,6 @@
       },
       "type_tag": 16777222
     },
-    "GpuDevice": {
-      "kind": {
-        "handle": {
-          "c_name": "KrunGpuDevice"
-        }
-      },
-      "type_tag": 16777239
-    },
-    "InputDevice": {
-      "kind": {
-        "handle": {
-          "c_name": "KrunInputDevice"
-        }
-      },
-      "type_tag": 16777240
-    },
     "KernelFormat": {
       "kind": {
         "enum": {
@@ -198,14 +151,6 @@
       "lifetime_params": [
         "a"
       ]
-    },
-    "NetDevice": {
-      "kind": {
-        "handle": {
-          "c_name": "KrunNetDevice"
-        }
-      },
-      "type_tag": 16777234
     },
     "OwnedFd": {
       "kind": {
@@ -255,13 +200,6 @@
         }
       },
       "bless": "replaces_self"
-    },
-    "VirglRendererFlags": {
-      "kind": {
-        "bitflags": {
-          "alias_of": "u32"
-        }
-      }
     },
     "Vmm": {
       "kind": {
@@ -324,13 +262,6 @@
       },
       "bless": "str"
     },
-    "u16": {
-      "kind": {
-        "primitive": {
-          "c_type": "uint16_t"
-        }
-      }
-    },
     "u32": {
       "kind": {
         "primitive": {
@@ -349,13 +280,6 @@
       "kind": {
         "primitive": {
           "c_type": "uint8_t"
-        }
-      }
-    },
-    "usize": {
-      "kind": {
-        "primitive": {
-          "c_type": "size_t"
         }
       }
     }
@@ -1357,545 +1281,6 @@
           "ffi_name": "krun_vsock_device_add_unix_port"
         }
       ]
-    },
-    {
-      "name": "BlockDevice",
-      "destroy_ffi_name": "krun_block_device_destroy",
-      "is_builder_type": false,
-      "methods": [
-        {
-          "name": "new",
-          "receiver": "none",
-          "params": [
-            {
-              "name": "id",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "disk_image_path",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "is_read_only",
-              "param_kind": "regular",
-              "type": "bool"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "BlockDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_block_device_new"
-        }
-      ]
-    },
-    {
-      "name": "NetDevice",
-      "destroy_ffi_name": "krun_net_device_destroy",
-      "is_builder_type": false,
-      "methods": [
-        {
-          "name": "new_unixgram_path",
-          "doc": [
-            " Create a net device backed by a Unix datagram socket path."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "id",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "path",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "mac",
-              "param_kind": "regular",
-              "type": "[u8]",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "features",
-              "param_kind": "regular",
-              "type": "u32"
-            },
-            {
-              "name": "vfkit_magic",
-              "param_kind": "regular",
-              "type": "bool"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "NetDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_net_device_new_unixgram_path"
-        },
-        {
-          "name": "new_unixgram_fd",
-          "doc": [
-            " Create a net device backed by a Unix datagram socket fd.",
-            "",
-            " Takes ownership of `fd`; the caller must not close it after this call."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "id",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "fd",
-              "param_kind": "regular",
-              "type": "OwnedFd"
-            },
-            {
-              "name": "mac",
-              "param_kind": "regular",
-              "type": "[u8]",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "features",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "NetDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_net_device_new_unixgram_fd"
-        },
-        {
-          "name": "new_unixstream_path",
-          "doc": [
-            " Create a net device backed by a Unix stream socket path."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "id",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "path",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "mac",
-              "param_kind": "regular",
-              "type": "[u8]",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "features",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "NetDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_net_device_new_unixstream_path"
-        },
-        {
-          "name": "new_unixstream_fd",
-          "doc": [
-            " Create a net device backed by a Unix stream socket fd.",
-            "",
-            " Takes ownership of `fd`; the caller must not close it after this call."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "id",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "fd",
-              "param_kind": "regular",
-              "type": "OwnedFd"
-            },
-            {
-              "name": "mac",
-              "param_kind": "regular",
-              "type": "[u8]",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "features",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "NetDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_net_device_new_unixstream_fd"
-        },
-        {
-          "name": "new_tap",
-          "receiver": "none",
-          "params": [
-            {
-              "name": "id",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "tap_name",
-              "param_kind": "regular",
-              "type": "str",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "mac",
-              "param_kind": "regular",
-              "type": "[u8]",
-              "ref_kind": "shared"
-            },
-            {
-              "name": "features",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "NetDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_net_device_new_tap"
-        }
-      ]
-    },
-    {
-      "name": "DisplayInfoBuilder",
-      "destroy_ffi_name": "krun_display_info_builder_destroy",
-      "is_builder_type": true,
-      "methods": [
-        {
-          "name": "new",
-          "receiver": "none",
-          "params": [
-            {
-              "name": "width",
-              "param_kind": "regular",
-              "type": "u32"
-            },
-            {
-              "name": "height",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "DisplayInfoBuilder"
-          },
-          "ffi_name": "krun_display_info_builder_new"
-        },
-        {
-          "name": "edid",
-          "receiver": "value",
-          "params": [
-            {
-              "name": "edid",
-              "param_kind": "regular",
-              "type": "[u8]",
-              "ref_kind": "shared"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "Self"
-          },
-          "ffi_name": "krun_display_info_builder_edid"
-        },
-        {
-          "name": "dpi",
-          "receiver": "value",
-          "params": [
-            {
-              "name": "dpi",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "Self"
-          },
-          "ffi_name": "krun_display_info_builder_dpi"
-        },
-        {
-          "name": "physical_size",
-          "receiver": "value",
-          "params": [
-            {
-              "name": "width_mm",
-              "param_kind": "regular",
-              "type": "u16"
-            },
-            {
-              "name": "height_mm",
-              "param_kind": "regular",
-              "type": "u16"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "Self"
-          },
-          "ffi_name": "krun_display_info_builder_physical_size"
-        },
-        {
-          "name": "refresh_rate",
-          "receiver": "value",
-          "params": [
-            {
-              "name": "rate",
-              "param_kind": "regular",
-              "type": "u32"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "Self"
-          },
-          "ffi_name": "krun_display_info_builder_refresh_rate"
-        }
-      ]
-    },
-    {
-      "name": "DisplayBackend",
-      "destroy_ffi_name": "krun_display_backend_destroy",
-      "is_builder_type": false,
-      "methods": [
-        {
-          "name": "new",
-          "doc": [
-            " Create from the opaque pre-ffier `krun_display_backend` vtable pointer.",
-            "",
-            " # Safety",
-            "",
-            " `vtable` must point to a valid `krun_display_backend` struct of at least",
-            " `vtable_size` bytes. The struct is copied — the caller retains ownership",
-            " of the original."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "vtable",
-              "param_kind": "regular",
-              "type": "*const core::ffi::c_void"
-            },
-            {
-              "name": "vtable_size",
-              "param_kind": "regular",
-              "type": "usize"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "DisplayBackend"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_display_backend_new"
-        },
-        {
-          "name": "add_display",
-          "receiver": "mut",
-          "params": [
-            {
-              "name": "display",
-              "param_kind": "regular",
-              "type": "DisplayInfoBuilder"
-            }
-          ],
-          "ret": {
-            "return_kind": "void"
-          },
-          "ffi_name": "krun_display_backend_add_display"
-        }
-      ]
-    },
-    {
-      "name": "GpuDevice",
-      "destroy_ffi_name": "krun_gpu_device_destroy",
-      "is_builder_type": true,
-      "methods": [
-        {
-          "name": "new",
-          "receiver": "none",
-          "params": [
-            {
-              "name": "virgl_flags",
-              "param_kind": "regular",
-              "type": "VirglRendererFlags"
-            },
-            {
-              "name": "backend",
-              "param_kind": "regular",
-              "type": "DisplayBackend"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "GpuDevice"
-          },
-          "ffi_name": "krun_gpu_device_new"
-        },
-        {
-          "name": "shm_size",
-          "receiver": "value",
-          "params": [
-            {
-              "name": "size",
-              "param_kind": "regular",
-              "type": "usize"
-            }
-          ],
-          "ret": {
-            "return_kind": "value",
-            "type": "Self"
-          },
-          "ffi_name": "krun_gpu_device_shm_size"
-        }
-      ]
-    },
-    {
-      "name": "InputDevice",
-      "destroy_ffi_name": "krun_input_device_destroy",
-      "is_builder_type": false,
-      "methods": [
-        {
-          "name": "new",
-          "doc": [
-            " Create from opaque config/events backend vtables.",
-            "",
-            " # Safety",
-            "",
-            " `config_backend` must point to a valid `InputConfigBackend` struct of at",
-            " least `config_backend_size` bytes, and `event_provider_backend` must",
-            " point to a valid `InputEventProviderBackend` struct of at least",
-            " `event_provider_backend_size` bytes. Both structs are copied — the",
-            " caller retains ownership of the originals."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "config_backend",
-              "param_kind": "regular",
-              "type": "*const core::ffi::c_void"
-            },
-            {
-              "name": "config_backend_size",
-              "param_kind": "regular",
-              "type": "usize"
-            },
-            {
-              "name": "event_provider_backend",
-              "param_kind": "regular",
-              "type": "*const core::ffi::c_void"
-            },
-            {
-              "name": "event_provider_backend_size",
-              "param_kind": "regular",
-              "type": "usize"
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "InputDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_input_device_new"
-        },
-        {
-          "name": "new_from_fd",
-          "doc": [
-            " Create a passthrough input device from an evdev fd.",
-            "",
-            " The fd must refer to a Linux `/dev/input/eventN` device. It is",
-            " duplicated internally; the caller retains ownership.",
-            " Create a passthrough input device from an evdev fd.",
-            "",
-            " The fd must refer to a Linux `/dev/input/eventN` device. It is",
-            " duplicated internally; the caller retains ownership."
-          ],
-          "receiver": "none",
-          "params": [
-            {
-              "name": "input_fd",
-              "param_kind": "regular",
-              "type": "BorrowedFd",
-              "type_args": [
-                "_"
-              ]
-            }
-          ],
-          "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "InputDevice"
-            },
-            "err_type": "Error",
-            "c_convention": "handle_or_null"
-          },
-          "ffi_name": "krun_input_device_new_from_fd"
-        }
-      ]
     }
   ],
   "errors": [
@@ -2095,36 +1480,6 @@
           "value": 1
         }
       ]
-    },
-    {
-      "name": "VirglRendererFlags",
-      "variants": [
-        {
-          "name": "USE_EGL",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_USE_EGL",
-          "value": 1
-        },
-        {
-          "name": "THREAD_SYNC",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_THREAD_SYNC",
-          "value": 2
-        },
-        {
-          "name": "VENUS",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_VENUS",
-          "value": 64
-        },
-        {
-          "name": "USE_ASYNC_FENCE_CB",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_USE_ASYNC_FENCE_CB",
-          "value": 256
-        },
-        {
-          "name": "RENDER_SERVER",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_RENDER_SERVER",
-          "value": 512
-        }
-      ]
     }
   ],
   "free_functions": [
@@ -2286,50 +1641,6 @@
         "a"
       ],
       "struct_lifetime_args": [
-        "a"
-      ],
-      "methods": []
-    },
-    {
-      "trait_name": "AttachDevice",
-      "struct_name": "BlockDevice",
-      "lifetimes": [
-        "a"
-      ],
-      "trait_lifetime_args": [
-        "a"
-      ],
-      "methods": []
-    },
-    {
-      "trait_name": "AttachDevice",
-      "struct_name": "NetDevice",
-      "lifetimes": [
-        "a"
-      ],
-      "trait_lifetime_args": [
-        "a"
-      ],
-      "methods": []
-    },
-    {
-      "trait_name": "AttachDevice",
-      "struct_name": "GpuDevice",
-      "lifetimes": [
-        "a"
-      ],
-      "trait_lifetime_args": [
-        "a"
-      ],
-      "methods": []
-    },
-    {
-      "trait_name": "AttachDevice",
-      "struct_name": "InputDevice",
-      "lifetimes": [
-        "a"
-      ],
-      "trait_lifetime_args": [
         "a"
       ],
       "methods": []
