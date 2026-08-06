@@ -999,6 +999,27 @@
             "return_kind": "void"
           },
           "ffi_name": "krun_payload_append_cmdline"
+        },
+        {
+          "name": "nitro_enclave",
+          "receiver": "none",
+          "params": [
+            {
+              "name": "config",
+              "param_kind": "regular",
+              "type": "NitroConfig"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "Payload"
+            },
+            "err_type": "Error",
+            "c_convention": "handle_or_null"
+          },
+          "ffi_name": "krun_payload_nitro_enclave",
+          "cfg": "feature = \"aws-nitro\""
         }
       ]
     },

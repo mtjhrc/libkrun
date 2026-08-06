@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
 use super::error::Error;
+
 #[cfg(feature = "aws-nitro")]
 use crate::NitroConfig;
+#[cfg(all(feature = "ffi", not(feature = "aws-nitro")))]
+type NitroConfig = (); // placeholder for ffier parsing
 
 pub(crate) enum PayloadKind {
     Kernel {
@@ -115,10 +118,8 @@ impl Payload {
             self.cmdline.push_str(extra);
         }
     }
-}
 
-#[cfg(feature = "aws-nitro")]
-impl Payload {
+    #[cfg(feature = "aws-nitro")]
     pub fn nitro_enclave(config: NitroConfig) -> Result<Self, Error> {
         Ok(Payload {
             kind: PayloadKind::Nitro(config),
