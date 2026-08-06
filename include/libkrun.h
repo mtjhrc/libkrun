@@ -338,6 +338,8 @@ KrunStr krun_payload_cmdline(KrunPayload handle);
 typedef KrunStr (*krun_payload_cmdline_fn)(KrunPayload handle);
 void krun_payload_append_cmdline(KrunPayload handle, KrunStr extra);
 typedef void (*krun_payload_append_cmdline_fn)(KrunPayload handle, KrunStr extra);
+KrunPayload krun_payload_nitro_enclave(KrunNitroConfig config, KrunError* err_out);
+typedef KrunPayload (*krun_payload_nitro_enclave_fn)(KrunNitroConfig config, KrunError* err_out);
 void krun_payload_destroy(KrunPayload handle);
 typedef void (*krun_payload_destroy_fn)(KrunPayload handle);
 
