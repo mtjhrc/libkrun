@@ -34,6 +34,7 @@ impl Default for VmmBuilder<'_> {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> VmmBuilder<'a> {
     pub fn new() -> Self {
         VmmBuilder {
@@ -152,25 +153,36 @@ pub struct VmmHandle {
     vmm: Arc<Mutex<InnerVmm>>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl VmmHandle {
     pub fn pause(&self) -> Result<(), Error> {
-        self.vmm
-            .lock()
-            .unwrap()
-            .pause()
-            .map_err(|e| Error::Internal(format!("pause: {e}")))
+        #[cfg(target_os = "macos")]
+        {
+            self.vmm
+                .lock()
+                .unwrap()
+                .pause()
+                .map_err(|e| Error::Internal(format!("pause: {e}")))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
     }
 
     pub fn resume(&self) -> Result<(), Error> {
-        self.vmm
-            .lock()
-            .unwrap()
-            .resume()
-            .map_err(|e| Error::Internal(format!("resume: {e}")))
+        #[cfg(target_os = "macos")]
+        {
+            self.vmm
+                .lock()
+                .unwrap()
+                .resume()
+                .map_err(|e| Error::Internal(format!("resume: {e}")))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(Error::FeatureDisabled())
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 impl<'a> Vmm<'a> {
     /// Obtain a thread-safe handle to the inner VMM.
     ///

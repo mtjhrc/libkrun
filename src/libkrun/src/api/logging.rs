@@ -5,6 +5,7 @@ use env_logger::Env;
 
 use super::error::Error;
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -16,6 +17,7 @@ pub enum LogLevel {
     Trace = 5,
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStyle {
@@ -24,6 +26,17 @@ pub enum LogStyle {
     Never = 2,
 }
 
+#[cfg(feature = "ffi")]
+ffier::export_bitflags! {
+    bitflags::bitflags! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct LogOptions: u32 {
+            const NO_ENV = 1;
+        }
+    }
+}
+
+#[cfg(not(feature = "ffi"))]
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct LogOptions: u32 {
@@ -31,6 +44,7 @@ bitflags::bitflags! {
     }
 }
 
+#[cfg_attr(feature = "ffi", ffier::export)]
 pub fn init_log(
     target: Option<BorrowedFd<'static>>,
     level: LogLevel,

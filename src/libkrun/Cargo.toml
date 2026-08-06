@@ -20,13 +20,15 @@ virgl_resource_map2 = ["devices/virgl_resource_map2"]
 aws-nitro = ["vmm/aws-nitro", "devices/aws-nitro", "dep:aws-nitro", "aws-nitro/aws-nitro", "dep:nitro-enclaves"]
 vhost-user = ["vmm/vhost-user", "devices/vhost-user"]
 timesync = ["devices/timesync"]
-ffi = ["serde_json"]
+ffi = ["serde_json", "dep:ffier", "dep:ffier-builtins"]
 
 [dependencies]
 arch = { package = "krun-arch", version = "=0.1.0-2.0.0-dev", path = "../arch" }
 bitflags = "2"
 crossbeam-channel = ">=0.5.15"
 env_logger = "0.11"
+ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "289162e", optional = true }
+ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", rev = "289162e", optional = true }
 thiserror = "2"
 serde_json = { version = "1", optional = true }
 kernel = { package = "krun-kernel", version = "=0.1.0-2.0.0-dev", path = "../kernel" }
