@@ -1212,12 +1212,14 @@ pub fn build_microvm(
         #[cfg(all(feature = "vhost-user", target_os = "linux"))]
         {
             const VIRTIO_ID_RNG: u32 = 4;
-            for device_config in &vm_resources.vhost_user_devices {
+            for (index, device_config) in vm_resources.vhost_user_devices.iter().enumerate() {
                 attach_vhost_user_device(
                     &mut vmm,
+                    &_shm_manager,
                     event_manager,
                     intc.clone(),
                     device_config,
+                    index,
                     vm_resources.displays.first().cloned(),
                 )?;
             }
@@ -1881,6 +1883,15 @@ pub fn create_guest_memory(
         shm_manager
             .create_gpu_region(size)
             .map_err(StartMicrovmError::ShmCreate)?;
+    }
+
+    #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+    for (index, device_config) in vm_resources.vhost_user_devices.iter().enumerate() {
+        if let Some(shm_size) = device_config.shm_size {
+            shm_manager
+                .create_vhost_user_region(index, shm_size)
+                .map_err(StartMicrovmError::ShmCreate)?;
+        }
     }
 
     // For vhost-user devices, we need file-backed memory so the backend can mmap it
@@ -2887,9 +2898,11 @@ fn attach_rng_device(
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
 fn attach_vhost_user_device(
     vmm: &mut Vmm,
+    shm_manager: &ShmManager,
     event_manager: &mut EventManager,
     intc: IrqChip,
     device_config: &VhostUserDeviceConfig,
+    device_index: usize,
     gpu_display: Option<DisplayInfo>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
@@ -2910,6 +2923,17 @@ fn attach_vhost_user_device(
         )
         .map_err(|e| RegisterVhostUserDevice(device_manager::mmio::Error::VhostUserDevice(e)))?,
     ));
+
+    if let Some(shm_region) = shm_manager.vhost_user_region(device_index) {
+        device.lock().unwrap().set_shm_region(VirtioShmRegion {
+            host_addr: vmm
+                .guest_memory
+                .get_host_address(shm_region.guest_addr)
+                .map_err(StartMicrovmError::ShmHostAddr)? as u64,
+            guest_addr: shm_region.guest_addr.raw_value(),
+            size: shm_region.size,
+        });
+    }
 
     event_manager
         .add_subscriber(device.clone())

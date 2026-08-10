@@ -60,6 +60,8 @@ pub struct VhostUserDeviceConfig {
     pub num_queues: u16,
     /// Size of each queue (empty = use device defaults)
     pub queue_sizes: Vec<u16>,
+    /// Size of the shared memory region (None = no SHMEM region)
+    pub shm_size: Option<usize>,
 }
 
 /// Errors encountered when configuring microVM resources.

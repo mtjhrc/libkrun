@@ -8,4 +8,4 @@
 
 mod device;
 
-pub use device::VhostUserDevice;
+pub use device::{VIRTIO_ID_GPU, VIRTIO_ID_MEDIA, VhostUserDevice};

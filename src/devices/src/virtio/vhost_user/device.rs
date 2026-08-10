@@ -7,7 +7,7 @@
 //! adapting it to work with libkrun's VirtioDevice trait.
 
 use std::io::{self, ErrorKind, IoSlice, Read, Result as IoResult, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -20,8 +20,13 @@ use vhost::vhost_user::gpu_message::{
     GpuBackendReq, VhostUserGpuHeaderFlag, VirtioGpuDisplayOne, VirtioGpuRect,
     VirtioGpuRespDisplayInfo, VirtioGpuRespGetEdid,
 };
-use vhost::vhost_user::message::{FrontendReq, VhostUserConfigFlags};
-use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
+use vhost::vhost_user::message::{
+    FrontendReq, VhostUserConfigFlags, VhostUserMMap, VhostUserMMapFlags,
+};
+use vhost::vhost_user::{
+    Frontend, FrontendReqHandler, VhostUserFrontend, VhostUserFrontendReqHandlerMut,
+    VhostUserProtocolFeatures,
+};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use vmm_sys_util::eventfd::EventFd as VhostEventFd;
@@ -29,15 +34,22 @@ use vmm_sys_util::eventfd::EventFd as VhostEventFd;
 use crate::display::DisplayInfo;
 use crate::virtio::{
     ActivateError, ActivateResult, DeviceQueue, DeviceState, InterruptTransport, QueueConfig,
-    VirtioDevice,
+    VirtioDevice, VirtioShmRegion,
 };
 
 /// VHOST_USER_F_PROTOCOL_FEATURES (bit 30) is a backend-only feature
 /// that enables vhost-user protocol extensions. It's not a virtio feature.
 const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
 
-/// Virtio device type ID for GPU
-const VIRTIO_ID_GPU: u32 = 16;
+pub const VIRTIO_ID_GPU: u32 = 16;
+pub const VIRTIO_ID_MEDIA: u32 = 48;
+
+struct BorrowedFd(RawFd);
+impl AsRawFd for BorrowedFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
 
 /// Helper function to send GPU_SET_SOCKET message to vhost-user backend.
 /// Following QEMU's vhost_user_gpu_set_socket() pattern - sends message without waiting for ACK.
@@ -71,6 +83,124 @@ fn send_gpu_set_socket(
     Ok(())
 }
 
+/// Handles backend-to-frontend requests on the BACKEND_REQ channel,
+/// in particular shmem_map/shmem_unmap for devices that use shared memory regions.
+struct BackendReqInner {
+    shm_region: Option<VirtioShmRegion>,
+    device_name: String,
+}
+
+impl VhostUserFrontendReqHandlerMut for BackendReqInner {
+    fn handle_config_change(&mut self) -> io::Result<u64> {
+        debug!("{}: backend config change notification", self.device_name);
+        Ok(0)
+    }
+
+    fn shmem_map(&mut self, req: &VhostUserMMap, fd: &dyn AsRawFd) -> io::Result<u64> {
+        let shm = self
+            .shm_region
+            .as_ref()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTSUP))?;
+
+        let shm_offset = req.shm_offset;
+        let len = req.len;
+        let fd_offset = req.fd_offset;
+        let flags = req.flags;
+
+        let end = shm_offset
+            .checked_add(len)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        if end > shm.size as u64 {
+            error!(
+                "{}: shmem_map out of bounds: offset={:#x} len={:#x} region_size={:#x}",
+                self.device_name, shm_offset, len, shm.size
+            );
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let addr = shm.host_addr + shm_offset;
+        let prot = if VhostUserMMapFlags::from_bits(flags)
+            .unwrap_or_default()
+            .contains(VhostUserMMapFlags::WRITABLE)
+        {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_READ
+        };
+
+        // SAFETY: addr is within the pre-allocated shm_region (bounds checked above).
+        let result = unsafe {
+            libc::mmap(
+                addr as *mut libc::c_void,
+                len as usize,
+                prot,
+                libc::MAP_SHARED | libc::MAP_FIXED,
+                fd.as_raw_fd(),
+                fd_offset as libc::off_t,
+            )
+        };
+
+        if result == libc::MAP_FAILED {
+            let err = io::Error::last_os_error();
+            error!("{}: shmem_map mmap failed: {}", self.device_name, err);
+            return Err(err);
+        }
+
+        debug!(
+            "{}: shmem_map: offset={:#x} len={:#x} fd_offset={:#x}",
+            self.device_name, shm_offset, len, fd_offset
+        );
+        Ok(0)
+    }
+
+    fn shmem_unmap(&mut self, req: &VhostUserMMap) -> io::Result<u64> {
+        let shm = self
+            .shm_region
+            .as_ref()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTSUP))?;
+
+        let shm_offset = req.shm_offset;
+        let len = req.len;
+
+        let end = shm_offset
+            .checked_add(len)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        if end > shm.size as u64 {
+            error!(
+                "{}: shmem_unmap out of bounds: offset={:#x} len={:#x} region_size={:#x}",
+                self.device_name, shm_offset, len, shm.size
+            );
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let addr = shm.host_addr + shm_offset;
+
+        // SAFETY: addr is within the pre-allocated shm_region (bounds checked above).
+        let result = unsafe {
+            libc::mmap(
+                addr as *mut libc::c_void,
+                len as usize,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+
+        if result == libc::MAP_FAILED {
+            let err = io::Error::last_os_error();
+            error!("{}: shmem_unmap mmap failed: {}", self.device_name, err);
+            return Err(err);
+        }
+
+        debug!(
+            "{}: shmem_unmap: offset={:#x} len={:#x}",
+            self.device_name, shm_offset, len
+        );
+        Ok(0)
+    }
+}
+
 /// Generic vhost-user device wrapper.
 ///
 /// This wraps a vhost-user backend connection and implements the VirtioDevice
@@ -94,6 +224,9 @@ pub struct VhostUserDevice {
     /// Whether the backend supports protocol features
     has_protocol_features: bool,
 
+    /// Protocol features successfully negotiated with the backend
+    negotiated_protocol_features: VhostUserProtocolFeatures,
+
     /// Acknowledged features
     acked_features: u64,
 
@@ -111,6 +244,12 @@ pub struct VhostUserDevice {
 
     /// User-configured display resolution for GPU devices (display size, not guest scanout).
     gpu_display_info: Option<DisplayInfo>,
+
+    /// Shared memory region for devices that need it (e.g., media, GPU)
+    shm_region: Option<VirtioShmRegion>,
+
+    /// Handler for backend-to-frontend requests (BACKEND_REQ protocol feature)
+    backend_req_handler: Option<FrontendReqHandler<Mutex<BackendReqInner>>>,
 }
 
 impl VhostUserDevice {
@@ -156,19 +295,26 @@ impl VhostUserDevice {
         let has_protocol_features = avail_features & VHOST_USER_F_PROTOCOL_FEATURES != 0;
         let avail_features = avail_features & !VHOST_USER_F_PROTOCOL_FEATURES;
 
+        let mut negotiated_protocol_features = VhostUserProtocolFeatures::empty();
+
         if has_protocol_features {
             let protocol_features = frontend.get_protocol_features().map_err(io::Error::other)?;
 
-            let mut our_protocol_features = VhostUserProtocolFeatures::empty();
             if protocol_features.contains(VhostUserProtocolFeatures::CONFIG) {
-                our_protocol_features |= VhostUserProtocolFeatures::CONFIG;
+                negotiated_protocol_features |= VhostUserProtocolFeatures::CONFIG;
             }
             if protocol_features.contains(VhostUserProtocolFeatures::MQ) {
-                our_protocol_features |= VhostUserProtocolFeatures::MQ;
+                negotiated_protocol_features |= VhostUserProtocolFeatures::MQ;
+            }
+            if protocol_features.contains(VhostUserProtocolFeatures::BACKEND_REQ) {
+                negotiated_protocol_features |= VhostUserProtocolFeatures::BACKEND_REQ;
+            }
+            if protocol_features.contains(VhostUserProtocolFeatures::SHMEM) {
+                negotiated_protocol_features |= VhostUserProtocolFeatures::SHMEM;
             }
 
             frontend
-                .set_protocol_features(our_protocol_features)
+                .set_protocol_features(negotiated_protocol_features)
                 .map_err(io::Error::other)?;
         }
 
@@ -214,13 +360,20 @@ impl VhostUserDevice {
             queue_configs,
             avail_features,
             has_protocol_features,
+            negotiated_protocol_features,
             acked_features: 0,
             device_state: DeviceState::Inactive,
             activate_evt: EventFd::new(EFD_NONBLOCK)?,
             vring_call_event: None,
             gpu_socket: None,
             gpu_display_info,
+            shm_region: None,
+            backend_req_handler: None,
         })
+    }
+
+    pub fn set_shm_region(&mut self, region: VirtioShmRegion) {
+        self.shm_region = Some(region);
     }
 
     /// Activate the vhost-user device by setting up memory and vrings.
@@ -262,6 +415,27 @@ impl VhostUserDevice {
             self.gpu_socket = Some(our_end);
 
             debug!("{}: GPU socket configured", self.device_name);
+        }
+
+        // Set up backend request channel for shmem_map/shmem_unmap
+        if self
+            .negotiated_protocol_features
+            .contains(VhostUserProtocolFeatures::BACKEND_REQ)
+        {
+            let inner = BackendReqInner {
+                shm_region: self.shm_region.clone(),
+                device_name: self.device_name.clone(),
+            };
+            let handler = FrontendReqHandler::new(Arc::new(Mutex::new(inner)))
+                .map_err(|e| io::Error::other(format!("FrontendReqHandler::new: {e}")))?;
+
+            let tx_fd = BorrowedFd(handler.get_tx_raw_fd());
+            frontend
+                .set_backend_request_fd(&tx_fd)
+                .map_err(|e| io::Error::other(format!("set_backend_request_fd: {e}")))?;
+
+            debug!("{}: backend request channel established", self.device_name);
+            self.backend_req_handler = Some(handler);
         }
 
         // Can't use from_guest_region(): vhost 0.17 expects vm-memory 0.18 types.
@@ -526,6 +700,10 @@ impl VirtioDevice for VhostUserDevice {
         matches!(self.device_state, DeviceState::Activated(_, _))
     }
 
+    fn shm_region(&self) -> Option<&VirtioShmRegion> {
+        self.shm_region.as_ref()
+    }
+
     fn reset(&mut self) -> bool {
         debug!("{}: resetting vhost-user device", self.device_name);
 
@@ -543,6 +721,7 @@ impl VirtioDevice for VhostUserDevice {
 
         self.vring_call_event = None;
         self.gpu_socket = None;
+        self.backend_req_handler = None;
         self.device_state = DeviceState::Inactive;
         true
     }
@@ -735,6 +914,29 @@ impl VhostUserDevice {
         }
     }
 
+    fn handle_backend_req_event(&mut self, event: &EpollEvent) {
+        let event_set = event.event_set();
+
+        if event_set.contains(EventSet::HANG_UP) || event_set.contains(EventSet::ERROR) {
+            warn!("{}: backend request channel disconnected", self.device_name);
+            self.backend_req_handler = None;
+            return;
+        }
+
+        if !event_set.contains(EventSet::IN) {
+            return;
+        }
+
+        if let Some(ref mut handler) = self.backend_req_handler
+            && let Err(e) = handler.handle_request()
+        {
+            error!(
+                "{}: failed to handle backend request: {}",
+                self.device_name, e
+            );
+        }
+    }
+
     fn handle_activate_event(&mut self, event_manager: &mut EventManager) {
         debug!("{}: activate event", self.device_name);
 
@@ -782,6 +984,26 @@ impl VhostUserDevice {
                     self.device_name
                 );
             }
+
+            // Register backend request channel for shmem_map/shmem_unmap
+            if let Some(ref handler) = self.backend_req_handler {
+                event_manager
+                    .register(
+                        handler.as_raw_fd(),
+                        EpollEvent::new(EventSet::IN, handler.as_raw_fd() as u64),
+                        self_subscriber.clone(),
+                    )
+                    .unwrap_or_else(|e| {
+                        error!(
+                            "{}: failed to register backend_req_handler with event manager: {e:?}",
+                            self.device_name
+                        );
+                    });
+                debug!(
+                    "{}: backend request channel registered with event manager",
+                    self.device_name
+                );
+            }
         } else {
             error!(
                 "{}: vring_call_event is None during activation",
@@ -815,11 +1037,17 @@ impl Subscriber for VhostUserDevice {
             .as_ref()
             .map(|s| s.as_raw_fd())
             .unwrap_or(-1);
+        let backend_req_fd = self
+            .backend_req_handler
+            .as_ref()
+            .map(|h| h.as_raw_fd())
+            .unwrap_or(-1);
 
         if self.is_activated() {
             match source {
                 _ if source == vring_call_fd => self.handle_vring_call_event(event),
                 _ if source == gpu_socket_fd => self.handle_gpu_socket_event(event),
+                _ if source == backend_req_fd => self.handle_backend_req_event(event),
                 _ if source == activate_evt_fd => self.handle_activate_event(event_manager),
                 _ => warn!(
                     "{}: unexpected event received: {source:?}",

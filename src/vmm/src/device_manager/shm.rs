@@ -21,6 +21,8 @@ pub struct ShmManager {
     page_size: usize,
     fs_regions: BTreeMap<usize, ShmRegion>,
     gpu_region: Option<ShmRegion>,
+    #[cfg(feature = "vhost-user")]
+    vhost_user_regions: BTreeMap<usize, ShmRegion>,
 }
 
 impl ShmManager {
@@ -30,6 +32,8 @@ impl ShmManager {
             page_size: info.page_size,
             fs_regions: BTreeMap::new(),
             gpu_region: None,
+            #[cfg(feature = "vhost-user")]
+            vhost_user_regions: BTreeMap::new(),
         }
     }
 
@@ -41,6 +45,11 @@ impl ShmManager {
         }
 
         if let Some(region) = &self.gpu_region {
+            regions.push((region.guest_addr, region.size));
+        }
+
+        #[cfg(feature = "vhost-user")]
+        for region in self.vhost_user_regions.values() {
             regions.push((region.guest_addr, region.size));
         }
 
@@ -87,5 +96,17 @@ impl ShmManager {
         let region = self.create_region(size)?;
         self.fs_regions.insert(index, region);
         Ok(())
+    }
+
+    #[cfg(feature = "vhost-user")]
+    pub fn create_vhost_user_region(&mut self, index: usize, size: usize) -> Result<(), Error> {
+        let region = self.create_region(size)?;
+        self.vhost_user_regions.insert(index, region);
+        Ok(())
+    }
+
+    #[cfg(feature = "vhost-user")]
+    pub fn vhost_user_region(&self, index: usize) -> Option<&ShmRegion> {
+        self.vhost_user_regions.get(&index)
     }
 }
