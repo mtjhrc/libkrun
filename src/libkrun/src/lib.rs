@@ -86,7 +86,6 @@ const MAX_ARGS: usize = 4096;
 /// Maximum number of virtqueues allowed by virtio spec (16-bit queue index: 0-65535)
 #[cfg(feature = "vhost-user")]
 const VIRTIO_MAX_QUEUES: usize = 65536;
-
 // krunfw library name for each context
 #[cfg(all(target_os = "linux", not(feature = "tee")))]
 const KRUNFW_NAME: &str = "libkrunfw.so.5";
@@ -1738,6 +1737,7 @@ pub unsafe extern "C" fn krun_add_vhost_user_device(
     name: *const c_char,
     num_queues: u16,
     queue_sizes: *const u16,
+    shm_size: u64,
 ) -> i32 {
     use vmm::resources::VhostUserDeviceConfig;
 
@@ -1786,12 +1786,19 @@ pub unsafe extern "C" fn krun_add_vhost_user_device(
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
+            let shm_size = if shm_size > 0 {
+                Some(shm_size as usize)
+            } else {
+                None
+            };
+
             cfg.vmr.vhost_user_devices.push(VhostUserDeviceConfig {
                 device_type,
                 socket_path: socket_path_str.to_string(),
                 name: name_opt,
                 num_queues,
                 queue_sizes: queue_sizes_vec,
+                shm_size,
             });
             KRUN_SUCCESS
         }
@@ -1809,6 +1816,7 @@ pub unsafe extern "C" fn krun_add_vhost_user_device(
     _name: *const c_char,
     _num_queues: u16,
     _queue_sizes: *const u16,
+    _shm_size: u64,
 ) -> i32 {
     -libc::ENOTSUP
 }

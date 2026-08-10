@@ -609,6 +609,7 @@ int krun_add_input_device_fd(uint32_t ctx_id, int input_fd);
 #define KRUN_VIRTIO_DEVICE_VSOCK 19
 #define KRUN_VIRTIO_DEVICE_SND 25
 #define KRUN_VIRTIO_DEVICE_CAN 36
+#define KRUN_VIRTIO_DEVICE_MEDIA 48
 
 /**
  * Vhost-user console device default queue configuration.
@@ -666,6 +667,15 @@ int krun_add_input_device_fd(uint32_t ctx_id, int input_fd);
  */
 #define KRUN_VHOST_USER_GPU_NUM_QUEUES 2
 #define KRUN_VHOST_USER_GPU_QUEUE_SIZES ((uint16_t[]){1024, 1024})
+#define KRUN_VHOST_USER_GPU_SHM_SIZE (UINT64_C(1) << 33)
+
+/**
+ * Vhost-user media device default queue configuration.
+ * Media device uses 2 queues: commandq (idx 0), eventq (idx 1).
+ */
+#define KRUN_VHOST_USER_MEDIA_NUM_QUEUES 2
+#define KRUN_VHOST_USER_MEDIA_QUEUE_SIZES ((uint16_t[]){1024, 1024})
+#define KRUN_VHOST_USER_MEDIA_SHM_SIZE (UINT64_C(1) << 32)
 
 /**
  * Add a vhost-user device to the VM.
@@ -691,23 +701,27 @@ int krun_add_input_device_fd(uint32_t ctx_id, int input_fd);
  *                   When num_queues=0 (auto-detect): array must be 0-terminated (sentinel).
  *                   When num_queues>0 (explicit): array must have exactly num_queues elements.
  *                   Use device-specific constants like KRUN_VHOST_USER_RNG_QUEUE_SIZES for defaults.
+ *  "shm_size"     - size of the SHMEM region in bytes.
+ *                   0 = no SHMEM region.
+ *                   Use device-specific constants like KRUN_VHOST_USER_MEDIA_SHM_SIZE for defaults.
  *
  * Examples:
- *  // Auto-detect queue count, use default size (256)
- *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_RNG, "/tmp/rng.sock", NULL, 0, NULL);
+ *  // Auto-detect queue count, use default size (256), no SHMEM
+ *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_RNG, "/tmp/rng.sock", NULL, 0, NULL, 0);
  *
  *  // Auto-detect queue count, use custom size (512) for all queues
  *  uint16_t custom_size[] = {512, 0};  // 0 = sentinel terminator
- *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_RNG, "/tmp/rng.sock", NULL, 0, custom_size);
+ *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_RNG, "/tmp/rng.sock", NULL, 0, custom_size, 0);
  *
- *  // Explicit defaults using #define constants
- *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_RNG, "/tmp/rng.sock", "vhost-rng",
- *                             KRUN_VHOST_USER_RNG_NUM_QUEUES,
- *                             KRUN_VHOST_USER_RNG_QUEUE_SIZES);
+ *  // Media device with SHMEM region
+ *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_MEDIA, "/tmp/media.sock", NULL,
+ *                             KRUN_VHOST_USER_MEDIA_NUM_QUEUES,
+ *                             KRUN_VHOST_USER_MEDIA_QUEUE_SIZES,
+ *                             KRUN_VHOST_USER_MEDIA_SHM_SIZE);
  *
  *  // Explicit queue count with custom sizes
  *  uint16_t sizes[] = {256, 512};
- *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_SND, "/tmp/snd.sock", "vhost-snd", 2, sizes);
+ *  krun_add_vhost_user_device(ctx, KRUN_VHOST_USER_DEVICE_SND, "/tmp/snd.sock", "vhost-snd", 2, sizes, 0);
  *
  * Returns:
  *  Zero on success or a negative error number on failure.
@@ -720,7 +734,8 @@ int32_t krun_add_vhost_user_device(uint32_t ctx_id,
                                    const char *socket_path,
                                    const char *name,
                                    uint16_t num_queues,
-                                   const uint16_t *queue_sizes);
+                                   const uint16_t *queue_sizes,
+                                   uint64_t shm_size);
 
 /**
  * Configures a map of rlimits to be set in the guest before starting the

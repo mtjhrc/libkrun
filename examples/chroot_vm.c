@@ -107,6 +107,7 @@ static const struct option long_options[] = {
     { "vhost-user-vsock", required_argument, NULL, 'K' },
     { "vhost-user-can", required_argument, NULL, 'A' },
     { "vhost-user-console", required_argument, NULL, 'O' },
+    { "vhost-user-media", required_argument, NULL, 'M' },
     { NULL, 0, NULL, 0 }
 };
 
@@ -124,6 +125,7 @@ struct cmdline {
     char const *vhost_user_vsock_socket;
     char const *vhost_user_can_socket;
     char const *vhost_user_console_socket;
+    char const *vhost_user_media_socket;
     char const *new_root;
     char *const *guest_argv;
 };
@@ -158,6 +160,7 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
         .vhost_user_vsock_socket = NULL,
         .vhost_user_can_socket = NULL,
         .vhost_user_console_socket = NULL,
+        .vhost_user_media_socket = NULL,
         .new_root = NULL,
         .guest_argv = NULL,
         .log_target = KRUN_LOG_TARGET_DEFAULT,
@@ -216,6 +219,9 @@ bool parse_cmdline(int argc, char *const argv[], struct cmdline *cmdline)
             break;
         case 'O':
             cmdline->vhost_user_console_socket = optarg;
+            break;
+        case 'M':
+            cmdline->vhost_user_media_socket = optarg;
             break;
         case '?':
             return false;
@@ -354,7 +360,7 @@ int main(int argc, char *const argv[])
         uint16_t custom_sizes[] = {512, 0};  // 0 = sentinel terminator
 
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_RNG,
-                                                          cmdline.vhost_user_rng_socket, NULL, 0, custom_sizes),
+                                                          cmdline.vhost_user_rng_socket, NULL, 0, custom_sizes, 0),
                               "Error adding vhost-user RNG device")) {
             return -1;
         }
@@ -366,7 +372,7 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_RTC,
                                                           cmdline.vhost_user_rtc_socket, NULL,
                                                           KRUN_VHOST_USER_RTC_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_RTC_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_RTC_QUEUE_SIZES, 0),
                               "Error adding vhost-user RTC device")) {
             return -1;
         }
@@ -378,7 +384,7 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_INPUT,
                                                           cmdline.vhost_user_input_socket, NULL,
                                                           KRUN_VHOST_USER_INPUT_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_INPUT_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_INPUT_QUEUE_SIZES, 0),
                               "Error adding vhost-user input device")) {
             return -1;
         }
@@ -390,7 +396,8 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_GPU,
                                                           cmdline.vhost_user_gpu_socket, NULL,
                                                           KRUN_VHOST_USER_GPU_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_GPU_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_GPU_QUEUE_SIZES,
+                                                          KRUN_VHOST_USER_GPU_SHM_SIZE),
                               "Error adding vhost-user GPU device")) {
             return -1;
         }
@@ -402,7 +409,7 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_SND,
                                                           cmdline.vhost_user_snd_socket, NULL,
                                                           KRUN_VHOST_USER_SND_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_SND_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_SND_QUEUE_SIZES, 0),
                               "Error adding vhost-user sound device")) {
             return -1;
         }
@@ -414,7 +421,7 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_VSOCK,
                                                           cmdline.vhost_user_vsock_socket, NULL,
                                                           KRUN_VHOST_USER_VSOCK_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_VSOCK_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_VSOCK_QUEUE_SIZES, 0),
                               "Error adding vhost-user vsock device")) {
             return -1;
         }
@@ -426,7 +433,7 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_CAN,
                                                           cmdline.vhost_user_can_socket, NULL,
                                                           KRUN_VHOST_USER_CAN_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_CAN_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_CAN_QUEUE_SIZES, 0),
                               "Error adding vhost-user CAN device")) {
             return -1;
         }
@@ -438,12 +445,25 @@ int main(int argc, char *const argv[])
         if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_CONSOLE,
                                                           cmdline.vhost_user_console_socket, NULL,
                                                           KRUN_VHOST_USER_CONSOLE_NUM_QUEUES,
-                                                          KRUN_VHOST_USER_CONSOLE_QUEUE_SIZES),
+                                                          KRUN_VHOST_USER_CONSOLE_QUEUE_SIZES, 0),
                               "Error adding vhost-user console device")) {
             return -1;
         }
         printf("Using vhost-user console backend at %s (available as /dev/hvc1 in guest)\n", cmdline.vhost_user_console_socket);
         printf("Test with: echo 'hello' > /dev/hvc1\n");
+    }
+
+    // Configure vhost-user media if requested
+    if (cmdline.vhost_user_media_socket != NULL) {
+        if (!check_krun_error(krun_add_vhost_user_device(ctx_id, KRUN_VIRTIO_DEVICE_MEDIA,
+                                                          cmdline.vhost_user_media_socket, NULL,
+                                                          KRUN_VHOST_USER_MEDIA_NUM_QUEUES,
+                                                          KRUN_VHOST_USER_MEDIA_QUEUE_SIZES,
+                                                          KRUN_VHOST_USER_MEDIA_SHM_SIZE),
+                              "Error adding vhost-user media device")) {
+            return -1;
+        }
+        printf("Using vhost-user media backend at %s\n", cmdline.vhost_user_media_socket);
     }
 
     // Raise RLIMIT_NOFILE to the maximum allowed to create some room for virtio-fs
