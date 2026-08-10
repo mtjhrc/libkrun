@@ -565,7 +565,7 @@ dependencies = [
  "rustc_version",
  "tokio",
  "tracing",
- "vm-memory",
+ "vm-memory 0.17.1",
  "windows-sys",
 ]
 
@@ -680,7 +680,7 @@ dependencies = [
  "libc",
  "linux-loader",
  "tdx",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util",
  "windows-sys",
 ]
@@ -740,7 +740,7 @@ dependencies = [
  "vhost",
  "virtio-bindings",
  "vm-fdt",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util",
  "windows-sys",
  "zerocopy",
@@ -816,7 +816,7 @@ name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
  "krun-utils",
- "vm-memory",
+ "vm-memory 0.17.1",
 ]
 
 [[package]]
@@ -848,7 +848,7 @@ dependencies = [
 name = "krun-smbios"
 version = "0.1.0-2.0.0-dev"
 dependencies = [
- "vm-memory",
+ "vm-memory 0.17.1",
 ]
 
 [[package]]
@@ -895,7 +895,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tdx",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util",
  "windows-sys",
  "zstd",
@@ -963,7 +963,7 @@ dependencies = [
  "log",
  "nitro-enclaves 0.5.0",
  "once_cell",
- "vm-memory",
+ "vm-memory 0.17.1",
  "windows-sys",
 ]
 
@@ -995,7 +995,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de72cb02c55ecffcf75fe78295926f872eb6eb0a58d629c58a8c324dc26380f6"
 dependencies = [
- "vm-memory",
+ "vm-memory 0.17.1",
 ]
 
 [[package]]
@@ -1667,14 +1667,14 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vhost"
-version = "0.15.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c76d90ce3c6b37d610a5304c9a445cfff580cf8b4b9fd02fb256aaf68552c28a"
+checksum = "1c63c14485260662b4257bd929d5fd4aaf96bbecbe61d2224bad8807849f5f8f"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
  "uuid",
- "vm-memory",
+ "vm-memory 0.18.0",
  "vmm-sys-util",
 ]
 
@@ -1701,6 +1701,17 @@ name = "vm-memory"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f39348a049689cabd3377cdd9182bf526ec76a6f823b79903896452e9d7a7380"
+dependencies = [
+ "libc",
+ "thiserror 2.0.18",
+ "winapi",
+]
+
+[[package]]
+name = "vm-memory"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
 dependencies = [
  "libc",
  "thiserror 2.0.18",

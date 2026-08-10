@@ -264,24 +264,20 @@ impl VhostUserDevice {
             debug!("{}: GPU socket configured", self.device_name);
         }
 
-        // Only share memory regions that have file backing (memfd)
+        // Can't use from_guest_region(): vhost 0.17 expects vm-memory 0.18 types.
         let regions: Vec<VhostUserMemoryRegionInfo> = mem
             .iter()
             .filter_map(|region| {
-                if region.file_offset().is_some() {
-                    Some(VhostUserMemoryRegionInfo::from_guest_region(region))
-                } else {
-                    None
-                }
+                let file_offset = region.file_offset()?;
+                Some(VhostUserMemoryRegionInfo {
+                    guest_phys_addr: region.start_addr().raw_value(),
+                    memory_size: region.len(),
+                    userspace_addr: region.as_ptr() as u64,
+                    mmap_offset: file_offset.start(),
+                    mmap_handle: file_offset.file().as_raw_fd(),
+                })
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                error!(
-                    "{}: failed to convert memory regions: {:?}",
-                    self.device_name, e
-                );
-                io::Error::other(e)
-            })?;
+            .collect();
 
         debug!(
             "{}: sharing {} file-backed regions with backend",
