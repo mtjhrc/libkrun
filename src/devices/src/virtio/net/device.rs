@@ -72,6 +72,7 @@ pub struct Net {
 
     avail_features: u64,
     acked_features: u64,
+    include_vnet_header: bool,
 
     pub(crate) device_state: DeviceState,
 
@@ -85,6 +86,7 @@ impl Net {
         cfg_backend: VirtioNetBackend,
         mac: [u8; 6],
         features: u32,
+        include_vnet_header: bool,
     ) -> Result<Self> {
         let avail_features = features as u64
             | (1 << VIRTIO_NET_F_MAC)
@@ -103,6 +105,7 @@ impl Net {
 
             avail_features,
             acked_features: 0u64,
+            include_vnet_header,
 
             device_state: DeviceState::Inactive,
             config,
@@ -184,6 +187,7 @@ impl VirtioDevice for Net {
             interrupt.clone(),
             mem.clone(),
             self.acked_features,
+            self.include_vnet_header,
             self.cfg_backend.clone(),
         ) {
             Ok(worker) => {
