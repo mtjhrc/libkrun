@@ -54,6 +54,7 @@ fn try_read_frame_header(
 
 pub struct Unixstream {
     fd: OwnedFd,
+    include_vnet_header: bool,
     interrupt: InterruptTransport,
     tx_consumer: TxQueueConsumer,
     rx_producer: RxQueueProducer,
@@ -74,6 +75,7 @@ impl Unixstream {
     /// Create the backend with a pre-established connection to the userspace network proxy.
     pub fn new(
         fd: OwnedFd,
+        include_vnet_header: bool,
         tx_queue: Queue,
         rx_queue: Queue,
         mem: GuestMemoryMmap,
@@ -102,6 +104,7 @@ impl Unixstream {
 
         Self {
             fd,
+            include_vnet_header,
             interrupt,
             tx_consumer,
             rx_producer,
@@ -117,6 +120,7 @@ impl Unixstream {
     /// Create the backend opening a connection to the userspace network proxy.
     pub fn open(
         path: PathBuf,
+        include_vnet_header: bool,
         tx_queue: Queue,
         rx_queue: Queue,
         mem: GuestMemoryMmap,
@@ -143,14 +147,25 @@ impl Unixstream {
             getsockopt(&fd, sockopt::RcvBuf)
         );
 
-        Ok(Self::new(fd, tx_queue, rx_queue, mem, interrupt))
+        Ok(Self::new(
+            fd,
+            include_vnet_header,
+            tx_queue,
+            rx_queue,
+            mem,
+            interrupt,
+        ))
     }
 }
 
 impl NetBackend for Unixstream {
     fn send(&mut self) -> Result<(), WriteError> {
         log::trace!("Unixstream::send() called");
-        let skip = vnet_hdr_len();
+        let skip = if !self.include_vnet_header {
+            vnet_hdr_len()
+        } else {
+            0
+        };
 
         let mut total_finished = 0;
 
@@ -254,7 +269,11 @@ impl NetBackend for Unixstream {
 
     fn recv(&mut self) -> Result<(), ReadError> {
         let raw_fd = self.fd.as_raw_fd();
-        let vnet_offset = vnet_hdr_len();
+        let vnet_offset = if !self.include_vnet_header {
+            vnet_hdr_len()
+        } else {
+            0
+        };
 
         // If a previous oversized frame was partially received, drain remaining excess bytes first.
         while self.rx_drain_remaining > 0 {
