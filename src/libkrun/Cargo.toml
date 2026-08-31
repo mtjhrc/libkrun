@@ -27,8 +27,8 @@ arch = { package = "krun-arch", version = "=0.1.0-2.0.0-dev", path = "../arch" }
 bitflags = "2"
 crossbeam-channel = ">=0.5.15"
 env_logger = "0.11"
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "289162e", optional = true }
-ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", rev = "289162e", optional = true }
+ffier = { git = "https://github.com/mtjhrc/ffier.git", tag = "0.2.0rc1", optional = true }
+ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", tag = "0.2.0rc1", optional = true }
 thiserror = "2"
 serde_json = { version = "1", optional = true }
 kernel = { package = "krun-kernel", version = "=0.1.0-2.0.0-dev", path = "../kernel" }
