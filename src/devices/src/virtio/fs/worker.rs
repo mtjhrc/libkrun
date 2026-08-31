@@ -101,7 +101,7 @@ impl FsWorker {
         shm_region: Option<VirtioShmRegion>,
         passthrough_cfg: Option<passthrough::Config>,
         read_only: bool,
-        virtual_entries: Vec<VirtualDirEntry>,
+        virtual_entries: Vec<VirtualDirEntry<'static>>,
         stop_fd: EventFd,
         exit_code: Arc<AtomicI32>,
         #[cfg(target_os = "macos")] map_sender: Option<Sender<WorkerMessage>>,

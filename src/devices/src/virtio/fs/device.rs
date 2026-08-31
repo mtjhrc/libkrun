@@ -52,7 +52,7 @@ pub struct Fs {
     shm_region: Option<VirtioShmRegion>,
     passthrough_cfg: Option<passthrough::Config>,
     read_only: bool,
-    virtual_entries: Vec<VirtualDirEntry>,
+    virtual_entries: Vec<VirtualDirEntry<'static>>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
     exit_code: Arc<AtomicI32>,
@@ -67,7 +67,7 @@ impl Fs {
         shared_dir: Option<String>,
         exit_code: Arc<AtomicI32>,
         read_only: bool,
-        virtual_entries: Vec<VirtualDirEntry>,
+        virtual_entries: Vec<VirtualDirEntry<'static>>,
     ) -> super::Result<Fs> {
         let avail_features = (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_RING_F_EVENT_IDX);
 
@@ -132,6 +132,14 @@ impl Fs {
         cfg.export_table = Some(export_table);
 
         cfg.export_fsid
+    }
+
+    pub fn add_virtual_entry(&mut self, entry: VirtualDirEntry<'static>) {
+        self.virtual_entries.push(entry);
+    }
+
+    pub fn set_exit_code(&mut self, exit_code: Arc<AtomicI32>) {
+        self.exit_code = exit_code;
     }
 
     #[cfg(target_os = "macos")]

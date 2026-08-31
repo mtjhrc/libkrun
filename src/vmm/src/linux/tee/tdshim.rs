@@ -269,7 +269,7 @@ pub fn build_boot_params_trampoline(
     code
 }
 
-fn is_bfv(s: &TdvfSection) -> bool {
+pub fn is_bfv(s: &TdvfSection) -> bool {
     matches!(s.section_type, TdvfSectionType::Bfv)
 }
 

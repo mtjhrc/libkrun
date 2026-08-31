@@ -10,5 +10,5 @@ pub struct FsDeviceConfig {
     pub shm_size: Option<usize>,
     pub read_only: bool,
     #[cfg(not(feature = "aws-nitro"))]
-    pub virtual_entries: Vec<VirtualDirEntry>,
+    pub virtual_entries: Vec<VirtualDirEntry<'static>>,
 }
