@@ -13,6 +13,12 @@ use crate::oci_schema::OciSchema;
 #[cfg(feature = "ffi")]
 use crate::{FfiBorrow, FfiType};
 
+#[cfg(feature = "direct")]
+pub type KrunError = krun::Error;
+
+#[cfg(all(feature = "ffi-client", not(feature = "direct")))]
+pub type KrunError = krun_via_cdylib_weak::Error;
+
 /// Error type for init configuration operations.
 #[derive(Clone, Debug, thiserror::Error)]
 #[cfg_attr(feature = "ffi", derive(ffier::FfiError))]
@@ -25,18 +31,19 @@ pub enum ConfigError {
 }
 
 /// Error returned by [`Config::apply`].
-#[derive(Clone, Debug, thiserror::Error)]
+#[cfg(any(feature = "direct", feature = "ffi-client"))]
+#[derive(Debug, thiserror::Error)]
 #[cfg_attr(feature = "ffi", derive(ffier::FfiError))]
 #[non_exhaustive]
 pub enum ApplyError {
-    /// Reserved for future ffier foreign-handle apply variant.
+    /// A required libkrun symbol could not be loaded.
     #[error("{0}")]
     #[cfg_attr(feature = "ffi", ffier(code = 1))]
-    FfiError(Box<str>),
+    SymbolNotFound(Box<str>),
     /// An error occurred while adding an overlay file.
     #[error("overlay error: {0}")]
-    #[cfg_attr(feature = "ffi", ffier(code = 2))]
-    OverlayError(Box<str>),
+    #[cfg_attr(feature = "ffi", ffier(code = 2, opaque))]
+    OverlayError(KrunError),
 }
 
 /// Guest-side path of the init binary (e.g. for `init=` kernel arg).
@@ -46,7 +53,7 @@ pub const INIT_PATH: &str = "/init.krun";
 pub const KERNEL_INIT_ARG: &str = "init=/init.krun";
 
 /// A file that the init process expects to find on the guest root filesystem.
-#[cfg_attr(not(feature = "direct"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "direct", feature = "ffi-client")), allow(dead_code))]
 pub(crate) struct GuestFile {
     pub path: &'static str,
     pub data: Cow<'static, [u8]>,
@@ -59,7 +66,7 @@ pub(crate) struct GuestFile {
 /// Holds the init binary and serialized config JSON as guest files.
 /// The caller **must keep this value alive for the entire lifetime of the VM**.
 pub struct Config {
-    #[cfg_attr(not(feature = "direct"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "direct", feature = "ffi-client")), allow(dead_code))]
     files: Vec<GuestFile>,
 }
 
@@ -69,14 +76,57 @@ impl Config {
     pub fn builder() -> Builder {
         Builder::default()
     }
-}
 
-#[cfg(feature = "direct")]
-impl Config {
     /// Apply this init configuration to a VM's filesystem overlay and payload.
     ///
     /// Adds the init binary and associated configuration file(s) as overlay
     /// files, and appends the init kernel command line argument to the payload.
+    ///
+    /// Symbols are loaded from the global namespace (`RTLD_DEFAULT`).
+    #[cfg(feature = "ffi-client")]
+    pub fn apply<'a>(
+        &'a self,
+        #[cfg_attr(feature = "ffi", ffier(foreign = krun_via_cdylib_weak, c_name = "KrunFsOverlay"))]
+        overlay: &mut krun_via_cdylib_weak::FsOverlay<'a>,
+        #[cfg_attr(feature = "ffi", ffier(foreign = krun_via_cdylib_weak, c_name = "KrunPayload"))]
+        payload: &mut krun_via_cdylib_weak::Payload,
+    ) -> Result<(), ApplyError> {
+        self.apply_in(core::ptr::null_mut(), overlay, payload)
+    }
+
+    /// Like [`apply`](Self::apply), but loads symbols from a specific library
+    /// handle (e.g. from `dlopen`). Pass null for `RTLD_DEFAULT`.
+    #[cfg(feature = "ffi-client")]
+    pub fn apply_in<'a>(
+        &'a self,
+        lib_handle: *mut core::ffi::c_void,
+        #[cfg_attr(feature = "ffi", ffier(foreign = krun_via_cdylib_weak, c_name = "KrunFsOverlay"))]
+        overlay: &mut krun_via_cdylib_weak::FsOverlay<'a>,
+        #[cfg_attr(feature = "ffi", ffier(foreign = krun_via_cdylib_weak, c_name = "KrunPayload"))]
+        payload: &mut krun_via_cdylib_weak::Payload,
+    ) -> Result<(), ApplyError> {
+        krun_via_cdylib_weak::require(
+            core::ptr::NonNull::new(lib_handle),
+            &[
+                krun_via_cdylib_weak::Symbol::KrunFsOverlayAddFile,
+                krun_via_cdylib_weak::Symbol::KrunPayloadAppendCmdline,
+            ],
+        )
+        .map_err(|e| ApplyError::SymbolNotFound(e.to_string().into()))?;
+
+        for file in &self.files {
+            overlay
+                .add_file(file.path, &file.data, file.mode, file.one_shot)
+                .map_err(ApplyError::OverlayError)?;
+        }
+        payload.append_cmdline(KERNEL_INIT_ARG);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "direct")]
+impl Config {
+    /// Apply this init configuration using statically-linked libkrun types.
     pub fn apply<'a>(
         &'a self,
         overlay: &mut krun::FsOverlay<'a>,
@@ -85,7 +135,7 @@ impl Config {
         for file in &self.files {
             overlay
                 .add_file(file.path, &file.data, file.mode, file.one_shot)
-                .map_err(|e| ApplyError::OverlayError(e.to_string().into()))?;
+                .map_err(ApplyError::OverlayError)?;
         }
         payload.append_cmdline(KERNEL_INIT_ARG);
         Ok(())
