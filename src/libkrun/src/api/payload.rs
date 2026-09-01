@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use super::error::VmmError;
 pub use crate::vmm::vmm_config::external_kernel::KernelFormat;
 
+#[cfg(feature = "aws-nitro")]
+use crate::NitroConfig;
+
 // Fields are consumed by VmmBuilder once that API lands in a later commit.
 #[allow(dead_code)]
 pub(crate) enum PayloadKind {
@@ -24,6 +27,8 @@ pub(crate) enum PayloadKind {
         #[cfg(feature = "tdx")]
         firmware_path: Option<PathBuf>,
     },
+    #[cfg(feature = "aws-nitro")]
+    Nitro(NitroConfig),
 }
 
 pub struct Payload {
@@ -152,6 +157,16 @@ impl Payload {
                 kernel.cmdline = Some(self.cmdline.clone());
             }
         }
+    }
+}
+
+#[cfg(feature = "aws-nitro")]
+impl Payload {
+    pub fn nitro_enclave(config: NitroConfig) -> Result<Self, VmmError> {
+        Ok(Payload {
+            kind: PayloadKind::Nitro(config),
+            cmdline: String::new(),
+        })
     }
 }
 
