@@ -15,7 +15,7 @@ ffi = []
 direct = ["dep:krun"]
 
 [dependencies]
-ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "9ee67e2" }
+ffier = { git = "https://github.com/mtjhrc/ffier.git", tag = "0.2.0rc1" }
 krun = { path = "../../src/libkrun", package = "libkrun", optional = true }
 libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
