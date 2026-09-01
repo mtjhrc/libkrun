@@ -266,7 +266,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "ffier"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
 dependencies = [
  "ffier-builtins",
  "ffier-impl",
@@ -276,7 +276,7 @@ dependencies = [
 [[package]]
 name = "ffier-builtins"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
 dependencies = [
  "ffier-impl",
  "ffier-rt",
@@ -285,7 +285,7 @@ dependencies = [
 [[package]]
 name = "ffier-gen-rust-client"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
 dependencies = [
  "ffier-schema",
  "serde_json",
@@ -294,7 +294,7 @@ dependencies = [
 [[package]]
 name = "ffier-impl"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
 dependencies = [
  "ffier-schema",
  "proc-macro2",
@@ -306,12 +306,12 @@ dependencies = [
 [[package]]
 name = "ffier-rt"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
 
 [[package]]
 name = "ffier-schema"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?rev=9ee67e2#9ee67e2b0fcc7fbc32a60dc40de12c774101c7ae"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
 dependencies = [
  "serde",
  "serde_json",
