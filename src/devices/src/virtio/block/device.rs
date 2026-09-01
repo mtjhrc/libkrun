@@ -288,7 +288,7 @@ impl Block {
             .direct(direct_io);
 
         #[cfg(target_os = "macos")]
-        let file_opts = file_opts.relaxed(sync_mode == SyncMode::Relaxed);
+        let file_opts = file_opts.relaxed_sync(sync_mode == SyncMode::Relaxed);
         let file = ImagoFile::open(file_opts)?;
         let discard_alignment = file.discard_align();
 
