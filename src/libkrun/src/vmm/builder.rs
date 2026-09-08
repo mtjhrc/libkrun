@@ -18,30 +18,20 @@ use std::os::fd::AsRawFd;
 use std::os::fd::{BorrowedFd, FromRawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle};
-#[cfg(windows)]
-use std::path::PathBuf;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use utils::windows::SendHandle;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-#[cfg(windows)]
-use windows_sys::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-};
 
 use super::{Error, Vmm};
 
 #[cfg(target_arch = "x86_64")]
 use crate::vmm::device_manager::legacy::PortIODeviceManager;
 use crate::vmm::device_manager::mmio::MMIODeviceManager;
-use crate::vmm::resources::{
-    DefaultVirtioConsoleConfig, PortConfig, TsiFlags, VirtioConsoleConfigMode, VmResources,
-};
+use crate::vmm::resources::VmResources;
 use crate::vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
-#[cfg(feature = "net")]
-use crate::vmm::vmm_config::net::NetBuilder;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Cmos;
 #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
@@ -58,9 +48,7 @@ use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use devices::legacy::{KvmGicV2, KvmGicV3};
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use devices::virtio::passthrough::PermissionSemantics;
-use devices::virtio::{MmioTransport, PortDescription, VirtioDevice, Vsock, port_io};
+use devices::virtio::{MmioTransport, VirtioDevice};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -68,19 +56,9 @@ use kbs_types::Tee;
 use crate::vmm::device_manager;
 #[cfg(feature = "tdx")]
 use crate::vmm::linux::tee::tdshim::{self, TdShim};
-#[cfg(all(feature = "vhost-user", target_os = "linux"))]
-use crate::vmm::resources::VhostUserDeviceConfig;
-#[cfg(target_os = "linux")]
-use crate::vmm::signal_handler::register_sigint_handler;
-#[cfg(target_os = "linux")]
-use crate::vmm::signal_handler::register_sigwinch_handler;
 use crate::vmm::terminal::{term_restore_mode, term_set_raw_mode};
-#[cfg(feature = "blk")]
-use crate::vmm::vmm_config::block::BlockBuilder;
 #[cfg(feature = "tdx")]
 use crate::vmm::vmm_config::firmware::TeeFirmwareType;
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use crate::vmm::vmm_config::fs::FsDeviceConfig;
 use crate::vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(target_os = "linux")]
 use crate::vmm::vstate::KvmContext;
@@ -89,34 +67,18 @@ use crate::vmm::vstate::MeasuredRegion;
 use crate::vmm::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
 use arch::{ArchMemoryInfo, InitrdConfig};
 use device_manager::shm::ShmManager;
-#[cfg(any(feature = "gpu", feature = "vhost-user"))]
-use devices::display::DisplayInfo;
-#[cfg(feature = "gpu")]
-use devices::display::NoopDisplayBackend;
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use devices::virtio::{VirtioShmRegion, fs::ExportTable};
 use flate2::read::GzDecoder;
-#[cfg(feature = "gpu")]
-use krun_display::DisplayBackend;
-#[cfg(feature = "gpu")]
-use krun_display::IntoDisplayBackend;
 #[cfg(feature = "amd-sev")]
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
-#[cfg(unix)]
-use libc::{STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::{self, KernelLoader};
-#[cfg(unix)]
-use nix::unistd::isatty;
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
 use utils::worker_message::WorkerMessage;
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use vm_memory::Address;
 use vm_memory::Bytes;
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
 use vm_memory::FileOffset;
-#[cfg(not(feature = "aws-nitro"))]
+#[cfg(feature = "tee")]
 use vm_memory::GuestMemoryBackend;
 #[cfg(feature = "tdx")]
 use vm_memory::GuestMemoryRegion;
@@ -213,6 +175,8 @@ pub enum StartMicrovmError {
     PeGzInvalid,
     /// Cannot open the file containing the kernel code.
     RawOpenKernel(io::Error),
+    /// Cannot attach a device via the device manager.
+    AttachDevice(String),
     /// Cannot initialize a MMIO Balloon device or add a device to the MMIO Bus.
     RegisterBalloonDevice(device_manager::mmio::Error),
     /// Cannot initialize a MMIO Block Device or add a device to the MMIO Bus.
@@ -407,6 +371,7 @@ impl Display for StartMicrovmError {
             RawOpenKernel(ref err) => {
                 write!(f, "Cannot open the file containing the kernel code: {err}")
             }
+            AttachDevice(ref err) => write!(f, "Cannot attach device: {err}"),
             RegisterBalloonDevice(ref err) => {
                 let mut err_msg = format!("{err}");
                 err_msg = err_msg.replace('\"', "");
@@ -565,7 +530,7 @@ pub enum Payload {
     Tee,
 }
 
-fn choose_payload(vm_resources: &VmResources) -> Result<Payload, StartMicrovmError> {
+pub fn choose_payload(vm_resources: &VmResources) -> Result<Payload, StartMicrovmError> {
     if let Some(_kernel_bundle) = &vm_resources.kernel_bundle {
         #[cfg(feature = "tee")]
         if vm_resources.initrd_bundle.is_none() {
@@ -708,19 +673,22 @@ fn measure_qboot_regions(
 }
 
 /// Builds and starts a microVM based on the current Firecracker VmResources configuration.
-///
-/// This is the default build recipe, one could build other microVM flavors by using the
-/// independent functions in this module instead of calling this recipe.
-///
-/// An `Arc` reference of the built `Vmm` is also plugged in the `EventManager`, while another
-/// is returned.
 pub fn build_microvm(
     vm_resources: &super::resources::VmResources,
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
+    device_manager: Box<dyn crate::api::device_builders::DeviceManager<'_> + '_>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;
+
+    let requirements = device_manager.requirements();
+    let fs_shm_sizes: Vec<Option<usize>> = requirements.iter().map(|r| r.shm_size).collect();
+    #[cfg(feature = "gpu")]
+    let gpu_shm_size = requirements.iter().filter_map(|r| r.gpu_shm).next();
+    #[cfg(not(feature = "gpu"))]
+    let gpu_shm_size: Option<usize> = None;
+    let use_vhost_user = requirements.iter().any(|r| r.process_shareable_memory);
 
     #[cfg(feature = "tdx")]
     let td_shim_parsed = match &vm_resources.tee_firmware_config {
@@ -741,12 +709,20 @@ pub fn build_microvm(
     #[cfg(all(feature = "tee", not(feature = "tdx")))]
     let fw_range_for_mem: Option<(u64, usize)> = None;
 
-    let (guest_memory, arch_memory_info, mut _shm_manager, payload_config) = create_guest_memory(
+    let (guest_memory, arch_memory_info, _shm_manager, payload_config) = create_guest_memory(
         vm_resources
             .vm_config()
             .mem_size_mib
             .ok_or(StartMicrovmError::MissingMemSizeConfig)?,
-        vm_resources,
+        vm_resources.kernel_bundle.as_ref(),
+        #[cfg(feature = "tee")]
+        vm_resources.qboot_bundle.as_ref(),
+        #[cfg(feature = "tee")]
+        vm_resources.initrd_bundle.as_ref(),
+        vm_resources.firmware_config.as_ref(),
+        &fs_shm_sizes,
+        gpu_shm_size,
+        use_vhost_user,
         &payload,
         #[cfg(feature = "tee")]
         fw_range_for_mem,
@@ -801,23 +777,6 @@ pub fn build_microvm(
         )
         .map_err(|e| StartMicrovmError::Internal(Error::ConfigureSystem(e)))?;
 
-        // Place the trampoline INSIDE the kernel image, just before startup_64.
-        // The HOB entry_point must be in the kernel's address range — any address
-        // outside (like 0x801000 in the TD_HOB section) causes td-shim to treat
-        // the jump target as HOB data and behave incorrectly before the kernel runs.
-        //
-        // The bytes before startup_64 are PE/COFF header data that td-shim's
-        // RawVmLinux boot path never reads or executes, so overwriting them is safe.
-        //
-        // td-shim creates its own boot_params with cmd_line_ptr=0, so the
-        // kernel falls back to CONFIG_CMDLINE and we have no way to inject a
-        // custom cmdline.  Patching cmd_line_ptr here lets load_cmdline's
-        // content (written to CMDLINE_START) reach the kernel.
-        //
-        // Note: the trampoline is only written when an initrd is present. Without
-        // an initrd no trampoline is placed, so boot_params.cmd_line_ptr will remain
-        // 0 and the kernel won't see any cmdline passed via load_cmdline. This is a
-        // known limitation of the current TD-Shim boot path.
         if let (Some(kernel_bundle), Some(initrd_bundle)) =
             (&vm_resources.kernel_bundle, &vm_resources.initrd_bundle)
         {
@@ -1212,119 +1171,20 @@ pub fn build_microvm(
         setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
     }
 
-    #[cfg(not(feature = "tee"))]
-    attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
-    #[cfg(not(feature = "tee"))]
-    {
-        #[cfg(all(feature = "vhost-user", target_os = "linux"))]
-        {
-            const VIRTIO_ID_RNG: u32 = 4;
-            for (index, device_config) in vm_resources.vhost_user_devices.iter().enumerate() {
-                attach_vhost_user_device(
-                    &mut vmm,
-                    &_shm_manager,
-                    event_manager,
-                    intc.clone(),
-                    device_config,
-                    index,
-                    vm_resources.displays.first().cloned(),
-                )?;
-            }
-
-            let has_vhost_user_rng = vm_resources
-                .vhost_user_devices
-                .iter()
-                .any(|dev| dev.device_type == VIRTIO_ID_RNG);
-
-            if !has_vhost_user_rng {
-                attach_rng_device(&mut vmm, event_manager, intc.clone())?;
-            }
-        }
-
-        #[cfg(not(all(feature = "vhost-user", target_os = "linux")))]
-        {
-            attach_rng_device(&mut vmm, event_manager, intc.clone())?;
-        }
-    }
-    for (console_id, console_cfg) in vm_resources.virtio_consoles.iter().enumerate() {
-        attach_console_devices(
+    device_manager
+        .attach_all(
             &mut vmm,
             event_manager,
+            &_shm_manager,
             intc.clone(),
-            vm_resources,
-            Some(console_cfg),
-            console_id as u32,
-        )?;
-    }
-
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-    let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
-        Some(Default::default())
-    } else {
-        None
-    };
-
-    #[cfg(feature = "gpu")]
-    if let Some(virgl_flags) = vm_resources.gpu_virgl_flags {
-        let display_backend = vm_resources
-            .display_backend
-            .unwrap_or_else(|| NoopDisplayBackend::into_display_backend(None));
-
-        attach_gpu_device(
-            &mut vmm,
-            &mut _shm_manager,
-            #[cfg(not(feature = "tee"))]
-            export_table.clone(),
-            intc.clone(),
-            virgl_flags,
-            Box::from(&vm_resources.displays[..]),
-            display_backend,
             #[cfg(target_os = "macos")]
-            _sender.clone(),
-        )?;
-    }
-
-    #[cfg(feature = "input")]
-    if !vm_resources.input_backends.is_empty() {
-        attach_input_devices(&mut vmm, &vm_resources.input_backends, intc.clone())?;
-    }
-
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-    attach_fs_devices(
-        &mut vmm,
-        &vm_resources.fs,
-        &mut _shm_manager,
-        #[cfg(not(feature = "tee"))]
-        export_table,
-        intc.clone(),
-        exit_code,
-        #[cfg(target_os = "macos")]
-        _sender,
-    )?;
-    #[cfg(feature = "blk")]
-    attach_block_devices(&mut vmm, &vm_resources.block, intc.clone())?;
-
-    if let Some(vsock) = vm_resources.vsock.get() {
-        attach_unixsock_vsock_device(&mut vmm, vsock, event_manager, intc.clone())?;
-        let tsi_flags = vm_resources.vsock.tsi_flags();
-        if tsi_flags.contains(TsiFlags::HIJACK_INET) {
-            vmm.kernel_cmdline.insert_str("tsi_hijack")?;
-        }
-        if tsi_flags.contains(TsiFlags::HIJACK_UNIX) {
-            vmm.kernel_cmdline.insert_str("tsi_hijack_unix")?;
-        }
-    }
-
-    #[cfg(feature = "net")]
-    attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
-    #[cfg(feature = "net")]
-    if vm_resources.dhcp_client {
-        vmm.kernel_cmdline.insert_str("KRUN_DHCP=1")?;
-    }
+            Some(_sender.clone()),
+        )
+        .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
 
     if let Some(s) = &vm_resources.kernel_cmdline.epilog {
         vmm.kernel_cmdline.insert_str(s).unwrap();
-    };
+    }
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
@@ -1554,16 +1414,23 @@ fn load_external_kernel(
     ))
 }
 
-struct LoadedPayload {
-    guest_mem: GuestMemoryMmap,
-    entry_addr: GuestAddress,
-    initrd_config: Option<InitrdConfig>,
-    kernel_cmdline: Option<String>,
-    pvh: bool,
+pub struct LoadedPayload {
+    pub guest_mem: GuestMemoryMmap,
+    pub entry_addr: GuestAddress,
+    pub initrd_config: Option<InitrdConfig>,
+    pub kernel_cmdline: Option<String>,
+    pub pvh: bool,
 }
 
-fn load_payload(
-    _vm_resources: &VmResources,
+pub fn load_payload(
+    kernel_bundle: Option<&crate::vmm::vmm_config::kernel_bundle::KernelBundle>,
+    #[cfg(feature = "tee")] qboot_bundle: Option<
+        &crate::vmm::vmm_config::kernel_bundle::QbootBundle,
+    >,
+    #[cfg(feature = "tee")] initrd_bundle: Option<
+        &crate::vmm::vmm_config::kernel_bundle::InitrdBundle,
+    >,
+    _use_vhost_user: bool,
     guest_mem: GuestMemoryMmap,
     _arch_mem_info: &ArchMemoryInfo,
     payload: &Payload,
@@ -1572,7 +1439,7 @@ fn load_payload(
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         Payload::KernelCopy => {
             let (kernel_entry_addr, kernel_host_addr, kernel_guest_addr, kernel_size) =
-                if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
+                if let Some(kernel_bundle) = kernel_bundle {
                     (
                         kernel_bundle.entry_addr,
                         kernel_bundle.host_addr,
@@ -1605,7 +1472,7 @@ fn load_payload(
         #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
         Payload::KernelMmap => {
             let (kernel_entry_addr, kernel_host_addr, kernel_guest_addr, kernel_size) =
-                if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
+                if let Some(kernel_bundle) = kernel_bundle {
                     (
                         kernel_bundle.entry_addr,
                         kernel_bundle.host_addr,
@@ -1616,10 +1483,7 @@ fn load_payload(
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
 
-            #[cfg(all(feature = "vhost-user", target_os = "linux"))]
-            let use_vhost_user = !_vm_resources.vhost_user_devices.is_empty();
-            #[cfg(not(all(feature = "vhost-user", target_os = "linux")))]
-            let use_vhost_user = false;
+            let use_vhost_user = _use_vhost_user;
 
             let kernel_region = if use_vhost_user {
                 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
@@ -1730,7 +1594,7 @@ fn load_payload(
         #[cfg(feature = "tee")]
         Payload::Tee => {
             let (kernel_host_addr, kernel_guest_addr, kernel_size) =
-                if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
+                if let Some(kernel_bundle) = kernel_bundle {
                     (
                         kernel_bundle.host_addr,
                         kernel_bundle.guest_addr,
@@ -1745,17 +1609,7 @@ fn load_payload(
                 .write(kernel_data, GuestAddress(kernel_guest_addr))
                 .unwrap();
 
-            // TD-Shim supplies its own firmware; skip qboot when it's configured.
-            #[cfg(feature = "tdx")]
-            let write_qboot = _vm_resources.tee_firmware_config.is_none();
-            #[cfg(not(feature = "tdx"))]
-            let write_qboot = true;
-
-            if write_qboot {
-                let qboot_bundle = _vm_resources
-                    .qboot_bundle
-                    .as_ref()
-                    .ok_or(StartMicrovmError::MissingKernelConfig)?;
+            if let Some(qboot_bundle) = qboot_bundle {
                 let qboot_data = unsafe {
                     std::slice::from_raw_parts(qboot_bundle.host_addr as *mut u8, qboot_bundle.size)
                 };
@@ -1764,12 +1618,11 @@ fn load_payload(
                     .unwrap();
             }
 
-            let (initrd_host_addr, initrd_size) =
-                if let Some(initrd_bundle) = &_vm_resources.initrd_bundle {
-                    (initrd_bundle.host_addr, initrd_bundle.size)
-                } else {
-                    return Err(StartMicrovmError::MissingKernelConfig);
-                };
+            let (initrd_host_addr, initrd_size) = if let Some(initrd_bundle) = initrd_bundle {
+                (initrd_bundle.host_addr, initrd_bundle.size)
+            } else {
+                return Err(StartMicrovmError::MissingKernelConfig);
+            };
             let initrd_data =
                 unsafe { std::slice::from_raw_parts(initrd_host_addr as *mut u8, initrd_size) };
             guest_mem
@@ -1800,15 +1653,26 @@ fn load_payload(
 }
 
 pub struct PayloadConfig {
-    entry_addr: GuestAddress,
-    initrd_config: Option<InitrdConfig>,
-    kernel_cmdline: Option<String>,
-    pvh: bool,
+    pub entry_addr: GuestAddress,
+    pub initrd_config: Option<InitrdConfig>,
+    pub kernel_cmdline: Option<String>,
+    pub pvh: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_guest_memory(
     mem_size: usize,
-    vm_resources: &VmResources,
+    kernel_bundle: Option<&crate::vmm::vmm_config::kernel_bundle::KernelBundle>,
+    #[cfg(feature = "tee")] qboot_bundle: Option<
+        &crate::vmm::vmm_config::kernel_bundle::QbootBundle,
+    >,
+    #[cfg(feature = "tee")] initrd_bundle: Option<
+        &crate::vmm::vmm_config::kernel_bundle::InitrdBundle,
+    >,
+    firmware_config: Option<&crate::vmm::vmm_config::firmware::FirmwareConfig>,
+    fs_shm_sizes: &[Option<usize>],
+    gpu_shm_size: Option<usize>,
+    use_vhost_user: bool,
     payload: &Payload,
     #[cfg(feature = "tee")] firmware_range: Option<(u64, usize)>,
 ) -> std::result::Result<
@@ -1817,7 +1681,7 @@ pub fn create_guest_memory(
 > {
     let mem_size = mem_size << 20;
 
-    let (firmware_data, _firmware_size) = if let Some(firmware) = &vm_resources.firmware_config {
+    let (firmware_data, _firmware_size) = if let Some(firmware) = firmware_config {
         let data = std::fs::read(firmware.path.clone()).map_err(StartMicrovmError::FirmwareRead)?;
         let len = data.len();
         (Some(data), Some(len))
@@ -1829,12 +1693,11 @@ pub fn create_guest_memory(
     let (arch_mem_info, mut arch_mem_regions) = match payload {
         #[cfg(not(feature = "tee"))]
         Payload::KernelMmap => {
-            let (kernel_guest_addr, kernel_size) =
-                if let Some(kernel_bundle) = &vm_resources.kernel_bundle {
-                    (kernel_bundle.guest_addr, kernel_bundle.size)
-                } else {
-                    return Err(StartMicrovmError::MissingKernelConfig);
-                };
+            let (kernel_guest_addr, kernel_size) = if let Some(kernel_bundle) = kernel_bundle {
+                (kernel_bundle.guest_addr, kernel_bundle.size)
+            } else {
+                return Err(StartMicrovmError::MissingKernelConfig);
+            };
             arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
         }
         Payload::ExternalKernel(external_kernel) => {
@@ -1846,12 +1709,11 @@ pub fn create_guest_memory(
         }
         #[cfg(feature = "tee")]
         Payload::Tee => {
-            let (kernel_guest_addr, kernel_size) =
-                if let Some(kernel_bundle) = &vm_resources.kernel_bundle {
-                    (kernel_bundle.guest_addr, kernel_bundle.size)
-                } else {
-                    return Err(StartMicrovmError::MissingKernelConfig);
-                };
+            let (kernel_guest_addr, kernel_size) = if let Some(kernel_bundle) = kernel_bundle {
+                (kernel_bundle.guest_addr, kernel_bundle.size)
+            } else {
+                return Err(StartMicrovmError::MissingKernelConfig);
+            };
             arch::arch_memory_regions(
                 mem_size,
                 Some(kernel_guest_addr),
@@ -1878,36 +1740,26 @@ pub fn create_guest_memory(
     #[allow(unused_mut)]
     let mut shm_manager = ShmManager::new(&arch_mem_info);
 
+    #[cfg(feature = "tee")]
+    let _ = fs_shm_sizes;
     #[cfg(not(feature = "tee"))]
-    for (index, fs) in vm_resources.fs.iter().enumerate() {
-        if let Some(shm_size) = fs.shm_size {
+    for (index, shm_size) in fs_shm_sizes.iter().enumerate() {
+        if let Some(shm_size) = shm_size {
             shm_manager
-                .create_fs_region(index, shm_size)
+                .create_fs_region(index, *shm_size)
                 .map_err(StartMicrovmError::ShmCreate)?;
         }
     }
     #[cfg(feature = "gpu")]
-    if vm_resources.gpu_virgl_flags.is_some() {
-        let size = vm_resources.gpu_shm_size.unwrap_or(1 << 33);
+    if let Some(size) = gpu_shm_size {
         shm_manager
             .create_gpu_region(size)
             .map_err(StartMicrovmError::ShmCreate)?;
     }
+    #[cfg(not(feature = "gpu"))]
+    let _ = gpu_shm_size;
 
-    #[cfg(all(feature = "vhost-user", target_os = "linux"))]
-    for (index, device_config) in vm_resources.vhost_user_devices.iter().enumerate() {
-        if let Some(shm_size) = device_config.shm_size {
-            shm_manager
-                .create_vhost_user_region(index, shm_size)
-                .map_err(StartMicrovmError::ShmCreate)?;
-        }
-    }
-
-    // For vhost-user devices, we need file-backed memory so the backend can mmap it
-    #[cfg(all(feature = "vhost-user", target_os = "linux"))]
-    let use_vhost_user = !vm_resources.vhost_user_devices.is_empty();
-    #[cfg(not(all(feature = "vhost-user", target_os = "linux")))]
-    let use_vhost_user = false;
+    let _ = use_vhost_user;
 
     // Add SHM regions before creating guest memory
     arch_mem_regions.extend(shm_manager.regions());
@@ -1975,7 +1827,17 @@ pub fn create_guest_memory(
         initrd_config,
         kernel_cmdline: cmdline,
         pvh,
-    } = load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
+    } = load_payload(
+        kernel_bundle,
+        #[cfg(feature = "tee")]
+        qboot_bundle,
+        #[cfg(feature = "tee")]
+        initrd_bundle,
+        use_vhost_user,
+        guest_mem,
+        &arch_mem_info,
+        payload,
+    )?;
 
     // Only write firmware if data exists AND this isn't an ExternalKernel payload
     // (ExternalKernel does direct kernel boot and doesn't use EFI firmware)
@@ -1990,7 +1852,7 @@ pub fn create_guest_memory(
     let payload_config = PayloadConfig {
         entry_addr,
         initrd_config,
-        kernel_cmdline: cmdline.clone(),
+        kernel_cmdline: cmdline,
         pvh,
     };
 
@@ -2090,11 +1952,6 @@ pub fn setup_serial_device(
     let has_input = input.is_some();
     let serial = Arc::new(Mutex::new(Serial::new(interrupt_evt, out, input)));
     if has_input && let Err(e) = event_manager.add_subscriber(serial.clone()) {
-        // TODO: We just log this message, and immediately return Ok, instead of returning the
-        // actual error because this operation always fails with EPERM when adding a fd which
-        // has been redirected to /dev/null via dup2 (this may happen inside the jailer).
-        // Find a better solution to this (and think about the state of the serial device
-        // while we're at it).
         warn!("Could not add serial input event to epoll: {e:?}");
     }
     Ok(serial)
@@ -2336,7 +2193,8 @@ fn create_vcpus_riscv64(
 }
 
 /// Attaches an virtio mmio device to the device manager.
-fn attach_mmio_device(
+#[allow(unused)]
+pub(crate) fn attach_mmio_device(
     vmm: &mut Vmm,
     id: String,
     intc: IrqChip,
@@ -2363,268 +2221,8 @@ fn attach_mmio_device(
     Ok(())
 }
 
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-fn attach_fs_devices(
-    vmm: &mut Vmm,
-    fs_devs: &[FsDeviceConfig],
-    shm_manager: &mut ShmManager,
-    #[cfg(not(feature = "tee"))] export_table: Option<ExportTable>,
-    intc: IrqChip,
-    exit_code: Arc<AtomicI32>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    for (i, config) in fs_devs.iter().enumerate() {
-        let fs = Arc::new(Mutex::new(
-            devices::virtio::Fs::new(
-                config.fs_id.clone(),
-                PermissionSemantics::LinuxComplete,
-                config.shared_dir.clone(),
-                exit_code.clone(),
-                config.read_only,
-                config.virtual_entries.clone(),
-            )
-            .unwrap(),
-        ));
-
-        let id = format!("{}{}", String::from(fs.lock().unwrap().id()), i);
-
-        if let Some(shm_region) = shm_manager.fs_region(i) {
-            fs.lock().unwrap().set_shm_region(VirtioShmRegion {
-                host_addr: vmm
-                    .guest_memory
-                    .get_host_address(shm_region.guest_addr)
-                    .map_err(StartMicrovmError::ShmHostAddr)? as u64,
-                guest_addr: shm_region.guest_addr.raw_value(),
-                size: shm_region.size,
-            });
-        }
-
-        #[cfg(not(feature = "tee"))]
-        if let Some(export_table) = export_table.as_ref() {
-            fs.lock().unwrap().set_export_table(export_table.clone());
-        }
-
-        #[cfg(target_os = "macos")]
-        fs.lock().unwrap().set_map_sender(map_sender.clone());
-
-        // The device mutex mustn't be locked here otherwise it will deadlock.
-        attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(unix)]
-fn autoconfigure_console_ports(
-    vmm: &mut Vmm,
-    _vm_resources: &VmResources,
-    cfg: Option<&DefaultVirtioConsoleConfig>,
-) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
-    let (input_fd, output_fd, err_fd) = match cfg {
-        Some(c) => (c.input_fd, c.output_fd, c.err_fd),
-        None => (STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO),
-    };
-    {
-        let input_is_terminal =
-            input_fd >= 0 && isatty(unsafe { BorrowedFd::borrow_raw(input_fd) }).unwrap_or(false);
-        let output_is_terminal =
-            output_fd >= 0 && isatty(unsafe { BorrowedFd::borrow_raw(output_fd) }).unwrap_or(false);
-        let error_is_terminal =
-            err_fd >= 0 && isatty(unsafe { BorrowedFd::borrow_raw(err_fd) }).unwrap_or(false);
-
-        let term_fd = if input_is_terminal {
-            Some(unsafe { BorrowedFd::borrow_raw(input_fd) })
-        } else if output_is_terminal {
-            Some(unsafe { BorrowedFd::borrow_raw(output_fd) })
-        } else if error_is_terminal {
-            Some(unsafe { BorrowedFd::borrow_raw(err_fd) })
-        } else {
-            None
-        };
-
-        let forwarding_sigint;
-        let console_input = if input_is_terminal && input_fd >= 0 {
-            forwarding_sigint = false;
-            Some(port_io::input_to_raw_fd_dup(input_fd).unwrap())
-        } else {
-            #[cfg(target_os = "linux")]
-            {
-                forwarding_sigint = true;
-                let sigint_input = port_io::PortInputSigInt::new();
-                let sigint_input_fd = sigint_input.sigint_evt().as_raw_fd();
-                register_sigint_handler(sigint_input_fd)
-                    .map_err(StartMicrovmError::RegisterFsSigwinch)?;
-                Some(Box::new(sigint_input) as _)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                forwarding_sigint = false;
-                Some(port_io::input_empty().unwrap())
-            }
-        };
-
-        let console_output = if output_is_terminal && output_fd >= 0 {
-            Some(port_io::output_to_raw_fd_dup(output_fd).unwrap())
-        } else {
-            Some(port_io::output_to_log_as_err())
-        };
-
-        let terminal_properties = term_fd
-            .map(|fd| port_io::term_fd(fd.as_raw_fd()).unwrap())
-            .unwrap_or_else(|| port_io::term_fixed_size(0, 0));
-
-        setup_terminal_raw_mode(vmm, term_fd, forwarding_sigint);
-
-        let mut ports = vec![PortDescription::console(
-            console_input,
-            console_output,
-            terminal_properties,
-        )];
-
-        if input_fd >= 0 && !input_is_terminal {
-            ports.push(PortDescription::input_pipe(
-                "krun-stdin",
-                port_io::input_to_raw_fd_dup(input_fd).unwrap(),
-            ));
-        }
-
-        if output_fd >= 0 && !output_is_terminal {
-            ports.push(PortDescription::output_pipe(
-                "krun-stdout",
-                port_io::output_to_raw_fd_dup(output_fd).unwrap(),
-            ));
-        };
-
-        if err_fd >= 0 && !error_is_terminal {
-            ports.push(PortDescription::output_pipe(
-                "krun-stderr",
-                port_io::output_to_raw_fd_dup(err_fd).unwrap(),
-            ));
-        }
-
-        Ok(ports)
-    }
-}
-
-#[cfg(windows)]
-fn is_valid_handle(h: *mut core::ffi::c_void) -> bool {
-    !h.is_null() && h != INVALID_HANDLE_VALUE
-}
-
-#[cfg(target_os = "windows")]
-fn autoconfigure_console_ports(
-    vmm: &mut Vmm,
-    vm_resources: &VmResources,
-    cfg: Option<&DefaultVirtioConsoleConfig>,
-    creating_implicit_console: bool,
-) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    let mut console_output_path: Option<PathBuf> = None;
-    if let Some(path) = vm_resources.console_output.clone() {
-        if !vm_resources.disable_implicit_console && creating_implicit_console {
-            console_output_path = Some(path)
-        }
-    }
-
-    if let Some(console_output_path) = console_output_path {
-        let file = File::create(console_output_path).map_err(OpenConsoleFile)?;
-        // Manually emulate our Legacy behavior: In the case of output_path we have always used the
-        // stdin to determine the console size
-        let stdin_h = unsafe { BorrowedHandle::borrow_raw(GetStdHandle(STD_INPUT_HANDLE)) };
-        let term_h = if stdin_h.is_terminal() {
-            port_io::term_handle(stdin_h.as_raw_handle()).unwrap()
-        } else {
-            port_io::term_fixed_size(0, 0)
-        };
-        Ok(vec![PortDescription::console(
-            Some(port_io::input_empty().unwrap()),
-            Some(port_io::output_file(file).unwrap()),
-            term_h,
-        )])
-    } else {
-        let (input_h, output_h, err_h) = match cfg {
-            Some(c) => (
-                c.input_handle.as_raw_handle(),
-                c.output_handle.as_raw_handle(),
-                c.err_handle.as_raw_handle(),
-            ),
-            None => unsafe {
-                (
-                    GetStdHandle(STD_INPUT_HANDLE),
-                    GetStdHandle(STD_OUTPUT_HANDLE),
-                    GetStdHandle(STD_ERROR_HANDLE),
-                )
-            },
-        };
-        let input_is_terminal = (unsafe { BorrowedHandle::borrow_raw(input_h) }).is_terminal();
-        let output_is_terminal = (unsafe { BorrowedHandle::borrow_raw(output_h) }).is_terminal();
-        let error_is_terminal = (unsafe { BorrowedHandle::borrow_raw(err_h) }).is_terminal();
-
-        let term_h = if input_is_terminal {
-            Some(SendHandle::new(input_h))
-        } else if output_is_terminal {
-            Some(SendHandle::new(output_h))
-        } else if error_is_terminal {
-            Some(SendHandle::new(err_h))
-        } else {
-            None
-        };
-
-        let forwarding_sigint = false;
-        let console_input = if input_is_terminal {
-            Some(port_io::input_to_handle_dup(input_h).unwrap())
-        } else {
-            Some(port_io::input_empty().unwrap())
-        };
-
-        let console_output = if output_is_terminal {
-            Some(port_io::output_to_handle_dup(output_h).unwrap())
-        } else {
-            Some(port_io::output_to_log_as_err())
-        };
-
-        let terminal_properties = term_h
-            .map(|h| port_io::term_handle(h.as_raw_handle()).unwrap())
-            .unwrap_or_else(|| port_io::term_fixed_size(0, 0));
-
-        setup_terminal_raw_mode(vmm, term_h, forwarding_sigint);
-
-        let mut ports = vec![PortDescription::console(
-            console_input,
-            console_output,
-            terminal_properties,
-        )];
-
-        if is_valid_handle(input_h) && !input_is_terminal {
-            ports.push(PortDescription::input_pipe(
-                "krun-stdin",
-                port_io::input_to_handle_dup(input_h).unwrap(),
-            ));
-        }
-
-        if is_valid_handle(output_h) && !output_is_terminal {
-            ports.push(PortDescription::output_pipe(
-                "krun-stdout",
-                port_io::output_to_handle_dup(output_h).unwrap(),
-            ));
-        };
-
-        if is_valid_handle(err_h) && !error_is_terminal {
-            ports.push(PortDescription::output_pipe(
-                "krun-stderr",
-                port_io::output_to_handle_dup(err_h).unwrap(),
-            ));
-        }
-
-        Ok(ports)
-    }
-}
-
-#[cfg(unix)]
-fn setup_terminal_raw_mode(
+pub fn setup_terminal_raw_mode(
     vmm: &mut Vmm,
     term_fd: Option<BorrowedFd<'_>>,
     handle_signals_by_terminal: bool,
@@ -2649,7 +2247,7 @@ fn setup_terminal_raw_mode(
 }
 
 #[cfg(target_os = "windows")]
-fn setup_terminal_raw_mode(
+pub fn setup_terminal_raw_mode(
     vmm: &mut Vmm,
     term_handle: Option<SendHandle>,
     handle_signals_by_terminal: bool,
@@ -2669,362 +2267,6 @@ fn setup_terminal_raw_mode(
         };
     }
 }
-
-#[cfg(unix)]
-fn create_explicit_ports(
-    vmm: &mut Vmm,
-    port_configs: &[PortConfig],
-) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
-    let mut ports = Vec::with_capacity(port_configs.len());
-
-    for port_cfg in port_configs {
-        let port_desc = match port_cfg {
-            PortConfig::Tty { name, tty_fd } => {
-                assert!(*tty_fd > 0, "PortConfig::Tty must have a valid tty_fd");
-                let term_fd = unsafe { BorrowedFd::borrow_raw(*tty_fd) };
-                setup_terminal_raw_mode(vmm, Some(term_fd), false);
-
-                PortDescription {
-                    name: name.clone().into(),
-                    input: Some(port_io::input_to_raw_fd_dup(*tty_fd).unwrap()),
-                    output: Some(port_io::output_to_raw_fd_dup(*tty_fd).unwrap()),
-                    terminal: Some(port_io::term_fd(*tty_fd).unwrap()),
-                }
-            }
-            PortConfig::InOut {
-                name,
-                input_fd,
-                output_fd,
-            } => PortDescription {
-                name: name.clone().into(),
-                input: if *input_fd < 0 {
-                    None
-                } else {
-                    Some(port_io::input_to_raw_fd_dup(*input_fd).unwrap())
-                },
-                output: if *output_fd < 0 {
-                    None
-                } else {
-                    Some(port_io::output_to_raw_fd_dup(*output_fd).unwrap())
-                },
-                terminal: None,
-            },
-        };
-
-        ports.push(port_desc);
-    }
-
-    Ok(ports)
-}
-
-#[cfg(target_os = "windows")]
-fn create_explicit_ports(
-    vmm: &mut Vmm,
-    port_configs: &[PortConfig],
-) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
-    let mut ports = Vec::with_capacity(port_configs.len());
-
-    for port_cfg in port_configs {
-        let port_desc = match port_cfg {
-            PortConfig::Tty { name, tty_handle } => {
-                assert!(
-                    is_valid_handle(tty_handle.as_raw_handle()),
-                    "PortConfig::Tty must have a valid tty_handle"
-                );
-                let term_h = SendHandle::new(tty_handle.as_raw_handle());
-                setup_terminal_raw_mode(vmm, Some(term_h), false);
-
-                PortDescription {
-                    name: name.clone().into(),
-                    input: Some(port_io::input_to_handle_dup(tty_handle.as_raw_handle()).unwrap()),
-                    output: Some(
-                        port_io::output_to_handle_dup(tty_handle.as_raw_handle()).unwrap(),
-                    ),
-                    terminal: Some(port_io::term_handle(tty_handle.as_raw_handle()).unwrap()),
-                }
-            }
-            PortConfig::InOut {
-                name,
-                input_handle,
-                output_handle,
-            } => PortDescription {
-                name: name.clone().into(),
-                input: if !is_valid_handle(input_handle.as_raw_handle()) {
-                    None
-                } else {
-                    Some(port_io::input_to_handle_dup(input_handle.as_raw_handle()).unwrap())
-                },
-                output: if !is_valid_handle(output_handle.as_raw_handle()) {
-                    None
-                } else {
-                    Some(port_io::output_to_handle_dup(output_handle.as_raw_handle()).unwrap())
-                },
-                terminal: None,
-            },
-        };
-
-        ports.push(port_desc);
-    }
-
-    Ok(ports)
-}
-
-fn attach_console_devices(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-    vm_resources: &VmResources,
-    cfg: Option<&VirtioConsoleConfigMode>,
-    id_number: u32,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    let ports = match cfg {
-        None => autoconfigure_console_ports(vmm, vm_resources, None)?,
-        Some(VirtioConsoleConfigMode::Autoconfigure(autocfg)) => {
-            autoconfigure_console_ports(vmm, vm_resources, Some(autocfg))?
-        }
-        Some(VirtioConsoleConfigMode::Explicit(ports)) => create_explicit_ports(vmm, ports)?,
-    };
-
-    let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
-
-    vmm.exit_observers.push(console.clone());
-
-    event_manager
-        .add_subscriber(console.clone())
-        .map_err(RegisterEvent)?;
-
-    #[cfg(target_os = "linux")]
-    register_sigwinch_handler(console.lock().unwrap().get_sigwinch_fd())
-        .map_err(RegisterFsSigwinch)?;
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, format!("hvc{id_number}"), intc, console)
-        .map_err(RegisterConsoleDevice)?;
-
-    Ok(())
-}
-
-#[cfg(feature = "net")]
-fn attach_net_devices(
-    vmm: &mut Vmm,
-    net_devices: &NetBuilder,
-    intc: IrqChip,
-) -> Result<(), StartMicrovmError> {
-    for net_device in net_devices.list.iter() {
-        let id = net_device.lock().unwrap().id().to_string();
-
-        attach_mmio_device(vmm, id, intc.clone(), net_device.clone())
-            .map_err(StartMicrovmError::RegisterNetDevice)?;
-    }
-    Ok(())
-}
-
-fn attach_unixsock_vsock_device(
-    vmm: &mut Vmm,
-    unix_vsock: &Arc<Mutex<Vsock>>,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    event_manager
-        .add_subscriber(unix_vsock.clone())
-        .map_err(RegisterEvent)?;
-
-    let id = String::from(unix_vsock.lock().unwrap().id());
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc, unix_vsock.clone()).map_err(RegisterVsockDevice)?;
-
-    Ok(())
-}
-
-#[cfg(not(feature = "tee"))]
-fn attach_balloon_device(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
-
-    event_manager
-        .add_subscriber(balloon.clone())
-        .map_err(RegisterEvent)?;
-
-    let id = String::from(balloon.lock().unwrap().id());
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc.clone(), balloon).map_err(RegisterBalloonDevice)?;
-
-    Ok(())
-}
-
-#[cfg(feature = "blk")]
-fn attach_block_devices(
-    vmm: &mut Vmm,
-    block_devs: &BlockBuilder,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    for block in block_devs.list.iter() {
-        let id = String::from(block.lock().unwrap().id());
-
-        // The device mutex mustn't be locked here otherwise it will deadlock.
-        attach_mmio_device(vmm, id, intc.clone(), block.clone()).map_err(RegisterBlockDevice)?;
-    }
-
-    Ok(())
-}
-
-#[cfg(not(feature = "tee"))]
-fn attach_rng_device(
-    vmm: &mut Vmm,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    let rng = Arc::new(Mutex::new(devices::virtio::Rng::new().unwrap()));
-
-    event_manager
-        .add_subscriber(rng.clone())
-        .map_err(RegisterEvent)?;
-
-    let id = String::from(rng.lock().unwrap().id());
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc.clone(), rng).map_err(RegisterRngDevice)?;
-
-    Ok(())
-}
-
-#[cfg(not(feature = "tee"))]
-#[cfg(all(feature = "vhost-user", target_os = "linux"))]
-fn attach_vhost_user_device(
-    vmm: &mut Vmm,
-    shm_manager: &ShmManager,
-    event_manager: &mut EventManager,
-    intc: IrqChip,
-    device_config: &VhostUserDeviceConfig,
-    device_index: usize,
-    gpu_display: Option<DisplayInfo>,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    let device_name = device_config
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("vhost-user-{}", device_config.device_type));
-
-    let device = Arc::new(Mutex::new(
-        devices::virtio::VhostUserDevice::new(
-            &device_config.socket_path,
-            device_config.device_type,
-            device_name.clone(),
-            device_config.num_queues,
-            &device_config.queue_sizes,
-            gpu_display,
-        )
-        .map_err(|e| RegisterVhostUserDevice(device_manager::mmio::Error::VhostUserDevice(e)))?,
-    ));
-
-    if let Some(shm_region) = shm_manager.vhost_user_region(device_index) {
-        device.lock().unwrap().set_shm_region(VirtioShmRegion {
-            host_addr: vmm
-                .guest_memory
-                .get_host_address(shm_region.guest_addr)
-                .map_err(StartMicrovmError::ShmHostAddr)? as u64,
-            guest_addr: shm_region.guest_addr.raw_value(),
-            size: shm_region.size,
-        });
-    }
-
-    event_manager
-        .add_subscriber(device.clone())
-        .map_err(RegisterEvent)?;
-
-    attach_mmio_device(vmm, device_name, intc.clone(), device).map_err(RegisterVhostUserDevice)?;
-
-    Ok(())
-}
-
-#[cfg(feature = "gpu")]
-#[allow(clippy::too_many_arguments)]
-fn attach_gpu_device(
-    vmm: &mut Vmm,
-    shm_manager: &mut ShmManager,
-    #[cfg(not(feature = "tee"))] mut export_table: Option<ExportTable>,
-    intc: IrqChip,
-    virgl_flags: u32,
-    displays: Box<[DisplayInfo]>,
-    display_backend: DisplayBackend<'static>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    let gpu = Arc::new(Mutex::new(
-        devices::virtio::Gpu::new(
-            virgl_flags,
-            displays,
-            display_backend,
-            #[cfg(target_os = "macos")]
-            map_sender,
-        )
-        .unwrap(),
-    ));
-
-    let id = String::from(gpu.lock().unwrap().id());
-
-    if let Some(shm_region) = shm_manager.gpu_region() {
-        gpu.lock().unwrap().set_shm_region(VirtioShmRegion {
-            host_addr: vmm
-                .guest_memory
-                .get_host_address(shm_region.guest_addr)
-                .map_err(StartMicrovmError::ShmHostAddr)? as u64,
-            guest_addr: shm_region.guest_addr.raw_value(),
-            size: shm_region.size,
-        });
-    }
-
-    #[cfg(not(feature = "tee"))]
-    if let Some(export_table) = export_table.take() {
-        gpu.lock().unwrap().set_export_table(export_table);
-    }
-
-    // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc, gpu).map_err(RegisterGpuDevice)?;
-
-    Ok(())
-}
-
-#[cfg(feature = "input")]
-fn attach_input_devices(
-    vmm: &mut Vmm,
-    input_backends: &[(
-        krun_input::InputConfigBackend<'static>,
-        krun_input::InputEventProviderBackend<'static>,
-    )],
-    intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
-    use self::StartMicrovmError::*;
-
-    for (index, (config_backend, events_backend)) in input_backends.iter().enumerate() {
-        let input_device = Arc::new(Mutex::new(
-            devices::virtio::input::Input::new(*config_backend, *events_backend).unwrap(),
-        ));
-
-        let id = format!("input{}", index);
-        attach_mmio_device(vmm, id, intc.clone(), input_device).map_err(RegisterInputDevice)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -3037,17 +2279,24 @@ pub mod tests {
         (GuestMemoryMmap, ArchMemoryInfo, ShmManager, PayloadConfig),
         StartMicrovmError,
     > {
-        let mut vm_resources = VmResources::default();
-        vm_resources.kernel_bundle = Some(KernelBundle {
+        let kernel_bundle = KernelBundle {
             host_addr: 0x1000,
             guest_addr: 0x1000,
             entry_addr: 0x1000,
             size: 0x1000,
-        });
+        };
 
         create_guest_memory(
             mem_size_mib,
-            &vm_resources,
+            Some(&kernel_bundle),
+            #[cfg(feature = "tee")]
+            None,
+            #[cfg(feature = "tee")]
+            None,
+            None,
+            &[],
+            None,
+            false,
             &Payload::Empty,
             #[cfg(feature = "tee")]
             None,
@@ -3083,6 +2332,8 @@ pub mod tests {
             &EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
             true,
             false,
+            #[cfg(feature = "tee")]
+            crossbeam_channel::unbounded().0,
         )
         .unwrap();
         assert_eq!(vcpu_vec.len(), vcpu_count as usize);
