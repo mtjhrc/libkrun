@@ -12,7 +12,7 @@ use crate::{ShouldRun, TestSetup};
 
 pub(crate) struct Passt;
 
-fn passt_available() -> bool {
+pub(crate) fn passt_available() -> bool {
     Command::new("which")
         .arg("passt")
         .output()

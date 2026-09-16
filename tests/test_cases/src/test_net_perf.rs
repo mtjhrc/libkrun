@@ -90,6 +90,30 @@ impl TestNetPerf {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn new_vhost_user_passt_tx() -> Self {
+        Self {
+            #[cfg(feature = "guest")]
+            host_ip: [169, 254, 2, 2],
+            port: 15104,
+            reverse: false,
+            #[cfg(feature = "host")]
+            backend: Box::new(crate::test_net::vhost_user_passt::VhostUserPasst),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new_vhost_user_passt_rx() -> Self {
+        Self {
+            #[cfg(feature = "guest")]
+            host_ip: [169, 254, 2, 2],
+            port: 15114,
+            reverse: true,
+            #[cfg(feature = "host")]
+            backend: Box::new(crate::test_net::vhost_user_passt::VhostUserPasst),
+        }
+    }
+
     pub fn new_vmnet_helper_tx() -> Self {
         Self {
             #[cfg(feature = "guest")]

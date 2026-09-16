@@ -25,6 +25,8 @@ pub(crate) mod gvproxy;
 pub(crate) mod passt;
 #[cfg(feature = "host")]
 pub(crate) mod tap;
+#[cfg(all(feature = "host", target_os = "linux"))]
+pub(crate) mod vhost_user_passt;
 #[cfg(feature = "host")]
 pub(crate) mod vmnet_helper;
 
@@ -121,6 +123,15 @@ impl TestNet {
             tcp_tester: TcpTester::new([192, 168, 105, 1].into(), 9003),
             #[cfg(feature = "host")]
             backend: Box::new(vmnet_helper::VmnetHelper),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new_vhost_user_passt() -> Self {
+        Self {
+            tcp_tester: TcpTester::new([169, 254, 2, 2].into(), 9005),
+            #[cfg(feature = "host")]
+            backend: Box::new(vhost_user_passt::VhostUserPasst),
         }
     }
 
