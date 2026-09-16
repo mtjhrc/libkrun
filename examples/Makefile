@@ -1,13 +1,20 @@
 ARCH = $(shell uname -m)
 OS = $(shell uname -s)
-LDFLAGS_x86_64_Linux = -lkrun -lkrun_init
-LDFLAGS_aarch64_Linux = -lkrun -lkrun_init
-LDFLAGS_riscv64_Linux = -lkrun -lkrun_init
-LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib -lkrun -lkrun_init
-LDFLAGS_sev = -lkrun-sev
-LDFLAGS_tdx = -lkrun-tdx
-LDFLAGS_nitro = -lkrun-awsnitro
-CFLAGS = -O2 -g -I../include
+PREFIX ?= ../prefix
+LIBDIR_Linux = lib64
+LIBDIR_Darwin = lib
+ifneq ($(PREFIX),)
+    PKG_CONFIG_PATH := $(abspath $(PREFIX)/$(LIBDIR_$(OS)))/pkgconfig:$(PKG_CONFIG_PATH)
+    RPATH_FLAGS := -Wl,-rpath,$(abspath $(PREFIX)/$(LIBDIR_$(OS)))
+endif
+PKG_CONFIG_ENV = PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)"
+PKG_CONFIG_CFLAGS = $(shell $(PKG_CONFIG_ENV) pkg-config --cflags libkrun libkrun_init)
+PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG_ENV) pkg-config --libs libkrun libkrun_init) $(RPATH_FLAGS)
+PKG_CONFIG_LIBRARY_DIRS = $(shell $(PKG_CONFIG_ENV) pkg-config --libs-only-L libkrun) $(RPATH_FLAGS)
+LDFLAGS_sev = $(PKG_CONFIG_LIBRARY_DIRS) -lkrun-sev
+LDFLAGS_tdx = $(PKG_CONFIG_LIBRARY_DIRS) -lkrun-tdx
+LDFLAGS_nitro = $(PKG_CONFIG_LIBRARY_DIRS) -lkrun-awsnitro
+CFLAGS = -O2 -g $(PKG_CONFIG_CFLAGS)
 ROOTFS_DISTRO := fedora
 ROOTFS_DIR = rootfs_$(ROOTFS_DISTRO)
 
@@ -24,36 +31,36 @@ endif
 all: $(EXAMPLES)
 
 chroot_vm: chroot_vm.c
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
+	$(CC) -o $@ $< $(CFLAGS) $(PKG_CONFIG_LIBS)
 ifeq ($(OS),Darwin)
 	codesign --entitlements chroot_vm.entitlements --force -s - $@
 endif
 
 launch-tee: launch-tee.c
 ifeq ($(SEV),1)
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_sev)
+	$(CC) -o $@ $< $(CFLAGS) $(LDFLAGS_sev)
 endif
 ifeq ($(TDX),1)
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_tdx)
+	$(CC) -o $@ $< $(CFLAGS) $(LDFLAGS_tdx)
 endif
 
 boot_efi: boot_efi.c
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
+	$(CC) -o $@ $< $(CFLAGS) $(PKG_CONFIG_LIBS)
 ifeq ($(OS),Darwin)
 	codesign --entitlements chroot_vm.entitlements --force -s - $@
 endif
 
 external_kernel: external_kernel.c
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
+	$(CC) -o $@ $< $(CFLAGS) $(PKG_CONFIG_LIBS)
 ifeq ($(OS),Darwin)
 	codesign --entitlements chroot_vm.entitlements --force -s - $@
 endif
 
 consoles: consoles.c
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
+	$(CC) -o $@ $< $(CFLAGS) $(PKG_CONFIG_LIBS)
 
 nitro: nitro.c
-	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_nitro)
+	$(CC) -o $@ $< $(CFLAGS) $(LDFLAGS_nitro)
 
 # Build the rootfs to be used with chroot_vm.
 rootfs:
