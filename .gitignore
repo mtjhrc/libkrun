@@ -18,6 +18,6 @@ examples/external_kernel
 examples/nitro
 examples/consoles
 examples/rootfs_fedora
-test-prefix
+/prefix
 /linux-sysroot
 /freebsd-sysroot

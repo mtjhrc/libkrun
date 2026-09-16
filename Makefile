@@ -33,9 +33,9 @@ AWS_NITRO_INIT_SRC = \
 AWS_NITRO_INIT_LD_FLAGS = -larchive -lnsm
 
 # Install prefix for `make test` and, going forward, the examples. Defined
-# early so goal names (e.g. `test-prefix`) and their recipes reference one
+# early so goal names (e.g. `prefix`) and their recipes reference one
 # symbol; renaming the directory is a single-line change.
-TEST_PREFIX = test-prefix
+TEST_PREFIX = prefix
 
 ifeq ($(SEV),1)
     VARIANT = -sev

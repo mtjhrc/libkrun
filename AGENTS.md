@@ -63,7 +63,7 @@ make test TEST=test_name       # run a single integration test
 make test BLK=1                # integration tests with blk feature
 ```
 
-Integration tests live in `tests/` as a separate Cargo workspace. They require the library to be installed to a local prefix (`test-prefix/`) which `make test` handles automatically.
+Integration tests live in `tests/` as a separate Cargo workspace. They require the library to be installed to a local prefix (`prefix/`) which `make test` handles automatically.
 
 ## Crate architecture
 
