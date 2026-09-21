@@ -136,15 +136,15 @@ ifeq ($(PREFIX),)
     PREFIX := /usr/local
 endif
 
-.PHONY: install clean test $(TEST_PREFIX) gen-libkrun-bindings gen-init-blob-bindings $(LIBRARY_RELEASE_$(OS)) $(LIBRARY_DEBUG_$(OS)) $(LIBRARY_PROFILE_$(OS)) libkrun.pc libkrun_init.pc clean-sysroot clean-all
+.PHONY: install clean test $(TEST_PREFIX) gen-libkrun-bindings gen-init-blob-bindings $(LIBRARY_RELEASE_$(OS)) $(LIBRARY_DEBUG_$(OS)) $(LIBRARY_PROFILE_$(OS)) clean-sysroot clean-all
 
 all: $(PROFILE)
 
-release: $(LIBRARY_RELEASE_$(OS)) libkrun.pc libkrun_init.pc
+release: $(LIBRARY_RELEASE_$(OS))
 
-debug: $(LIBRARY_DEBUG_$(OS)) libkrun.pc libkrun_init.pc
+debug: $(LIBRARY_DEBUG_$(OS))
 
-profile: $(LIBRARY_PROFILE_$(OS)) libkrun.pc libkrun_init.pc
+profile: $(LIBRARY_PROFILE_$(OS))
 
 # Regenerate ffier bindings for libkrun.
 # The Rust client is generated at compile time from the committed JSON
@@ -290,27 +290,7 @@ endif
 	cp target/profile/$(KRUN_BASE_$(OS)) $(LIBRARY_PROFILE_$(OS))
 	cp target/profile/$(KRUN_INIT_BASE_$(OS)) target/profile/$(KRUN_INIT_BINARY_$(OS))
 
-libkrun.pc: libkrun.pc.in Makefile
-	rm -f $@ $@-t
-	sed -e 's|@prefix@|$(PREFIX)|' \
-	    -e 's|@libdir@|$(PREFIX)/$(LIBDIR_$(OS))|' \
-	    -e 's|@includedir@|$(PREFIX)/include|' \
-	    -e 's|@PACKAGE_NAME@|libkrun|' \
-	    -e 's|@PACKAGE_VERSION@|$(FULL_VERSION)|' \
-	    libkrun.pc.in > $@-t
-	mv $@-t $@
-
-libkrun_init.pc: libkrun_init.pc.in Makefile
-	rm -f $@ $@-t
-	sed -e 's|@prefix@|$(PREFIX)|' \
-	    -e 's|@libdir@|$(PREFIX)/$(LIBDIR_$(OS))|' \
-	    -e 's|@includedir@|$(PREFIX)/include|' \
-	    -e 's|@PACKAGE_NAME@|libkrun_init|' \
-	    -e 's|@PACKAGE_VERSION@|$(KRUN_INIT_FULL_VERSION)|' \
-	    libkrun_init.pc.in > $@-t
-	mv $@-t $@
-
-install: $(INSTALL_LIBRARY) libkrun.pc libkrun_init.pc
+install: $(INSTALL_LIBRARY)
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
 	install -d $(DESTDIR)$(PREFIX)/include
@@ -318,8 +298,22 @@ install: $(INSTALL_LIBRARY) libkrun.pc libkrun_init.pc
 	install -m 644 $(LIBRARY_HEADER_DISPLAY) $(DESTDIR)$(PREFIX)/include
 	install -m 644 $(LIBRARY_HEADER_INPUT) $(DESTDIR)$(PREFIX)/include
 	install -m 644 $(LIBRARY_HEADER_INIT) $(DESTDIR)$(PREFIX)/include
-	install -m 644 libkrun.pc $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
-	install -m 644 libkrun_init.pc $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
+	rm -f $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc-t
+	sed -e 's|@prefix@|$(PREFIX)|' \
+	    -e 's|@libdir@|$(PREFIX)/$(LIBDIR_$(OS))|' \
+	    -e 's|@includedir@|$(PREFIX)/include|' \
+	    -e 's|@PACKAGE_NAME@|libkrun|' \
+	    -e 's|@PACKAGE_VERSION@|$(FULL_VERSION)|' \
+	    libkrun.pc.in > $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc-t
+	mv $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc-t $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc
+	rm -f $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc-t
+	sed -e 's|@prefix@|$(PREFIX)|' \
+	    -e 's|@libdir@|$(PREFIX)/$(LIBDIR_$(OS))|' \
+	    -e 's|@includedir@|$(PREFIX)/include|' \
+	    -e 's|@PACKAGE_NAME@|libkrun_init|' \
+	    -e 's|@PACKAGE_VERSION@|$(KRUN_INIT_FULL_VERSION)|' \
+	    libkrun_init.pc.in > $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc-t
+	mv $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc-t $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc
 	install -m 755 $(INSTALL_LIBRARY) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	cd $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/ ; ln -sf $(KRUN_BINARY_$(OS)) $(KRUN_SONAME_$(OS)) ; ln -sf $(KRUN_SONAME_$(OS)) $(KRUN_BASE_$(OS))
 	install -m 755 $(INSTALL_TARGET_DIR)/$(KRUN_INIT_BINARY_$(OS)) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
@@ -334,10 +328,6 @@ endif
 	cd tests; cargo clean
 
 clean-all: clean clean-sysroot
-
-$(TEST_PREFIX)/$(LIBDIR_$(OS))/libkrun.pc: $(LIBRARY_RELEASE_$(OS))
-	mkdir -p $(TEST_PREFIX)
-	PREFIX="$$(realpath $(TEST_PREFIX))" make install
 
 # Build and install libkrunfw from a source tree into $(TEST_PREFIX).
 # Usage: make test LIBKRUNFW_SRC=/path/to/libkrunfw

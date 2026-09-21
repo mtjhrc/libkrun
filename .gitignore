@@ -6,8 +6,6 @@ target
 __pycache__
 *.pyc
 *~
-/libkrun.pc
-/libkrun_init.pc
 init/init
 init/init-binary/init-*
 init/nitro/init
