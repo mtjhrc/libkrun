@@ -108,8 +108,14 @@ fn build_rust_init() -> PathBuf {
         .arg(&init_target_dir)
         .env("RUSTC", &rustc);
 
-    if profile == "release" {
-        cmd.arg("--release");
+    match profile.as_str() {
+        "debug" => {}
+        "release" => {
+            cmd.arg("--release");
+        }
+        profile => {
+            cmd.args(["--profile", profile]);
+        }
     }
 
     if use_musl {

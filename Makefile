@@ -110,18 +110,22 @@ KRUN_SONAME_Darwin = libkrun$(VARIANT).$(ABI_VERSION).dylib
 KRUN_BASE_Darwin = libkrun$(VARIANT).dylib
 
 PROFILE ?= release
-ifneq ($(filter debug release,$(PROFILE)),$(PROFILE))
-$(error PROFILE must be one of: debug, release)
+ifneq ($(filter debug release profile,$(PROFILE)),$(PROFILE))
+$(error PROFILE must be one of: debug, release, profile)
 endif
 
 LIBRARY_RELEASE_Linux = target/release/$(KRUN_BINARY_Linux)
 LIBRARY_DEBUG_Linux = target/debug/$(KRUN_BINARY_Linux)
 LIBRARY_RELEASE_Darwin = target/release/$(KRUN_BINARY_Darwin)
 LIBRARY_DEBUG_Darwin = target/debug/$(KRUN_BINARY_Darwin)
+LIBRARY_PROFILE_Linux = target/profile/$(KRUN_BINARY_Linux)
+LIBRARY_PROFILE_Darwin = target/profile/$(KRUN_BINARY_Darwin)
 ifeq ($(PROFILE),debug)
 INSTALL_LIBRARY = $(LIBRARY_DEBUG_$(OS))
 else ifeq ($(PROFILE),release)
 INSTALL_LIBRARY = $(LIBRARY_RELEASE_$(OS))
+else
+INSTALL_LIBRARY = $(LIBRARY_PROFILE_$(OS))
 endif
 INSTALL_TARGET_DIR = target/$(PROFILE)
 
@@ -132,13 +136,15 @@ ifeq ($(PREFIX),)
     PREFIX := /usr/local
 endif
 
-.PHONY: install clean test $(TEST_PREFIX) gen-libkrun-bindings gen-init-blob-bindings $(LIBRARY_RELEASE_$(OS)) $(LIBRARY_DEBUG_$(OS)) libkrun.pc libkrun_init.pc clean-sysroot clean-all
+.PHONY: install clean test $(TEST_PREFIX) gen-libkrun-bindings gen-init-blob-bindings $(LIBRARY_RELEASE_$(OS)) $(LIBRARY_DEBUG_$(OS)) $(LIBRARY_PROFILE_$(OS)) libkrun.pc libkrun_init.pc clean-sysroot clean-all
 
 all: $(PROFILE)
 
 release: $(LIBRARY_RELEASE_$(OS)) libkrun.pc libkrun_init.pc
 
 debug: $(LIBRARY_DEBUG_$(OS)) libkrun.pc libkrun_init.pc
+
+profile: $(LIBRARY_PROFILE_$(OS)) libkrun.pc libkrun_init.pc
 
 # Regenerate ffier bindings for libkrun.
 # The Rust client is generated at compile time from the committed JSON
@@ -265,6 +271,24 @@ ifeq ($(TDX),1)
 endif
 	cp target/debug/$(KRUN_BASE_$(OS)) $(LIBRARY_DEBUG_$(OS))
 	cp target/debug/$(KRUN_INIT_BASE_$(OS)) target/debug/$(KRUN_INIT_BINARY_$(OS))
+
+$(LIBRARY_PROFILE_$(OS)): $(INIT_BINARY_BSD)
+	cargo build --profile profile $(FEATURE_FLAGS)
+	cargo build --profile profile -p krun-init-blob --features ffi
+ifeq ($(SEV),1)
+	mv target/profile/libkrun.so target/profile/$(KRUN_BASE_$(OS))
+endif
+ifeq ($(TDX),1)
+	mv target/profile/libkrun.so target/profile/$(KRUN_BASE_$(OS))
+endif
+ifeq ($(AWS_NITRO),1)
+	mv target/profile/libkrun.so target/profile/$(KRUN_BASE_$(OS))
+endif
+ifeq ($(OS),Darwin)
+	mv target/profile/libkrun.dylib target/profile/$(KRUN_BASE_$(OS))
+endif
+	cp target/profile/$(KRUN_BASE_$(OS)) $(LIBRARY_PROFILE_$(OS))
+	cp target/profile/$(KRUN_INIT_BASE_$(OS)) target/profile/$(KRUN_INIT_BINARY_$(OS))
 
 libkrun.pc: libkrun.pc.in Makefile
 	rm -f $@ $@-t
