@@ -109,10 +109,21 @@ KRUN_BINARY_Darwin = libkrun$(VARIANT).$(FULL_VERSION).dylib
 KRUN_SONAME_Darwin = libkrun$(VARIANT).$(ABI_VERSION).dylib
 KRUN_BASE_Darwin = libkrun$(VARIANT).dylib
 
+PROFILE ?= release
+ifneq ($(filter debug release,$(PROFILE)),$(PROFILE))
+$(error PROFILE must be one of: debug, release)
+endif
+
 LIBRARY_RELEASE_Linux = target/release/$(KRUN_BINARY_Linux)
 LIBRARY_DEBUG_Linux = target/debug/$(KRUN_BINARY_Linux)
 LIBRARY_RELEASE_Darwin = target/release/$(KRUN_BINARY_Darwin)
 LIBRARY_DEBUG_Darwin = target/debug/$(KRUN_BINARY_Darwin)
+ifeq ($(PROFILE),debug)
+INSTALL_LIBRARY = $(LIBRARY_DEBUG_$(OS))
+else ifeq ($(PROFILE),release)
+INSTALL_LIBRARY = $(LIBRARY_RELEASE_$(OS))
+endif
+INSTALL_TARGET_DIR = target/$(PROFILE)
 
 LIBDIR_Linux = lib64
 LIBDIR_Darwin = lib
@@ -123,7 +134,9 @@ endif
 
 .PHONY: install clean test $(TEST_PREFIX) gen-libkrun-bindings gen-init-blob-bindings $(LIBRARY_RELEASE_$(OS)) $(LIBRARY_DEBUG_$(OS)) libkrun.pc libkrun_init.pc clean-sysroot clean-all
 
-all: $(LIBRARY_RELEASE_$(OS)) libkrun.pc libkrun_init.pc
+all: $(PROFILE)
+
+release: $(LIBRARY_RELEASE_$(OS)) libkrun.pc libkrun_init.pc
 
 debug: $(LIBRARY_DEBUG_$(OS)) libkrun.pc libkrun_init.pc
 
@@ -273,7 +286,7 @@ libkrun_init.pc: libkrun_init.pc.in Makefile
 	    libkrun_init.pc.in > $@-t
 	mv $@-t $@
 
-install: libkrun.pc libkrun_init.pc
+install: $(INSTALL_LIBRARY) libkrun.pc libkrun_init.pc
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
 	install -d $(DESTDIR)$(PREFIX)/include
@@ -283,9 +296,9 @@ install: libkrun.pc libkrun_init.pc
 	install -m 644 $(LIBRARY_HEADER_INIT) $(DESTDIR)$(PREFIX)/include
 	install -m 644 libkrun.pc $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
 	install -m 644 libkrun_init.pc $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
-	install -m 755 $(LIBRARY_RELEASE_$(OS)) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
+	install -m 755 $(INSTALL_LIBRARY) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	cd $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/ ; ln -sf $(KRUN_BINARY_$(OS)) $(KRUN_SONAME_$(OS)) ; ln -sf $(KRUN_SONAME_$(OS)) $(KRUN_BASE_$(OS))
-	install -m 755 target/release/$(KRUN_INIT_BINARY_$(OS)) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
+	install -m 755 $(INSTALL_TARGET_DIR)/$(KRUN_INIT_BINARY_$(OS)) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
 	cd $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/ ; ln -sf $(KRUN_INIT_BINARY_$(OS)) $(KRUN_INIT_SONAME_$(OS)) ; ln -sf $(KRUN_INIT_SONAME_$(OS)) $(KRUN_INIT_BASE_$(OS))
 
 clean:
