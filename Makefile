@@ -290,34 +290,79 @@ endif
 	cp target/profile/$(KRUN_BASE_$(OS)) $(LIBRARY_PROFILE_$(OS))
 	cp target/profile/$(KRUN_INIT_BASE_$(OS)) target/profile/$(KRUN_INIT_BINARY_$(OS))
 
-install: $(INSTALL_LIBRARY)
-	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
-	install -d $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig
-	install -d $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER) $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER_DISPLAY) $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER_INPUT) $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY_HEADER_INIT) $(DESTDIR)$(PREFIX)/include
-	rm -f $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc-t
+INSTALL_LIBDIR = $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))
+INSTALL_INCLUDEDIR = $(DESTDIR)$(PREFIX)/include
+INSTALL_PKGCONFIGDIR = $(INSTALL_LIBDIR)/pkgconfig
+INSTALL_CONFIG = $(INSTALL_LIBDIR)/.libkrun-install-$(PROFILE)-$(VARIANT)-$(FFI)-$(BLK)-$(NET)-$(GPU)-$(INPUT)-$(VHOST_USER)-$(TIMESYNC)-$(INIT_BLOB)-$(SEV)-$(TDX)-$(AWS_NITRO)-$(VIRGL_RESOURCE_MAP2)-$(BUILD_BSD_INIT)
+INSTALL_FILES = \
+	$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER)) \
+	$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER_DISPLAY)) \
+	$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER_INPUT)) \
+	$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER_INIT)) \
+	$(INSTALL_PKGCONFIGDIR)/libkrun.pc \
+	$(INSTALL_PKGCONFIGDIR)/libkrun_init.pc \
+	$(INSTALL_LIBDIR)/$(KRUN_BINARY_$(OS)) \
+	$(INSTALL_LIBDIR)/$(KRUN_SONAME_$(OS)) \
+	$(INSTALL_LIBDIR)/$(KRUN_BASE_$(OS)) \
+	$(INSTALL_LIBDIR)/$(KRUN_INIT_BINARY_$(OS)) \
+	$(INSTALL_LIBDIR)/$(KRUN_INIT_SONAME_$(OS)) \
+	$(INSTALL_LIBDIR)/$(KRUN_INIT_BASE_$(OS))
+
+install: $(INSTALL_FILES)
+
+$(INSTALL_LIBDIR) $(INSTALL_INCLUDEDIR) $(INSTALL_PKGCONFIGDIR):
+	install -d $@
+
+$(INSTALL_CONFIG): | $(INSTALL_LIBDIR)
+	@touch $@
+
+$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER)): $(LIBRARY_HEADER) $(INSTALL_CONFIG) | $(INSTALL_INCLUDEDIR)
+	install -m 644 $< $@
+
+$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER_DISPLAY)): $(LIBRARY_HEADER_DISPLAY) $(INSTALL_CONFIG) | $(INSTALL_INCLUDEDIR)
+	install -m 644 $< $@
+
+$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER_INPUT)): $(LIBRARY_HEADER_INPUT) $(INSTALL_CONFIG) | $(INSTALL_INCLUDEDIR)
+	install -m 644 $< $@
+
+$(INSTALL_INCLUDEDIR)/$(notdir $(LIBRARY_HEADER_INIT)): $(LIBRARY_HEADER_INIT) $(INSTALL_CONFIG) | $(INSTALL_INCLUDEDIR)
+	install -m 644 $< $@
+
+$(INSTALL_PKGCONFIGDIR)/libkrun.pc: libkrun.pc.in $(INSTALL_CONFIG) | $(INSTALL_PKGCONFIGDIR)
 	sed -e 's|@prefix@|$(PREFIX)|' \
 	    -e 's|@libdir@|$(PREFIX)/$(LIBDIR_$(OS))|' \
 	    -e 's|@includedir@|$(PREFIX)/include|' \
 	    -e 's|@PACKAGE_NAME@|libkrun|' \
 	    -e 's|@PACKAGE_VERSION@|$(FULL_VERSION)|' \
-	    libkrun.pc.in > $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc-t
-	mv $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc-t $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun.pc
-	rm -f $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc-t
+	    $< > $@-t
+	mv $@-t $@
+
+$(INSTALL_PKGCONFIGDIR)/libkrun_init.pc: libkrun_init.pc.in $(INSTALL_CONFIG) | $(INSTALL_PKGCONFIGDIR)
 	sed -e 's|@prefix@|$(PREFIX)|' \
 	    -e 's|@libdir@|$(PREFIX)/$(LIBDIR_$(OS))|' \
 	    -e 's|@includedir@|$(PREFIX)/include|' \
 	    -e 's|@PACKAGE_NAME@|libkrun_init|' \
 	    -e 's|@PACKAGE_VERSION@|$(KRUN_INIT_FULL_VERSION)|' \
-	    libkrun_init.pc.in > $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc-t
-	mv $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc-t $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/pkgconfig/libkrun_init.pc
-	install -m 755 $(INSTALL_LIBRARY) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
-	cd $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/ ; ln -sf $(KRUN_BINARY_$(OS)) $(KRUN_SONAME_$(OS)) ; ln -sf $(KRUN_SONAME_$(OS)) $(KRUN_BASE_$(OS))
-	install -m 755 $(INSTALL_TARGET_DIR)/$(KRUN_INIT_BINARY_$(OS)) $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/
-	cd $(DESTDIR)$(PREFIX)/$(LIBDIR_$(OS))/ ; ln -sf $(KRUN_INIT_BINARY_$(OS)) $(KRUN_INIT_SONAME_$(OS)) ; ln -sf $(KRUN_INIT_SONAME_$(OS)) $(KRUN_INIT_BASE_$(OS))
+	    $< > $@-t
+	mv $@-t $@
+
+$(INSTALL_LIBDIR)/$(KRUN_BINARY_$(OS)): $(INSTALL_LIBRARY) $(INSTALL_CONFIG) | $(INSTALL_LIBDIR)
+	install -m 755 $< $@
+
+$(INSTALL_LIBDIR)/$(KRUN_INIT_BINARY_$(OS)): $(INSTALL_LIBRARY) $(INSTALL_CONFIG) | $(INSTALL_LIBDIR)
+	install -m 755 $(INSTALL_TARGET_DIR)/$(KRUN_INIT_BINARY_$(OS)) $@
+
+$(INSTALL_LIBDIR)/$(KRUN_SONAME_$(OS)): $(INSTALL_LIBDIR)/$(KRUN_BINARY_$(OS)) $(INSTALL_CONFIG) | $(INSTALL_LIBDIR)
+	ln -sf $(KRUN_BINARY_$(OS)) $@
+
+$(INSTALL_LIBDIR)/$(KRUN_BASE_$(OS)): $(INSTALL_LIBDIR)/$(KRUN_SONAME_$(OS)) $(INSTALL_CONFIG) | $(INSTALL_LIBDIR)
+	ln -sf $(KRUN_SONAME_$(OS)) $@
+
+$(INSTALL_LIBDIR)/$(KRUN_INIT_SONAME_$(OS)): $(INSTALL_LIBDIR)/$(KRUN_INIT_BINARY_$(OS)) $(INSTALL_CONFIG) | $(INSTALL_LIBDIR)
+	ln -sf $(KRUN_INIT_BINARY_$(OS)) $@
+
+$(INSTALL_LIBDIR)/$(KRUN_INIT_BASE_$(OS)): $(INSTALL_LIBDIR)/$(KRUN_INIT_SONAME_$(OS)) $(INSTALL_CONFIG) | $(INSTALL_LIBDIR)
+	ln -sf $(KRUN_INIT_SONAME_$(OS)) $@
 
 clean:
 ifeq ($(BUILD_BSD_INIT),1)
