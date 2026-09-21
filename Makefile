@@ -329,6 +329,12 @@ endif
 
 clean-all: clean clean-sysroot
 
+BUILD_VARIABLES = BLK=$(BLK) NET=$(NET) GPU=$(GPU) INPUT=$(INPUT) \
+	VHOST_USER=$(VHOST_USER) TIMESYNC=$(TIMESYNC) FFI=$(FFI) \
+	INIT_BLOB=$(INIT_BLOB) SEV=$(SEV) TDX=$(TDX) AWS_NITRO=$(AWS_NITRO) \
+	VIRGL_RESOURCE_MAP2=$(VIRGL_RESOURCE_MAP2) BUILD_BSD_INIT=$(BUILD_BSD_INIT) \
+	SYSROOT_BSD=$(SYSROOT_BSD) PROFILE=$(PROFILE)
+
 # Build and install libkrunfw from a source tree into $(TEST_PREFIX).
 # Usage: make test LIBKRUNFW_SRC=/path/to/libkrunfw
 ifdef LIBKRUNFW_SRC
@@ -338,9 +344,13 @@ $(TEST_PREFIX)-libkrunfw:
 	mkdir -p $(TEST_PREFIX)
 	PREFIX="$$(realpath $(TEST_PREFIX))" $(MAKE) -C $(LIBKRUNFW_SRC) install
 
-$(TEST_PREFIX): $(TEST_PREFIX)/$(LIBDIR_$(OS))/libkrun.pc $(TEST_PREFIX)-libkrunfw
+$(TEST_PREFIX): $(TEST_PREFIX)-libkrunfw
+	mkdir -p $(TEST_PREFIX)
+	PREFIX="$$(realpath $(TEST_PREFIX))" $(MAKE) install $(BUILD_VARIABLES)
 else
-$(TEST_PREFIX): $(TEST_PREFIX)/$(LIBDIR_$(OS))/libkrun.pc
+$(TEST_PREFIX):
+	mkdir -p $(TEST_PREFIX)
+	PREFIX="$$(realpath $(TEST_PREFIX))" $(MAKE) install $(BUILD_VARIABLES)
 	@if ls $(TEST_PREFIX)/$(LIBDIR_$(OS))/libkrunfw* >/dev/null 2>&1; then \
 		echo "WARNING: $(TEST_PREFIX) contains a custom libkrunfw from a previous LIBKRUNFW_SRC= run." >&2; \
 		echo "         Tests will use it instead of the system libkrunfw." >&2; \
