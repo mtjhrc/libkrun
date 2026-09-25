@@ -27,6 +27,8 @@ use crate::virtio::queue::Queue;
 use super::socket_x::msghdr_x;
 
 const VFKIT_MAGIC: [u8; 4] = *b"VFKT";
+#[cfg(target_os = "macos")]
+const MSG_BATCH_SIZE: usize = 64;
 /// Per-process counter to generate unique local unixgram socket filenames.
 ///
 /// The local socket is placed in the same directory as the peer using a short
@@ -77,6 +79,8 @@ impl WorkItemState for MsgHdrItem {
         {
             self.0.msg_iov = ptr;
             self.0.msg_iovlen = iovecs.len() as c_int;
+            self.0.msg_flags = 0;
+            self.0.msg_datalen = 0;
         }
     }
 }
@@ -287,7 +291,15 @@ impl NetBackend for Unixgram {
                 break;
             }
 
-            let sent = self.send_impl();
+            let sent = match self.send_impl() {
+                Ok(sent) => sent,
+                Err(e) => {
+                    if total_sent > 0 && self.tx_consumer.needs_notification() {
+                        self.interrupt.signal_used_queue();
+                    }
+                    return Err(e);
+                }
+            };
             total_sent += sent;
 
             // Socket fully blocked — wait for EPOLLOUT.
@@ -300,7 +312,7 @@ impl NetBackend for Unixgram {
             self.interrupt.signal_used_queue();
         }
 
-        if total_sent == 0 && self.tx_consumer.has_pending() {
+        if self.tx_consumer.has_pending() {
             return Err(WriteError::NothingWritten);
         }
 
@@ -404,26 +416,36 @@ unsafe fn recv_batch(fd: RawFd, ptr: *mut RawMsgHdr, len: usize) -> isize {
 }
 
 impl Unixgram {
-    fn send_impl(&mut self) -> usize {
+    fn send_impl(&mut self) -> Result<usize, WriteError> {
         let fd = self.fd.as_raw_fd();
+        let mut error = None;
 
-        self.tx_consumer.consume(|batch| {
+        let sent = self.tx_consumer.consume(|batch| {
             let len = batch.len();
-            let headers = batch.transformed(0..len);
-            let ptr = headers.as_ptr() as *mut RawMsgHdr;
+            #[cfg(target_os = "macos")]
+            let len = len.min(MSG_BATCH_SIZE);
+            let headers = batch.transformed_mut(0..len);
+            let ptr = headers.as_mut_ptr() as *mut RawMsgHdr;
 
             let ret = unsafe { send_batch(fd, ptr, len) };
 
             if ret < 0 {
                 let err = nix::errno::Errno::last();
-                if err != nix::errno::Errno::EAGAIN && err != nix::errno::Errno::ENOBUFS {
-                    log::error!("send failed: {err}");
+                match err {
+                    nix::errno::Errno::EAGAIN | nix::errno::Errno::ENOBUFS => {}
+                    nix::errno::Errno::EPIPE => error = Some(WriteError::ProcessNotRunning),
+                    _ => error = Some(WriteError::Internal(err)),
                 }
                 return;
             }
 
             batch.finish_many(0..ret as usize);
-        })
+        });
+
+        match error {
+            Some(e) => Err(e),
+            None => Ok(sent),
+        }
     }
 
     fn recv_impl(&mut self) -> usize {
@@ -431,6 +453,8 @@ impl Unixgram {
 
         self.rx_producer.produce(|batch| {
             let len = batch.len();
+            #[cfg(target_os = "macos")]
+            let len = len.min(MSG_BATCH_SIZE);
             let ret = {
                 let headers = batch.transformed_mut(0..len);
                 let ptr = headers.as_mut_ptr() as *mut RawMsgHdr;

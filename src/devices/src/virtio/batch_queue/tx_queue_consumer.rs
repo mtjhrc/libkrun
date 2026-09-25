@@ -132,6 +132,8 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
             let allocation = alloc_start..live.end;
 
             let item = WorkItem::new(head_index, max_bytes, 0, allocation, live);
+            let mut state = state;
+            state.set_iovecs(item.raw_slice(&self.iovecs));
             self.work_items.push(item);
             self.transformed.push(state);
 
@@ -172,11 +174,6 @@ impl<T: WorkItemState> TxQueueConsumer<T> {
     {
         if !self.has_pending() {
             return 0;
-        }
-
-        for i in self.head..self.work_items.len() {
-            let item = &self.work_items[i];
-            self.transformed[i].set_iovecs(item.raw_slice(&self.iovecs));
         }
 
         let finished_count;

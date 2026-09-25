@@ -15,6 +15,8 @@ use crate::virtio::queue::Queue;
 use super::super::backend::{NetBackend, ReadError, WriteError};
 use super::super::{DEFAULT_VNET_HDR, FRAME_HEADER_LEN, QUEUE_SIZE, iov_max, vnet_hdr_len};
 
+const RX_FEED_BATCH_SIZE: usize = 128;
+
 /// Try to read/complete the frame length header using non-blocking recv.
 /// Returns Some(frame_len) when complete, None if incomplete or EAGAIN.
 fn try_read_frame_header(
@@ -294,7 +296,8 @@ impl NetBackend for Unixstream {
         self.rx_producer.disable_notification();
 
         loop {
-            self.rx_producer.feed();
+            let feed_limit = RX_FEED_BATCH_SIZE.saturating_sub(self.rx_producer.pending_count());
+            self.rx_producer.feed_up_to(feed_limit);
 
             if !self.rx_producer.has_pending() {
                 if self.rx_producer.enable_notification() {
@@ -327,6 +330,7 @@ impl NetBackend for Unixstream {
                         let _ = batch.write_advance(i, &DEFAULT_VNET_HDR);
                     }
 
+                    let mut frame_complete = false;
                     while batch.bytes_used(i) < total_len {
                         let remaining = total_len - batch.bytes_used(i);
                         let iovecs = batch.io_slices_mut(i);
@@ -350,10 +354,20 @@ impl NetBackend for Unixstream {
 
                         match ret {
                             n if n > 0 => {
+                                if n as usize == remaining {
+                                    batch.complete(i, n as usize);
+                                    *expecting = None;
+                                    frame_complete = true;
+                                    break;
+                                }
                                 batch.advance(i, n as usize);
                             }
                             _ => return,
                         }
+                    }
+
+                    if frame_complete {
+                        continue;
                     }
 
                     if batch.bytes_used(i) >= total_len {
@@ -393,7 +407,7 @@ impl NetBackend for Unixstream {
             if finished > 0 && self.rx_producer.needs_notification() {
                 self.interrupt.signal_used_queue();
             }
-            if finished == 0 {
+            if finished == 0 || self.rx_drain_remaining > 0 {
                 break;
             }
         }

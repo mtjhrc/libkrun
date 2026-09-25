@@ -124,6 +124,16 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             &mut IovecAppender<'b, 'a>,
         ) -> Option<(usize, T)>,
     {
+        self.feed_with_transform_up_to(usize::MAX, transform)
+    }
+
+    pub fn feed_with_transform_up_to<F>(&mut self, max_chains: usize, transform: F) -> usize
+    where
+        F: for<'a, 'b> FnMut(
+            WritableChainIter<'a>,
+            &mut IovecAppender<'b, 'a>,
+        ) -> Option<(usize, T)>,
+    {
         let mut batch = RxProducerBatch {
             work_items: &mut self.work_items,
             transformed: &mut self.transformed,
@@ -133,7 +143,7 @@ impl<T: WorkItemState> RxQueueProducer<T> {
             head: self.head,
             next_finish_idx: 0,
         };
-        batch.feed_with_transform(transform)
+        batch.feed_with_transform_up_to(max_chains, transform)
     }
 
     /// Number of chains pending.
@@ -219,7 +229,11 @@ impl<T: WorkItemState> RxQueueProducer<T> {
 impl RxQueueProducer<()> {
     /// Feed writable descriptor chains without extra transformed state.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs, out| {
+        self.feed_up_to(usize::MAX)
+    }
+
+    pub fn feed_up_to(&mut self, max_chains: usize) -> usize {
+        self.feed_with_transform_up_to(max_chains, |iovecs, out| {
             if !out.reserve(iovecs.len()) {
                 return None;
             }
@@ -278,7 +292,17 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
     }
 
     /// Feed writable descriptor chains from the queue into this batch.
-    pub fn feed_with_transform<F>(&mut self, mut transform: F) -> usize
+    pub fn feed_with_transform<F>(&mut self, transform: F) -> usize
+    where
+        F: for<'a, 'b> FnMut(
+            WritableChainIter<'a>,
+            &mut IovecAppender<'b, 'a>,
+        ) -> Option<(usize, T)>,
+    {
+        self.feed_with_transform_up_to(usize::MAX, transform)
+    }
+
+    pub fn feed_with_transform_up_to<F>(&mut self, max_chains: usize, mut transform: F) -> usize
     where
         F: for<'a, 'b> FnMut(
             WritableChainIter<'a>,
@@ -287,7 +311,7 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
     {
         let mut added = 0;
 
-        'next_chain: loop {
+        'next_chain: while added < max_chains {
             let Some(head) = self.queue.pop(self.mem) else {
                 break 'next_chain;
             };
@@ -480,7 +504,11 @@ impl<T: WorkItemState> RxProducerBatch<'_, T> {
 impl RxProducerBatch<'_, ()> {
     /// Feed writable descriptor chains without extra transformed state.
     pub fn feed(&mut self) -> usize {
-        self.feed_with_transform(|iovecs, out| {
+        self.feed_up_to(usize::MAX)
+    }
+
+    pub fn feed_up_to(&mut self, max_chains: usize) -> usize {
+        self.feed_with_transform_up_to(max_chains, |iovecs, out| {
             if !out.reserve(iovecs.len()) {
                 return None;
             }
