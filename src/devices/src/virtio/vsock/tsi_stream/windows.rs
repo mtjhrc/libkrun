@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::num::Wrapping;
 use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket, RawSocket};
@@ -6,8 +7,8 @@ use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket, RawSocket};
 use utils::windows::RawFd;
 use windows_sys::Win32::Networking::WinSock::{
     FIONBIO, INVALID_SOCKET, SD_BOTH, SD_RECEIVE, SD_SEND, SOCK_STREAM, SOCKADDR, SOCKET,
-    SOCKET_ERROR, WSAEWOULDBLOCK, WSAGetLastError, accept, bind, closesocket, connect, getpeername,
-    ioctlsocket, listen, recv, send, shutdown, socket,
+    SOCKET_ERROR, WSAEINTR, WSAESHUTDOWN, WSAEWOULDBLOCK, WSAGetLastError, accept, bind,
+    closesocket, connect, getpeername, ioctlsocket, listen, recv, send, shutdown, socket,
 };
 
 use crate::virtio::vsock::windows::sockaddr_storage::{
@@ -60,32 +61,38 @@ fn sock(proxy: &super::TsiStreamProxy) -> SOCKET {
     proxy.fd.as_raw_socket() as SOCKET
 }
 
-pub(crate) fn recv_to_pkt(proxy: &super::TsiStreamProxy, pkt: &mut VsockPacket) -> RecvPkt {
+pub(crate) fn recv_to_pkt(
+    proxy: &super::TsiStreamProxy,
+    pkt: &mut VsockPacket,
+) -> io::Result<RecvPkt> {
     if let Some(buf) = pkt.buf_mut() {
         let peer_credit = proxy.peer_avail_credit();
         let max_len = std::cmp::min(buf.len(), peer_credit);
 
         if max_len == 0 {
-            return RecvPkt::WaitForCredit;
+            return Ok(RecvPkt::WaitForCredit);
         }
 
         let res = unsafe { recv(sock(proxy), buf.as_mut_ptr() as _, max_len as i32, 0) };
 
         if res > 0 {
-            RecvPkt::Read(res as usize)
+            Ok(RecvPkt::Read(res as usize))
         } else if res == 0 {
-            RecvPkt::Close
+            Ok(RecvPkt::Close)
         } else {
             let err = unsafe { WSAGetLastError() };
-            if err == WSAEWOULDBLOCK {
-                RecvPkt::Error
+            if err == WSAEWOULDBLOCK || err == WSAEINTR {
+                Ok(RecvPkt::Error)
+            } else if err == WSAESHUTDOWN
+                && proxy.peer_shutdown & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0
+            {
+                Ok(RecvPkt::Close)
             } else {
-                debug!("recv_to_pkt error: {err}");
-                RecvPkt::Error
+                Err(io::Error::from_raw_os_error(err))
             }
         }
     } else {
-        RecvPkt::Error
+        Ok(RecvPkt::Error)
     }
 }
 
@@ -190,7 +197,11 @@ pub(crate) fn do_connect(
             EventSet::OUT | EventSet::EDGE_TRIGGERED,
         ));
     } else if proxy.status == ProxyStatus::Connected {
-        update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::IN));
+        update.polling = Some((
+            proxy.id,
+            proxy.fd.as_raw_fd(),
+            EventSet::IN | EventSet::READ_HANG_UP,
+        ));
         proxy.push_connect_rsp(result);
     } else {
         proxy.push_connect_rsp(result);
@@ -287,6 +298,10 @@ pub(crate) fn update_peer_credit(
     proxy.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
     let mut update = ProxyUpdate::default();
 
+    if proxy.host_read_closed || proxy.status == ProxyStatus::Closed {
+        return update;
+    }
+
     // If we were deadlocked waiting for credit, and credit is now restored:
     if proxy.status == ProxyStatus::WaitingCreditUpdate && proxy.peer_avail_credit() > 0 {
         proxy.status = ProxyStatus::Connected;
@@ -295,7 +310,14 @@ pub(crate) fn update_peer_credit(
         let (signal_queue, wait_credit) = proxy.recv_pkt();
         update.signal_queue = signal_queue;
 
-        if wait_credit {
+        if proxy.status == ProxyStatus::Closed {
+            proxy.push_reset();
+            update.signal_queue = true;
+            update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+            update.remove_proxy = ProxyRemoval::Deferred;
+        } else if proxy.host_read_closed {
+            update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+        } else if wait_credit {
             // We immediately ran out of credit again. Suspend again and ask for more.
             proxy.status = ProxyStatus::WaitingCreditUpdate;
             let rx = MuxerRx::CreditRequest {
@@ -311,12 +333,20 @@ pub(crate) fn update_peer_credit(
             ));
         } else {
             // Successfully drained, safe to listen for the next edge
-            update.polling = Some((proxy.id, proxy.fd.as_raw_socket() as RawFd, EventSet::IN));
+            update.polling = Some((
+                proxy.id,
+                proxy.fd.as_raw_socket() as RawFd,
+                EventSet::IN | EventSet::READ_HANG_UP,
+            ));
         }
     } else {
         // Normal update (wasn't suspended)
         proxy.status = ProxyStatus::Connected;
-        update.polling = Some((proxy.id, proxy.fd.as_raw_socket() as RawFd, EventSet::IN));
+        update.polling = Some((
+            proxy.id,
+            proxy.fd.as_raw_socket() as RawFd,
+            EventSet::IN | EventSet::READ_HANG_UP,
+        ));
     }
 
     update
@@ -375,7 +405,11 @@ pub(crate) fn process_op_response(
     proxy.status = ProxyStatus::Connected;
 
     ProxyUpdate {
-        polling: Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::IN)),
+        polling: Some((
+            proxy.id,
+            proxy.fd.as_raw_fd(),
+            EventSet::IN | EventSet::READ_HANG_UP,
+        )),
         push_accept: Some((proxy.id, proxy.parent_id)),
         ..Default::default()
     }
@@ -401,7 +435,12 @@ pub(crate) fn do_shutdown(proxy: &mut super::TsiStreamProxy, pkt: &VsockPacket) 
 pub(crate) fn process_event(proxy: &mut super::TsiStreamProxy, evset: EventSet) -> ProxyUpdate {
     let mut update = ProxyUpdate::default();
 
-    if evset.contains(EventSet::HANG_UP) {
+    if evset.contains(EventSet::HANG_UP)
+        && !matches!(
+            proxy.status,
+            ProxyStatus::Connected | ProxyStatus::WaitingCreditUpdate
+        )
+    {
         if proxy.status == ProxyStatus::Connecting {
             proxy.push_connect_rsp(-111); // ECONNREFUSED
         } else {
@@ -418,7 +457,7 @@ pub(crate) fn process_event(proxy: &mut super::TsiStreamProxy, evset: EventSet) 
         return update;
     }
 
-    if evset.contains(EventSet::IN) {
+    if evset.intersects(EventSet::IN | EventSet::READ_HANG_UP | EventSet::HANG_UP) {
         if proxy.status == ProxyStatus::Connected {
             let (signal_queue, wait_credit) = proxy.recv_pkt();
             update.signal_queue = signal_queue || wait_credit;
@@ -437,8 +476,9 @@ pub(crate) fn process_event(proxy: &mut super::TsiStreamProxy, evset: EventSet) 
                 proxy.push_reset();
                 update.signal_queue = true;
                 update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+                update.remove_proxy = ProxyRemoval::Deferred;
                 return update;
-            } else if proxy.status == ProxyStatus::WaitingCreditUpdate {
+            } else if proxy.host_read_closed || proxy.status == ProxyStatus::WaitingCreditUpdate {
                 update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
             }
         } else if proxy.status == ProxyStatus::Listening
