@@ -664,7 +664,8 @@ mod tests {
         let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), mem_size)]).unwrap();
         let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
         let vcpu_list = Arc::new(VcpuList::new(1));
-        let vcpu = Vcpu::new_aarch64(1, GuestAddress(0), None, exit_evt, vcpu_list, false).unwrap();
+        let vcpu =
+            Vcpu::new_aarch64(1, 36, GuestAddress(0), None, exit_evt, vcpu_list, false).unwrap();
         (vcpu, gm)
     }
 
@@ -678,7 +679,8 @@ mod tests {
 
     #[test]
     fn test_vm_memory_init() {
-        let mut vm = Vm::new(false).expect("Cannot create new vm");
+        let mut mem_info = ArchMemoryInfo::default();
+        let mut vm = Vm::new(&mut mem_info, false).expect("Cannot create new vm");
 
         // Use a realistic guest physical address; hv_vm_map rejects GPA 0.
         let gm = GuestMemoryMmap::from_ranges(&[(
@@ -698,6 +700,7 @@ mod tests {
         let vcpu_list = Arc::new(VcpuList::new(1));
         let mut vcpu = Vcpu::new_aarch64(
             0,
+            36,
             GuestAddress(0),
             None,
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
@@ -711,6 +714,7 @@ mod tests {
         let vcpu_list = Arc::new(VcpuList::new(2));
         let mut vcpu = Vcpu::new_aarch64(
             1,
+            36,
             GuestAddress(0),
             None,
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
