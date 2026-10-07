@@ -18,6 +18,10 @@ It integrates a VMM (Virtual Machine Monitor, the userspace side of an Hyperviso
 > [`stable-*` release branch](https://github.com/libkrun/libkrun/branches)
 > instead.
 
+Custom Rust `AttachDevice` implementations now call `ctx.register(device)` rather
+than `ctx.register(id, device)`. Transport registration no longer uses string IDs.
+Guest identities and debug names remain unchanged.
+
 ## Use cases
 
 * [crun](https://github.com/containers/crun/blob/main/krun.1.md): Adding Virtualization-based isolation to container and confidential workloads.

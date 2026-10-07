@@ -274,6 +274,16 @@ mod tests {
         assert!(length > 36);
 
         assert!(bytes.len() > 100);
+        for name in [b"VR00", b"VR01"] {
+            assert_eq!(
+                bytes
+                    .windows(name.len())
+                    .filter(|window| *window == name)
+                    .count(),
+                1
+            );
+        }
+        assert!(!bytes.windows(4).any(|window| window == b"VR02"));
     }
 
     #[test]

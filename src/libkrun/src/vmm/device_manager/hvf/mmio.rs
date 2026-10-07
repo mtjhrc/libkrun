@@ -5,18 +5,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};
 
 use devices::DeviceType;
-use devices::fdt::DeviceInfoForFDT;
 use devices::legacy::IrqChip;
 use kernel::cmdline as kernel_cmdline;
 use polly::event_manager::EventManager;
 #[cfg(target_arch = "aarch64")]
 use utils::eventfd::EventFd;
 
+use crate::vmm::device_manager::MMIODeviceInfo;
 use crate::vmm::vstate::Vm;
 
 /// Errors for MMIO device manager.
@@ -71,7 +70,7 @@ pub struct MMIODeviceManager {
     mmio_base: u64,
     irq: u32,
     last_irq: u32,
-    id_to_dev_info: HashMap<(DeviceType, String), MMIODeviceInfo>,
+    device_info: Vec<(DeviceType, MMIODeviceInfo)>,
 }
 
 impl MMIODeviceManager {
@@ -86,7 +85,7 @@ impl MMIODeviceManager {
             irq: irq_interval.0,
             last_irq: irq_interval.1,
             bus: devices::Bus::new(),
-            id_to_dev_info: HashMap::new(),
+            device_info: Vec::new(),
         }
     }
 
@@ -95,7 +94,6 @@ impl MMIODeviceManager {
         &mut self,
         mut mmio_device: devices::virtio::MmioTransport,
         type_id: u32,
-        device_id: String,
     ) -> Result<(u64, u32)> {
         if self.irq > self.last_irq {
             return Err(Error::IrqsExhausted);
@@ -107,14 +105,14 @@ impl MMIODeviceManager {
             .insert(Arc::new(Mutex::new(mmio_device)), self.mmio_base, MMIO_LEN)
             .map_err(Error::BusError)?;
         let ret = (self.mmio_base, self.irq);
-        self.id_to_dev_info.insert(
-            (DeviceType::Virtio(type_id), device_id),
+        self.device_info.push((
+            DeviceType::Virtio(type_id),
             MMIODeviceInfo {
                 addr: self.mmio_base,
                 len: MMIO_LEN,
                 irq: self.irq,
             },
-        );
+        ));
         self.mmio_base += MMIO_LEN;
         self.irq += 1;
 
@@ -152,14 +150,14 @@ impl MMIODeviceManager {
             .map_err(Error::Cmdline)?;
 
         let ret = self.mmio_base;
-        self.id_to_dev_info.insert(
-            (DeviceType::Serial, DeviceType::Serial.to_string()),
+        self.device_info.push((
+            DeviceType::Serial,
             MMIODeviceInfo {
                 addr: ret,
                 len: MMIO_LEN,
                 irq: self.irq,
             },
-        );
+        ));
 
         self.mmio_base += MMIO_LEN;
         self.irq += 1;
@@ -183,14 +181,14 @@ impl MMIODeviceManager {
             .map_err(Error::BusError)?;
 
         let ret = self.mmio_base;
-        self.id_to_dev_info.insert(
-            (DeviceType::RTC, "rtc".to_string()),
+        self.device_info.push((
+            DeviceType::RTC,
             MMIODeviceInfo {
                 addr: ret,
                 len: MMIO_LEN,
                 irq: self.irq,
             },
-        );
+        ));
 
         self.mmio_base += MMIO_LEN;
         self.irq += 1;
@@ -231,14 +229,14 @@ impl MMIODeviceManager {
             .map_err(Error::BusError)?;
 
         let ret = self.mmio_base;
-        self.id_to_dev_info.insert(
-            (DeviceType::Gpio, DeviceType::Gpio.to_string()),
+        self.device_info.push((
+            DeviceType::Gpio,
             MMIODeviceInfo {
                 addr: ret,
                 len: MMIO_LEN,
                 irq: self.irq,
             },
-        );
+        ));
 
         self.mmio_base += MMIO_LEN;
         self.irq += 1;
@@ -267,29 +265,8 @@ impl MMIODeviceManager {
 
     #[cfg(target_arch = "aarch64")]
     /// Gets the information of the devices registered up to some point in time.
-    pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
-        &self.id_to_dev_info
-    }
-}
-
-/// Private structure for storing information about the MMIO device registered at some address on the bus.
-#[derive(Clone, Debug)]
-pub struct MMIODeviceInfo {
-    addr: u64,
-    irq: u32,
-    len: u64,
-}
-
-#[cfg(target_arch = "aarch64")]
-impl DeviceInfoForFDT for MMIODeviceInfo {
-    fn addr(&self) -> u64 {
-        self.addr
-    }
-    fn irq(&self) -> u32 {
-        self.irq
-    }
-    fn length(&self) -> u64 {
-        self.len
+    pub fn get_device_info(&self) -> &[(DeviceType, MMIODeviceInfo)] {
+        &self.device_info
     }
 }
 
@@ -313,13 +290,11 @@ mod tests {
             device: Arc<Mutex<dyn devices::virtio::VirtioDevice>>,
             _cmdline: &mut kernel_cmdline::Cmdline,
             type_id: u32,
-            device_id: &str,
         ) -> Result<u64> {
             let mmio_device =
                 devices::virtio::MmioTransport::new(guest_mem, DummyIrqChip::new().into(), device)
                     .unwrap();
-            let (mmio_base, _irq) =
-                self.register_mmio_device(mmio_device, type_id, device_id.to_string())?;
+            let (mmio_base, _irq) = self.register_mmio_device(mmio_device, type_id)?;
             Ok(mmio_base)
         }
     }
@@ -400,7 +375,7 @@ mod tests {
 
         assert!(
             device_manager
-                .register_virtio_device(guest_mem, dummy, &mut cmdline, 0, "dummy")
+                .register_virtio_device(guest_mem, dummy, &mut cmdline, 0)
                 .is_ok()
         );
     }
@@ -423,7 +398,6 @@ mod tests {
                     Arc::new(Mutex::new(DummyDevice::new())),
                     &mut cmdline,
                     0,
-                    "dummy1",
                 )
                 .unwrap();
         }
@@ -436,7 +410,6 @@ mod tests {
                         Arc::new(Mutex::new(DummyDevice::new())),
                         &mut cmdline,
                         0,
-                        "dummy2"
                     )
                     .unwrap_err()
             ),
@@ -498,21 +471,26 @@ mod tests {
         let mut device_manager =
             MMIODeviceManager::new(&mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
         let mut cmdline = kernel_cmdline::Cmdline::new(4096);
-        let dummy = Arc::new(Mutex::new(DummyDevice::new()));
-
-        let type_id = 0;
-        let id = String::from("foo");
-        if let Ok(addr) =
-            device_manager.register_virtio_device(guest_mem, dummy, &mut cmdline, type_id, &id)
-        {
-            assert_eq!(
-                addr,
-                device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())].addr
-            );
-            assert_eq!(
-                arch::IRQ_BASE,
-                device_manager.id_to_dev_info[&(DeviceType::Virtio(type_id), id.clone())].irq
-            );
+        for i in 0..2 {
+            let addr = device_manager
+                .register_virtio_device(
+                    guest_mem.clone(),
+                    Arc::new(Mutex::new(DummyDevice::new())),
+                    &mut cmdline,
+                    0,
+                )
+                .unwrap();
+            let (device_type, info) = &device_manager.get_device_info()[i];
+            assert_eq!(*device_type, DeviceType::Virtio(0));
+            assert_eq!(info.addr, addr);
+            assert_eq!(info.irq, arch::IRQ_BASE + i as u32);
+            assert_eq!(info.len, MMIO_LEN);
+            assert!(device_manager.bus.get_device(addr).is_some());
         }
+        assert_eq!(device_manager.get_device_info().len(), 2);
+        assert_eq!(
+            device_manager.get_device_info()[1].1.addr,
+            device_manager.get_device_info()[0].1.addr + MMIO_LEN
+        );
     }
 }

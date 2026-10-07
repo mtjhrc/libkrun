@@ -5,7 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::{io, result};
 
@@ -74,7 +73,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     arch_memory_info: &ArchMemoryInfo,
     vcpu_mpidr: Vec<u64>,
     cmdline: &str,
-    device_info: &HashMap<(DeviceType, String), T>,
+    device_info: &[(DeviceType, T)],
     gic_device: &IrqChip,
     initrd: &Option<InitrdConfig>,
 ) -> Result<Vec<u8>> {
@@ -192,7 +191,7 @@ fn create_chosen_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut FdtWriter,
     cmdline: &str,
     initrd: &Option<InitrdConfig>,
-    dev_info: &HashMap<(DeviceType, String), T>,
+    dev_info: &[(DeviceType, T)],
 ) -> Result<()> {
     let chosen_node = fdt.begin_node("chosen")?;
     fdt.property_string("bootargs", cmdline)?;
@@ -200,10 +199,12 @@ fn create_chosen_node<T: DeviceInfoForFDT + Clone + Debug>(
     // If we have a legacy serial device, tell the guest this is the default console.
     // Clever guests will still switch to a better console (like virtio-console) if
     // it becomes available later, and this gives us a good fallback.
-    for ((device_type, _device_id), info) in dev_info {
-        if device_type == &DeviceType::Serial {
-            fdt.property_string("stdout-path", &format!("/uart@{:x}", info.addr()))?;
-        }
+    if let Some((_, info)) = dev_info
+        .iter()
+        .rev()
+        .find(|(device_type, _)| *device_type == DeviceType::Serial)
+    {
+        fdt.property_string("stdout-path", &format!("/uart@{:x}", info.addr()))?;
     }
 
     if let Some(initrd_config) = initrd {
@@ -416,14 +417,14 @@ fn create_gpio_node<T: DeviceInfoForFDT + Clone + Debug>(
     Ok(())
 }
 
-fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
+pub(super) fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut FdtWriter,
-    dev_info: &HashMap<(DeviceType, String), T>,
+    dev_info: &[(DeviceType, T)],
 ) -> Result<()> {
     // Create one temp Vec to store all virtio devices
     let mut ordered_virtio_device: Vec<&T> = Vec::new();
 
-    for ((device_type, _device_id), info) in dev_info {
+    for (device_type, info) in dev_info {
         match device_type {
             DeviceType::Gpio => create_gpio_node(fdt, info)?,
             DeviceType::RTC => create_rtc_node(fdt, info)?,
@@ -441,4 +442,49 @@ fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    struct SerialInfo(u64);
+
+    impl DeviceInfoForFDT for SerialInfo {
+        fn addr(&self) -> u64 {
+            self.0
+        }
+
+        fn irq(&self) -> u32 {
+            32
+        }
+
+        fn length(&self) -> u64 {
+            0x1000
+        }
+    }
+
+    #[test]
+    fn chosen_uses_last_registered_serial() {
+        let devices = [
+            (DeviceType::Serial, SerialInfo(0xd000_0000)),
+            (DeviceType::Serial, SerialInfo(0xd000_1000)),
+        ];
+        let mut fdt = FdtWriter::new().unwrap();
+        let root = fdt.begin_node("").unwrap();
+        create_chosen_node(&mut fdt, "", &None, &devices).unwrap();
+        fdt.end_node(root).unwrap();
+        let bytes = fdt.finish().unwrap();
+        assert!(
+            bytes
+                .windows(b"/uart@d0001000\0".len())
+                .any(|window| window == b"/uart@d0001000\0")
+        );
+        assert!(
+            !bytes
+                .windows(b"/uart@d0000000\0".len())
+                .any(|window| window == b"/uart@d0000000\0")
+        );
+    }
 }

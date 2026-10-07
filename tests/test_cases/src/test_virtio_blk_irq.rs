@@ -42,19 +42,24 @@ mod host {
             #[cfg(feature = "dynamic-linking")]
             require_symbols().unwrap();
 
-            let disk_path = test_setup.tmp_dir.join("disk.raw");
-            File::create(&disk_path)?.set_len(DISK_SIZE)?;
-
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             let stderr = std::io::stderr();
             let init_config = build_init_config(&test_setup.test_case, &[]);
             let (mut devices, payload) =
                 setup_standard_devices(&test_setup, &init_config, &stdin, &stdout, &stderr)?;
-            devices.add(
-                krun::BlockDevice::new("vda", disk_path.to_str().unwrap(), krun::DiskFormat::Raw)
+            for i in 0..2 {
+                let disk_path = test_setup.tmp_dir.join(format!("disk{i}.raw"));
+                File::create(&disk_path)?.set_len(DISK_SIZE)?;
+                devices.add(
+                    krun::BlockDevice::new(
+                        "shared-id",
+                        disk_path.to_str().unwrap(),
+                        krun::DiskFormat::Raw,
+                    )
                     .map_err(|e| anyhow::anyhow!("BlockDevice: {e:?}"))?,
-            );
+                );
+            }
 
             let vmm = krun::VmmBuilder::new()
                 .vcpus(2)
@@ -80,6 +85,7 @@ mod guest {
     use crate::Test;
 
     use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+    use std::fs;
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::fs::OpenOptionsExt;
@@ -97,11 +103,6 @@ mod guest {
             const BLOCK_COUNT: usize = 256;
             const PASSES: usize = 3;
 
-            let mut disk = OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_DIRECT)
-                .open("/dev/vda")
-                .expect("open /dev/vda");
             let layout = Layout::from_size_align(BLOCK_SIZE, 4096).unwrap();
             let ptr = unsafe { alloc_zeroed(layout) };
             if ptr.is_null() {
@@ -109,10 +110,23 @@ mod guest {
             }
             let buffer = unsafe { slice::from_raw_parts_mut(ptr, BLOCK_SIZE) };
 
-            for _ in 0..PASSES {
-                disk.seek(SeekFrom::Start(0)).expect("seek /dev/vda");
-                for _ in 0..BLOCK_COUNT {
-                    disk.read_exact(buffer).expect("direct read from /dev/vda");
+            for device in ["vda", "vdb"] {
+                assert_eq!(
+                    fs::read_to_string(format!("/sys/block/{device}/serial"))
+                        .unwrap()
+                        .trim(),
+                    "shared-id",
+                );
+                let mut disk = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(nix::libc::O_DIRECT)
+                    .open(format!("/dev/{device}"))
+                    .expect("open disk");
+                for _ in 0..PASSES {
+                    disk.seek(SeekFrom::Start(0)).expect("seek disk");
+                    for _ in 0..BLOCK_COUNT {
+                        disk.read_exact(buffer).expect("direct read from disk");
+                    }
                 }
             }
 
