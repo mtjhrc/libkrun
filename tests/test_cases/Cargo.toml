@@ -12,10 +12,12 @@ dynamic-linking = [
     "krun-cdylib",
     "krun-cdylib/blk",
     "krun-cdylib/net",
+    "krun-cdylib/input",
     "krun-cdylib/ffier-dynlookup",
     "krun-init-cdylib",
     "krun-init-cdylib/ffier-strong",
 ]
+input = ["krun?/input", "krun-cdylib?/input"]
 guest = []
 
 [lib]

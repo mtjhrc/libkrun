@@ -14,6 +14,20 @@ KRUN_TEST_FFI=1 \
   ./run.sh test
 ```
 
+The virtio input test checks guest evdev configuration and signed events from
+owned callback backends. Run it through the native Rust API and generated FFI
+client with:
+
+```bash
+make test INPUT=1 TEST=virtio-input
+make test INPUT=1 FFI=1 TEST=virtio-input
+```
+
+When invoking `run.sh` directly, set `KRUN_TEST_INPUT=1` to enable input in the
+native runner, and `KRUN_TEST_FFI=1` to use the generated client. The library must
+also be built with the matching features. Linux guests need virtio-input and
+evdev support in their kernel.
+
 ## Running on macOS
 
 ### Prerequisites

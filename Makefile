@@ -348,10 +348,10 @@ endif
 
 ifeq ($(FFI),1)
 test: $(TEST_PREFIX)
-	cd tests; RUST_LOG=trace KRUN_TEST_FFI=$(FFI) LIBKRUN_LIB_PATH="$$(realpath ../$(TEST_PREFIX)/$(LIBDIR_$(OS)))/:$(EXTRA_LIBPATH_$(OS))" PKG_CONFIG_PATH="$$(realpath ../$(TEST_PREFIX)/$(LIBDIR_$(OS))/pkgconfig/)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
+	cd tests; RUST_LOG=trace KRUN_TEST_FFI=$(FFI) KRUN_TEST_INPUT=$(INPUT) LIBKRUN_LIB_PATH="$$(realpath ../$(TEST_PREFIX)/$(LIBDIR_$(OS)))/:$(EXTRA_LIBPATH_$(OS))" PKG_CONFIG_PATH="$$(realpath ../$(TEST_PREFIX)/$(LIBDIR_$(OS))/pkgconfig/)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
 else
 # Static-linking test run: the runner links libkrun at compile time, so no
 # libkrun build/install into $(TEST_PREFIX) is needed (and libkrun.so is not built).
 test: $(TEST_STATIC_DEPS)
-	cd tests; RUST_LOG=trace KRUN_TEST_FFI=$(FFI) LIBKRUN_LIB_PATH="$(TEST_LIBPATH)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
+	cd tests; RUST_LOG=trace KRUN_TEST_FFI=$(FFI) KRUN_TEST_INPUT=$(INPUT) LIBKRUN_LIB_PATH="$(TEST_LIBPATH)" ./run.sh test --test-case "$(TEST)" $(TEST_FLAGS)
 endif
