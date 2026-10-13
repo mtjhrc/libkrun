@@ -125,13 +125,16 @@ jobs:
         uses: ./.github/actions/setup-build-env
 
       - name: Install ffier-gen-c-header
-        run: cargo install --git https://github.com/mtjhrc/ffier.git --tag v0.3.0 --locked ffier-gen-c-header
+        run: cargo install --git https://github.com/mtjhrc/ffier.git --rev d86e632d00f4f8071589eeb5dac38b796c4ad73d --locked ffier-gen-c-header
 
       - name: Regenerate libkrun bindings
         run: make gen-libkrun-bindings
 
       - name: Regenerate init-blob bindings
         run: make gen-init-blob-bindings
+
+      - name: Test generated input callbacks
+        run: cargo test --locked --manifest-path bindings/libkrun-via-libc/Cargo.toml --features ffier-dynlookup --test input_backend -- --ignored
 
       - name: Verify libkrun bindings are up to date
         run: |

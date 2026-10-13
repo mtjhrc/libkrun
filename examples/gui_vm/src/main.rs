@@ -136,24 +136,6 @@ fn krun_thread(
     krun::init_log(target, level, style, krun::LogOptions::empty())
         .map_err(|e| anyhow::anyhow!("init_log: {e}"))?;
 
-    // Build init configuration.
-    let exec = args.executable.as_ref().unwrap().to_str().unwrap();
-    let argv_strs: Vec<&str> = args.argv.iter().map(|a| a.to_str().unwrap()).collect();
-    let mut full_argv: Vec<&str> = vec![exec];
-    full_argv.extend_from_slice(&argv_strs);
-    let init_config = krun_init::Config::builder().args(&full_argv).build();
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let stderr = io::stderr();
-
-    let input_files = args
-        .input
-        .iter()
-        .map(|input| {
-            File::open(input).with_context(|| format!("Failed to open input device {input:?}"))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
     let root_dir = args
         .root_dir
         .to_str()
@@ -177,6 +159,9 @@ fn krun_thread(
         .map_err(|e| anyhow::anyhow!("Config::apply: {e}"))?;
     rootfs.set_overlay(overlay);
 
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let stderr = io::stderr();
     let mut console_builder = krun::ConsoleDevice::builder();
     console_builder
         .add_default_console(
@@ -210,6 +195,14 @@ fn krun_thread(
         };
         display_backend.add_display(display_builder);
     }
+
+    let input_files = args
+        .input
+        .iter()
+        .map(|input| {
+            File::open(input).with_context(|| format!("Failed to open input device {input:?}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let mut devices = krun::MmioDeviceManager::new();
     devices.add(rootfs);
@@ -269,13 +262,7 @@ fn krun_thread(
         let config_backend = handle.get_config();
         let event_provider_backend = handle.get_events();
 
-        let input_device = krun::InputDevice::new(
-            &raw const config_backend as *const std::ffi::c_void,
-            std::mem::size_of_val(&config_backend),
-            &raw const event_provider_backend as *const std::ffi::c_void,
-            std::mem::size_of_val(&event_provider_backend),
-        )
-        .map_err(|e| anyhow::anyhow!("InputDevice::new: {e}"))?;
+        let input_device = krun::InputDevice::new(config_backend, event_provider_backend);
         devices.add(input_device);
     }
 

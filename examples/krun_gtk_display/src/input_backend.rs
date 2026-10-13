@@ -1,10 +1,12 @@
+use crate::TouchScreenOptions;
 use crate::input_constants::*;
-use crate::{TouchScreenOptions, input_constants};
-use krun_input::{
+use krun::{
     InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent as KrunInputEvent, InputEventType,
-    InputEventsImpl, InputQueryConfig, ObjectNew, write_bitmap,
+    InputEventsImpl, InputQueryConfig,
 };
-use std::cmp::max;
+use krun_input::write_bitmap;
+use std::cmp::{max, min};
+use std::io::ErrorKind;
 use std::os::fd::{AsFd, BorrowedFd};
 use utils::pollable_channel::PollableChannelReciever;
 
@@ -41,11 +43,9 @@ pub struct GtkInputEventProvider {
     rx: PollableChannelReciever<KrunInputEvent>,
 }
 
-impl ObjectNew<PollableChannelReciever<KrunInputEvent>> for GtkInputEventProvider {
-    fn new(userdata: Option<&PollableChannelReciever<KrunInputEvent>>) -> Self {
-        Self {
-            rx: userdata.expect("GtkInputEvents requires receiver").clone(),
-        }
+impl GtkInputEventProvider {
+    pub fn new(rx: PollableChannelReciever<KrunInputEvent>) -> Self {
+        Self { rx }
     }
 }
 
@@ -58,106 +58,42 @@ impl InputEventsImpl for GtkInputEventProvider {
         match self.rx.try_recv() {
             Ok(Some(event)) => Ok(Some(event)),
             Ok(None) => Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(_) => Err(InputBackendError::InternalError),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(_) => Err(InputBackendError::InternalError()),
         }
-    }
-}
-
-#[derive(Clone)]
-pub struct GtkKeyboardConfig;
-
-impl ObjectNew<()> for GtkKeyboardConfig {
-    fn new(_userdata: Option<&()>) -> Self {
-        Self
-    }
-}
-
-impl InputQueryConfig for GtkKeyboardConfig {
-    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
-        let copy_len = std::cmp::min(KEYBOARD_DEVICE_NAME.len(), name_buf.len());
-        name_buf[..copy_len].copy_from_slice(&KEYBOARD_DEVICE_NAME[..copy_len]);
-        Ok(copy_len as u8)
-    }
-
-    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
-        let copy_len = std::cmp::min(KEYBOARD_SERIAL_NAME.len(), name_buf.len());
-        name_buf[..copy_len].copy_from_slice(&KEYBOARD_SERIAL_NAME[..copy_len]);
-        Ok(copy_len as u8)
-    }
-
-    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
-        *ids = InputDeviceIds {
-            bustype: BUS_VIRTUAL,
-            vendor: KRUN_VENDOR_ID,
-            product: KEYBOARD_PRODUCT_ID,
-            version: 1,
-        };
-        Ok(())
-    }
-
-    fn query_event_capabilities(
-        &self,
-        event_type: u8,
-        bitmap_buf: &mut [u8],
-    ) -> Result<u8, InputBackendError> {
-        let event_type_enum = InputEventType::try_from(event_type as u16)
-            .map_err(|_| InputBackendError::InvalidParam)?;
-        match event_type_enum {
-            InputEventType::Syn => {
-                let key_events = write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS);
-                let rep_events = write_bitmap(bitmap_buf, &[/*REP_DELAY, REP_PERIOD*/]);
-                Ok(max(key_events, rep_events))
-            }
-            InputEventType::Key => Ok(write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS)),
-            InputEventType::Rep => Ok(write_bitmap(bitmap_buf, &[/*REP_DELAY, REP_PERIOD*/])),
-            _ => Ok(0),
-        }
-    }
-
-    fn query_abs_info(
-        &self,
-        _abs_axis: u8,
-        _abs_info: &mut InputAbsInfo,
-    ) -> Result<(), InputBackendError> {
-        Ok(())
-    }
-
-    fn query_properties(&self, bitmap: &mut [u8]) -> Result<u8, InputBackendError> {
-        Ok(write_bitmap(bitmap, &[]))
     }
 }
 
 pub const MAX_FINGERS: usize = 16;
 
 #[derive(Clone)]
-pub struct GtkTouchscreenConfig {
-    options: TouchScreenOptions,
+pub enum GtkInputConfig {
+    Keyboard,
+    TouchScreen(TouchScreenOptions),
 }
 
-impl ObjectNew<TouchScreenOptions> for GtkTouchscreenConfig {
-    fn new(userdata: Option<&TouchScreenOptions>) -> Self {
-        Self {
-            options: userdata.expect("Missing userdata").clone(),
-        }
-    }
-}
-
-impl InputQueryConfig for GtkTouchscreenConfig {
+impl InputQueryConfig for GtkInputConfig {
     fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
-        let name = self
-            .options
-            .device_name
-            .as_deref()
-            .unwrap_or(std::str::from_utf8(TOUCHSCREEN_DEVICE_NAME).unwrap());
-        let copy_len = std::cmp::min(name.len(), name_buf.len());
-        name_buf[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+        let name = match self {
+            Self::Keyboard => KEYBOARD_DEVICE_NAME,
+            Self::TouchScreen(options) => options
+                .device_name
+                .as_deref()
+                .map(str::as_bytes)
+                .unwrap_or(TOUCHSCREEN_DEVICE_NAME),
+        };
+        let copy_len = min(name.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&name[..copy_len]);
         Ok(copy_len as u8)
     }
 
     fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
-        let copy_len = std::cmp::min(TOUCHSCREEN_SERIAL_NAME.len(), name_buf.len());
-        name_buf[..copy_len].copy_from_slice(&TOUCHSCREEN_SERIAL_NAME[..copy_len]);
+        let name = match self {
+            Self::Keyboard => KEYBOARD_SERIAL_NAME,
+            Self::TouchScreen(_) => TOUCHSCREEN_SERIAL_NAME,
+        };
+        let copy_len = min(name.len(), name_buf.len());
+        name_buf[..copy_len].copy_from_slice(&name[..copy_len]);
         Ok(copy_len as u8)
     }
 
@@ -165,7 +101,10 @@ impl InputQueryConfig for GtkTouchscreenConfig {
         *ids = InputDeviceIds {
             bustype: BUS_VIRTUAL,
             vendor: KRUN_VENDOR_ID,
-            product: TOUCHSCREEN_PRODUCT_ID,
+            product: match self {
+                Self::Keyboard => KEYBOARD_PRODUCT_ID,
+                Self::TouchScreen(_) => TOUCHSCREEN_PRODUCT_ID,
+            },
             version: 1,
         };
         Ok(())
@@ -176,20 +115,43 @@ impl InputQueryConfig for GtkTouchscreenConfig {
         event_type: u8,
         bitmap_buf: &mut [u8],
     ) -> Result<u8, InputBackendError> {
-        let event_type_enum = InputEventType::try_from(event_type as u16)
-            .map_err(|_| InputBackendError::InvalidParam)?;
+        let event_type = [
+            InputEventType::Syn,
+            InputEventType::Key,
+            InputEventType::Rel,
+            InputEventType::Abs,
+            InputEventType::Msc,
+            InputEventType::Sw,
+            InputEventType::Led,
+            InputEventType::Snd,
+            InputEventType::Rep,
+        ]
+        .into_iter()
+        .find(|candidate| *candidate as u8 == event_type)
+        .ok_or_else(InputBackendError::InvalidParam)?;
 
-        match event_type_enum {
-            InputEventType::Key if self.options.emit_non_mt => {
+        match (self, event_type) {
+            (Self::Keyboard, InputEventType::Syn) => {
+                let key_events = write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS);
+                let rep_events = write_bitmap(bitmap_buf, &[/*REP_DELAY, REP_PERIOD*/]);
+                Ok(max(key_events, rep_events))
+            }
+            (Self::Keyboard, InputEventType::Key) => {
+                Ok(write_bitmap(bitmap_buf, SUPPORTED_KEYBOARD_KEYS))
+            }
+            (Self::Keyboard, InputEventType::Rep) => {
+                Ok(write_bitmap(bitmap_buf, &[/*REP_DELAY, REP_PERIOD*/]))
+            }
+            (Self::TouchScreen(options), InputEventType::Key) if options.emit_non_mt => {
                 Ok(write_bitmap(bitmap_buf, &[BTN_TOUCH]))
             }
-            InputEventType::Abs => {
-                let bitmap_len1 = if self.options.emit_non_mt {
+            (Self::TouchScreen(options), InputEventType::Abs) => {
+                let bitmap_len1 = if options.emit_non_mt {
                     write_bitmap(bitmap_buf, &[ABS_X, ABS_Y])
                 } else {
                     0
                 };
-                let bitmap_len2 = if self.options.emit_mt {
+                let bitmap_len2 = if options.emit_mt {
                     write_bitmap(
                         bitmap_buf,
                         &[
@@ -213,17 +175,20 @@ impl InputQueryConfig for GtkTouchscreenConfig {
         abs_axis: u8,
         abs_info: &mut InputAbsInfo,
     ) -> Result<(), InputBackendError> {
+        let Self::TouchScreen(options) = self else {
+            return Ok(());
+        };
         match abs_axis as u16 {
-            input_constants::ABS_MT_SLOT => {
+            ABS_MT_SLOT => {
                 *abs_info = InputAbsInfo {
                     min: 0,
-                    max: MAX_FINGERS as u32,
+                    max: MAX_FINGERS as i32,
                     fuzz: 0,
                     flat: 0,
                     res: 0,
                 };
             }
-            input_constants::ABS_MT_TOOL_TYPE => {
+            ABS_MT_TOOL_TYPE => {
                 *abs_info = InputAbsInfo {
                     min: 0,
                     max: 2,
@@ -232,22 +197,22 @@ impl InputQueryConfig for GtkTouchscreenConfig {
                     res: 0,
                 };
             }
-            input_constants::ABS_MT_POSITION_X if self.options.emit_mt => {
-                *abs_info = self.options.area.x.into();
+            ABS_MT_POSITION_X if options.emit_mt => {
+                *abs_info = options.area.x.into();
             }
-            input_constants::ABS_MT_POSITION_Y if self.options.emit_mt => {
-                *abs_info = self.options.area.y.into();
+            ABS_MT_POSITION_Y if options.emit_mt => {
+                *abs_info = options.area.y.into();
             }
-            input_constants::ABS_X if self.options.emit_non_mt => {
-                *abs_info = self.options.area.x.into();
+            ABS_X if options.emit_non_mt => {
+                *abs_info = options.area.x.into();
             }
-            input_constants::ABS_Y if self.options.emit_non_mt => {
-                *abs_info = self.options.area.y.into();
+            ABS_Y if options.emit_non_mt => {
+                *abs_info = options.area.y.into();
             }
-            input_constants::ABS_MT_TRACKING_ID => {
+            ABS_MT_TRACKING_ID => {
                 *abs_info = InputAbsInfo {
                     min: 0,
-                    max: u16::MAX as u32,
+                    max: u16::MAX as i32,
                     fuzz: 0,
                     flat: 0,
                     res: 0,
@@ -259,6 +224,10 @@ impl InputQueryConfig for GtkTouchscreenConfig {
     }
 
     fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError> {
-        Ok(write_bitmap(properties, &[INPUT_PROP_DIRECT]))
+        let active = match self {
+            Self::Keyboard => &[][..],
+            Self::TouchScreen(_) => &[INPUT_PROP_DIRECT][..],
+        };
+        Ok(write_bitmap(properties, active))
     }
 }

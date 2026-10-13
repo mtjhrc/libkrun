@@ -1,24 +1,31 @@
 use krun_input::{
     InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent, InputEventsImpl, InputQueryConfig,
-    ObjectNew,
 };
 use nix::fcntl::{F_GETFL, F_SETFL, OFlag, fcntl};
 use nix::{errno::Errno, ioctl_read, ioctl_read_buf, unistd};
-use std::mem;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::{io, mem, slice};
 
 /// Internal passthrough input backend that forwards host /dev/input/* devices
-pub struct PassthroughInputBackend<'a> {
-    fd: BorrowedFd<'a>,
+pub struct PassthroughInputBackend {
+    fd: OwnedFd,
 }
 
-impl InputQueryConfig for PassthroughInputBackend<'_> {
+impl PassthroughInputBackend {
+    pub fn new(fd: BorrowedFd<'_>) -> io::Result<Self> {
+        let fd = fd.try_clone_to_owned()?;
+        make_non_blocking(&fd)?;
+        Ok(Self { fd })
+    }
+}
+
+impl InputQueryConfig for PassthroughInputBackend {
     fn query_serial_name(&self, serial_buf: &mut [u8]) -> Result<u8, InputBackendError> {
         match unsafe { eviocguniq(self.fd.as_raw_fd(), serial_buf) } {
             Ok(len) => Ok(len as u8),
             Err(e) => {
                 error!("Failed to get device serial (eviocguniq): {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
@@ -28,7 +35,7 @@ impl InputQueryConfig for PassthroughInputBackend<'_> {
             Ok(len) => Ok(len as u8),
             Err(e) => {
                 error!("Failed to get device name (eviocgname): {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
@@ -38,7 +45,7 @@ impl InputQueryConfig for PassthroughInputBackend<'_> {
             Ok(_) => Ok(()),
             Err(e) => {
                 error!("Failed to get device information ids (eviocgid): {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
@@ -59,7 +66,7 @@ impl InputQueryConfig for PassthroughInputBackend<'_> {
             }
             Err(e) => {
                 error!("Failed to get device event capabilities (eviocgbit): {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
@@ -83,7 +90,7 @@ impl InputQueryConfig for PassthroughInputBackend<'_> {
             }
             Err(e) => {
                 error!("Failed to get device abs_info (eviocgabs): {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
@@ -93,39 +100,27 @@ impl InputQueryConfig for PassthroughInputBackend<'_> {
             Ok(len) => Ok(len as u8),
             Err(e) => {
                 error!("Failed to query device properties (eviocgprop): {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
 }
 
-impl<'a> ObjectNew<BorrowedFd<'a>> for PassthroughInputBackend<'a> {
-    fn new(userdata: Option<&BorrowedFd<'a>>) -> Self {
-        let fd = userdata
-            .copied()
-            .expect("Missing argument for PassthroughInputBackend::new");
-
-        make_non_blocking(&fd)
-            .expect("Cannot make device fd non-blocking (Invalid file descriptor?)");
-        Self { fd }
-    }
-}
-
-impl InputEventsImpl for PassthroughInputBackend<'_> {
+impl InputEventsImpl for PassthroughInputBackend {
     fn get_read_notify_fd(&self) -> Result<BorrowedFd<'_>, InputBackendError> {
-        Ok(self.fd)
+        Ok(self.fd.as_fd())
     }
 
     fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError> {
-        let mut linux_event = unsafe { std::mem::zeroed::<LinuxInputEvent>() };
+        let mut linux_event = unsafe { mem::zeroed::<LinuxInputEvent>() };
         let event_slice = unsafe {
-            std::slice::from_raw_parts_mut(
+            slice::from_raw_parts_mut(
                 &mut linux_event as *mut _ as *mut u8,
                 size_of::<LinuxInputEvent>(),
             )
         };
 
-        match unistd::read(self.fd, event_slice) {
+        match unistd::read(&self.fd, event_slice) {
             Ok(bytes_read) if bytes_read == size_of::<LinuxInputEvent>() => {
                 trace!("Forwarding input: {linux_event:?}");
                 Ok(Some(InputEvent {
@@ -136,12 +131,12 @@ impl InputEventsImpl for PassthroughInputBackend<'_> {
             }
             Ok(_bytes_read) => {
                 error!("Partial read from /dev/input was unexpected, not implemented!");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
             Err(Errno::EAGAIN) => Ok(None),
             Err(e) => {
                 error!("Failed to read event from input device: {e}");
-                Err(InputBackendError::InternalError)
+                Err(InputBackendError::InternalError())
             }
         }
     }
@@ -153,18 +148,18 @@ struct LinuxInputEvent {
     time: libc::timeval,
     type_: u16,
     code: u16,
-    value: u32,
+    value: i32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default)]
 struct LinuxAbsInfo {
-    value: u32,
-    minimum: u32,
-    maximum: u32,
-    fuzz: u32,
-    flat: u32,
-    resolution: u32,
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
 }
 
 ioctl_read!(eviocgid, b'E', 0x02, InputDeviceIds); // Kernel uapi struct is the same as virtio
@@ -208,4 +203,40 @@ fn find_length(bytes: &[u8]) -> usize {
         .rposition(|b| *b != 0)
         .map(|idx| idx + 1)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owns_duplicate_and_preserves_signed_events() {
+        let (read_fd, write_fd) = unistd::pipe().unwrap();
+        let mut backend = PassthroughInputBackend::new(read_fd.as_fd()).unwrap();
+        assert_ne!(backend.fd.as_raw_fd(), read_fd.as_raw_fd());
+        drop(read_fd);
+        assert!(backend.next_event().unwrap().is_none());
+
+        let event = LinuxInputEvent {
+            time: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            type_: 2,
+            code: 0,
+            value: -42,
+        };
+        let bytes = unsafe {
+            slice::from_raw_parts(
+                &event as *const _ as *const u8,
+                size_of::<LinuxInputEvent>(),
+            )
+        };
+        assert_eq!(unistd::write(&write_fd, bytes).unwrap(), bytes.len());
+        let received = backend.next_event().unwrap().unwrap();
+        assert_eq!(received.type_, 2);
+        assert_eq!(received.code, 0);
+        assert_eq!(received.value, -42);
+        assert!(backend.next_event().unwrap().is_none());
+    }
 }

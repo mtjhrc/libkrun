@@ -63,7 +63,7 @@ Binding generation and C ABI export are gated behind the `ffi` feature:
 Install the `ffier-gen-c-header` binary:
 
 ```bash
-cargo install --git https://github.com/mtjhrc/ffier.git --tag v0.3.0 --locked ffier-gen-c-header
+cargo install --git https://github.com/mtjhrc/ffier.git --rev d86e632d00f4f8071589eeb5dac38b796c4ad73d --locked ffier-gen-c-header
 ```
 
 ### C Header Feature Guards

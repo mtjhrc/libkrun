@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "ffier"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 dependencies = [
  "ffier-bridge",
  "ffier-builtins",
@@ -375,7 +375,7 @@ dependencies = [
 [[package]]
 name = "ffier-bridge"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 dependencies = [
  "ffier-rt",
 ]
@@ -383,7 +383,7 @@ dependencies = [
 [[package]]
 name = "ffier-builtins"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 dependencies = [
  "ffier-impl",
  "ffier-rt",
@@ -392,7 +392,7 @@ dependencies = [
 [[package]]
 name = "ffier-gen-rust-client"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 dependencies = [
  "ffier-schema",
  "serde_json",
@@ -401,7 +401,7 @@ dependencies = [
 [[package]]
 name = "ffier-impl"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 dependencies = [
  "ffier-schema",
  "proc-macro2",
@@ -413,12 +413,12 @@ dependencies = [
 [[package]]
 name = "ffier-rt"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 
 [[package]]
 name = "ffier-schema"
 version = "0.3.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=d86e632d00f4f8071589eeb5dac38b796c4ad73d#d86e632d00f4f8071589eeb5dac38b796c4ad73d"
 dependencies = [
  "serde",
  "serde_json",
@@ -774,11 +774,7 @@ dependencies = [
 name = "krun-input"
 version = "0.1.0"
 dependencies = [
- "bindgen",
- "bitflags 2.11.0",
- "libc",
- "log",
- "static_assertions",
+ "ffier",
  "thiserror 2.0.18",
 ]
 

@@ -22,10 +22,10 @@ tee = []
 aws-nitro = []
 
 [build-dependencies]
-ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", tag = "v0.3.0" }
+ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "d86e632d00f4f8071589eeb5dac38b796c4ad73d" }
 pkg-config = "0.3"
 
 [dependencies]
 bitflags = "2"
-ffier = { git = "https://github.com/mtjhrc/ffier.git", tag = "v0.3.0" }
+ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "d86e632d00f4f8071589eeb5dac38b796c4ad73d" }
 libloading = { version = "0.8", optional = true }

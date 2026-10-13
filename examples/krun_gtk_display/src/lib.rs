@@ -5,13 +5,12 @@ mod input_constants;
 mod scanout_paintable;
 
 use crate::display_worker::DisplayWorker;
-use crate::input_backend::{GtkInputEventProvider, GtkKeyboardConfig, GtkTouchscreenConfig};
+use crate::input_backend::{GtkInputConfig, GtkInputEventProvider};
 use anyhow::Context;
 pub use display_backend::DisplayEvent;
 pub use display_backend::GtkDisplayBackend;
+use krun::{InputAbsInfo, InputEvent, InputEventsImpl, InputQueryConfig};
 use krun_display::{DisplayBackend, IntoDisplayBackend};
-use krun_input::{InputAbsInfo, InputConfigBackend, InputEventProviderBackend};
-use krun_input::{InputEvent, IntoInputConfig, IntoInputEvents};
 use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender, pollable_channel};
 
 pub struct DisplayBackendHandle {
@@ -24,35 +23,25 @@ impl DisplayBackendHandle {
     }
 }
 
-pub enum InputBackendHandleConfig {
-    Keyboard,
-    TouchScreen(TouchScreenOptions),
-}
-
 pub struct InputBackendHandle {
     rx: PollableChannelReciever<InputEvent>,
-    input_config: InputBackendHandleConfig,
+    input_config: GtkInputConfig,
 }
 
 impl InputBackendHandle {
-    fn new(rx: PollableChannelReciever<InputEvent>, device_type: InputBackendHandleConfig) -> Self {
+    fn new(rx: PollableChannelReciever<InputEvent>, device_type: GtkInputConfig) -> Self {
         Self {
             rx,
             input_config: device_type,
         }
     }
 
-    pub fn get_events(&self) -> InputEventProviderBackend<'_> {
-        GtkInputEventProvider::into_input_events(Some(&self.rx))
+    pub fn get_events(&self) -> impl InputEventsImpl + 'static {
+        GtkInputEventProvider::new(self.rx.clone())
     }
 
-    pub fn get_config(&self) -> InputConfigBackend<'_> {
-        match self.input_config {
-            InputBackendHandleConfig::Keyboard => GtkKeyboardConfig::into_input_config(None),
-            InputBackendHandleConfig::TouchScreen(ref options) => {
-                GtkTouchscreenConfig::into_input_config(Some(options))
-            }
-        }
+    pub fn get_config(&self) -> impl InputQueryConfig + 'static {
+        self.input_config.clone()
     }
 }
 
@@ -77,11 +66,11 @@ impl DisplayBackendWorker {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Axis {
-    pub min: u32,
-    pub max: u32,
-    pub res: u32,
-    pub flat: u32,
-    pub fuzz: u32,
+    pub min: i32,
+    pub max: i32,
+    pub res: i32,
+    pub flat: i32,
+    pub fuzz: i32,
 }
 
 impl From<Axis> for InputAbsInfo {
@@ -139,10 +128,7 @@ pub fn init(
     let mut keyboard_tx = None;
     if keyboard_input {
         let (tx, rx) = pollable_channel().context("Failed to create keyboard events channel")?;
-        input_backend_handles.push(InputBackendHandle::new(
-            rx,
-            InputBackendHandleConfig::Keyboard,
-        ));
+        input_backend_handles.push(InputBackendHandle::new(rx, GtkInputConfig::Keyboard));
         keyboard_tx = Some(tx);
     }
 
@@ -158,7 +144,7 @@ pub fn init(
                         .context("Failed to create touchscreen events channel")?;
                     input_backend_handles.push(InputBackendHandle::new(
                         rx,
-                        InputBackendHandleConfig::TouchScreen(options.clone()),
+                        GtkInputConfig::TouchScreen(options.clone()),
                     ));
                     inputs.push((tx, user_options.clone()))
                 }
