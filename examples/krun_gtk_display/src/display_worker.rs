@@ -1,7 +1,7 @@
 use super::scanout_paintable::ScanoutPaintable;
 use crate::{Axis, DisplayEvent, DisplayInputOptions, TouchArea, TouchScreenOptions};
+use krun::{InputEvent, InputEventType};
 use krun_display::Rect;
-use krun_input::{InputEvent, InputEventType};
 use log::{debug, trace, warn};
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -39,7 +39,7 @@ type EventSender = PollableChannelSender<InputEvent>;
 struct FingerState {
     seq: Option<EventSequence>,
     tracking_id: Option<u16>,
-    pos: Option<(u32, u32)>,
+    pos: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Default)]
@@ -98,7 +98,7 @@ enum TouchState {
 
 struct TouchEventSequencedSender {
     fingers: FingerTracker,
-    synced_finger_zero_pos: (u32, u32),
+    synced_finger_zero_pos: (i32, i32),
     last_tracking_id: u16,
     active_finger_idx: u16,
     options: TouchScreenOptions,
@@ -190,13 +190,13 @@ impl TouchEventSequencedSender {
                 },
         }: TouchArea,
         (x, y): (f64, f64),
-    ) -> (u32, u32) {
-        let mapped_x = (x * (max_x - min_x) as f64) + min_x as f64;
-        let mapped_y = (y * (max_y - min_y) as f64) + min_y as f64;
+    ) -> (i32, i32) {
+        let mapped_x = x * (f64::from(max_x) - f64::from(min_x)) + f64::from(min_x);
+        let mapped_y = y * (f64::from(max_y) - f64::from(min_y)) + f64::from(min_y);
 
         // Clamp the coordinates to be sure they cannot be  slightly out of bounds due to rounding
-        let mapped_x = (mapped_x.round() as u32).clamp(min_x, max_x);
-        let mapped_y = (mapped_y.round() as u32).clamp(min_y, max_y);
+        let mapped_x = (mapped_x.round() as i32).clamp(min_x, max_x);
+        let mapped_y = (mapped_y.round() as i32).clamp(min_y, max_y);
         (mapped_x, mapped_y)
     }
 
@@ -226,7 +226,7 @@ impl TouchEventSequencedSender {
                 self.queue.push(InputEvent {
                     type_: InputEventType::Abs as u16,
                     code: ABS_MT_SLOT,
-                    value: finger_idx as u32,
+                    value: i32::from(finger_idx),
                 });
                 self.active_finger_idx = finger_idx;
             }
@@ -237,7 +237,7 @@ impl TouchEventSequencedSender {
                 self.queue.push(InputEvent {
                     type_: InputEventType::Abs as u16,
                     code: ABS_MT_TRACKING_ID,
-                    value: self.last_tracking_id as u32,
+                    value: i32::from(self.last_tracking_id),
                 });
             }
 
@@ -279,7 +279,7 @@ impl TouchEventSequencedSender {
                     self.queue.push(InputEvent {
                         type_: InputEventType::Abs as u16,
                         code: ABS_MT_TRACKING_ID,
-                        value: u32::MAX,
+                        value: -1,
                     });
                 }
 
@@ -772,5 +772,50 @@ impl DisplayWorker {
             });
         });
         app.run_with_args::<&str>(&[]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Axis, TouchArea, TouchEventSequencedSender};
+
+    #[test]
+    fn maps_signed_touchscreen_coordinates() {
+        let area = TouchArea {
+            x: Axis {
+                min: -100,
+                max: 100,
+                ..Default::default()
+            },
+            y: Axis {
+                min: -200,
+                max: -100,
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(
+            TouchEventSequencedSender::map_position(area, (0.25, 0.75)),
+            (-50, -125)
+        );
+        assert_eq!(
+            TouchEventSequencedSender::map_position(area, (-0.01, 1.01)),
+            (-100, -100)
+        );
+    }
+
+    #[test]
+    fn maps_full_signed_axis_range() {
+        let axis = Axis {
+            min: i32::MIN,
+            max: i32::MAX,
+            ..Default::default()
+        };
+        let area = TouchArea { x: axis, y: axis };
+
+        assert_eq!(
+            TouchEventSequencedSender::map_position(area, (0.0, 1.0)),
+            (i32::MIN, i32::MAX)
+        );
     }
 }

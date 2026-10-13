@@ -1,55 +1,29 @@
 #![cfg(not(target_os = "windows"))]
 
-mod rust_to_c;
-
-use bitflags::bitflags;
-pub use rust_to_c::*;
 use std::cmp::max;
-
-mod c_to_rust;
-pub use c_to_rust::{
-    InputConfigBackend, InputConfigInstance, InputEventProviderBackend, InputEventProviderInstance,
-};
+use std::os::fd::BorrowedFd;
 
 use thiserror::Error;
 
-#[allow(
-    non_upper_case_globals,
-    non_snake_case,
-    non_camel_case_types,
-    dead_code,
-    unused_variables
-)]
-mod header {
-    include!(concat!(env!("OUT_DIR"), "/input_header.rs"));
-}
-
-bitflags! {
-    pub struct ConfigFeatures: u64 {
-        const QUERY = header::KRUN_INPUT_EVENT_PROVIDER_FEATURE_QUEUE as u64;
-    }
-}
-
-bitflags! {
-    pub struct EventProviderFeatures: u64 {
-        const QUEUE  = header::KRUN_INPUT_EVENT_PROVIDER_FEATURE_QUEUE as u64;
-    }
-}
-
-#[derive(Error, Debug)]
-#[repr(i32)]
+#[derive(Error, Debug, ffier::FfiError)]
+#[non_exhaustive]
 pub enum InputBackendError {
     #[error("Backend implementation error")]
-    InternalError = header::KRUN_INPUT_ERR_INTERNAL,
+    #[ffier(code = 1)]
+    InternalError(),
     #[error("Try again later")]
-    Again = header::KRUN_INPUT_ERR_EAGAIN,
+    #[ffier(code = 2)]
+    Again(),
     #[error("Method not supported")]
-    MethodNotSupported = header::KRUN_INPUT_ERR_METHOD_UNSUPPORTED,
+    #[ffier(code = 3)]
+    MethodNotSupported(),
     #[error("Invalid parameter")]
-    InvalidParam = header::KRUN_INPUT_ERR_INVALID_PARAM,
+    #[ffier(code = 4)]
+    InvalidParam(),
 }
 
 /// Input event types matching Linux input event types
+#[ffier::export]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum InputEventType {
@@ -89,9 +63,76 @@ impl From<InputEventType> for u16 {
     }
 }
 
-pub type InputEvent = header::krun_input_event;
-pub type InputDeviceIds = header::krun_input_device_ids;
-pub type InputAbsInfo = header::krun_input_absinfo;
+#[ffier::export]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct InputEvent {
+    pub type_: u16,
+    pub code: u16,
+    pub value: i32,
+}
+
+#[ffier::export]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct InputDeviceIds {
+    pub bustype: u16,
+    pub vendor: u16,
+    pub product: u16,
+    pub version: u16,
+}
+
+#[ffier::export]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct InputAbsInfo {
+    pub min: i32,
+    pub max: i32,
+    pub fuzz: i32,
+    pub flat: i32,
+    pub res: i32,
+}
+
+#[ffier::export]
+pub trait InputQueryConfig: Send + Sync {
+    #[ffier(index = 0)]
+    fn query_device_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError>;
+
+    #[ffier(index = 1)]
+    fn query_serial_name(&self, name_buf: &mut [u8]) -> Result<u8, InputBackendError>;
+
+    #[ffier(index = 2)]
+    fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError>;
+
+    #[ffier(index = 3)]
+    fn query_event_capabilities(
+        &self,
+        event_type: u8,
+        bitmap_buf: &mut [u8],
+    ) -> Result<u8, InputBackendError>;
+
+    #[ffier(index = 4)]
+    fn query_abs_info(
+        &self,
+        abs_axis: u8,
+        abs_info: &mut InputAbsInfo,
+    ) -> Result<(), InputBackendError>;
+
+    #[ffier(index = 5)]
+    fn query_properties(&self, properties: &mut [u8]) -> Result<u8, InputBackendError>;
+}
+
+#[ffier::export]
+pub trait InputEventsImpl: Send {
+    /// The descriptor becomes readable when input events are available and must
+    /// remain valid while the backend is owned by the device.
+    #[ffier(index = 0)]
+    fn get_read_notify_fd(&self) -> Result<BorrowedFd<'_>, InputBackendError>;
+
+    /// Returns immediately, with None when no events are available.
+    #[ffier(index = 1)]
+    fn next_event(&mut self) -> Result<Option<InputEvent>, InputBackendError>;
+}
 
 /// Writes the specific bits in bitmap, given the indices of the bits
 /// Return the "length" of the newly constructed bitmap

@@ -9,6 +9,7 @@ utils = { path = "../../src/utils", package = "krun-utils" } # Our version of ru
 gtk = { version = "0.10", package = "gtk4", features = ["v4_16"] }
 krun_display = { path = "../../src/display", package = "krun-display" }
 krun_input = { path = "../../src/input", package = "krun-input" }
+krun = { package = "krun-via-cdylib-weak", path = "../../bindings/libkrun-via-cdylib-weak" }
 anyhow = "1.0.98"
 log = "0.4.27"
 libc = "0.2.174"

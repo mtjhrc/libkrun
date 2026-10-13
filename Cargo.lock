@@ -794,11 +794,7 @@ dependencies = [
 name = "krun-input"
 version = "0.1.0"
 dependencies = [
- "bindgen",
- "bitflags 2.11.0",
- "libc",
- "log",
- "static_assertions",
+ "ffier",
  "thiserror 2.0.18",
 ]
 

@@ -653,6 +653,7 @@ dependencies = [
  "krun-display",
  "krun-input",
  "krun-utils",
+ "krun-via-cdylib-weak",
  "libc",
  "log",
 ]
@@ -667,7 +668,6 @@ dependencies = [
  "env_logger",
  "gtk_display",
  "krun-init-blob-via-cdylib",
- "krun-input",
  "krun-via-cdylib-weak",
  "libloading",
  "log",
@@ -758,11 +758,7 @@ dependencies = [
 name = "krun-input"
 version = "0.1.0"
 dependencies = [
- "bindgen",
- "bitflags 2.13.1",
- "libc",
- "log",
- "static_assertions",
+ "ffier",
  "thiserror",
 ]
 

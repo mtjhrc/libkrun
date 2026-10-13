@@ -132,6 +132,7 @@ fn load_krun() -> anyhow::Result<()> {
     let mut symbols = vec![
         KrunInitLog,
         KrunErrorResult,
+        KrunErrorNew,
         KrunErrorMessage,
         KrunErrorDestroy,
         KrunMmioDeviceManagerNew,
@@ -334,13 +335,7 @@ fn krun_thread(
         let config_backend = handle.get_config();
         let event_provider_backend = handle.get_events();
 
-        let input_device = krun::InputDevice::new(
-            &raw const config_backend as *const std::ffi::c_void,
-            std::mem::size_of_val(&config_backend),
-            &raw const event_provider_backend as *const std::ffi::c_void,
-            std::mem::size_of_val(&event_provider_backend),
-        )
-        .map_err(|e| anyhow::anyhow!("InputDevice::new: {e}"))?;
+        let input_device = krun::InputDevice::new(config_backend, event_provider_backend);
         devices.add(input_device);
     }
 

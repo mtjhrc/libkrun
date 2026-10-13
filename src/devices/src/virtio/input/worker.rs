@@ -11,7 +11,7 @@ use vm_memory::{ByteValued, GuestMemoryMmap};
 use super::super::DeviceQueue;
 use crate::virtio::InterruptTransport;
 use crate::virtio::descriptor_utils::{Reader, Writer};
-use krun_input::{InputEventProviderBackend, InputEventProviderInstance, InputEventsImpl};
+use krun_input::InputEventsImpl;
 
 // Create a wrapper type to work around orphan rules
 #[repr(C)]
@@ -29,7 +29,7 @@ pub struct InputWorker {
     status_q: DeviceQueue, // Guest -> Device events
     interrupt: InterruptTransport,
     mem: GuestMemoryMmap,
-    backend_wrapper: InputEventProviderBackend<'static>,
+    backend: Box<dyn InputEventsImpl>,
     stop_fd: EventFd,
 }
 
@@ -39,7 +39,7 @@ impl InputWorker {
         status_q: DeviceQueue,
         interrupt: InterruptTransport,
         mem: GuestMemoryMmap,
-        backend: InputEventProviderBackend<'static>,
+        backend: Box<dyn InputEventsImpl>,
         stop_fd: EventFd,
     ) -> Self {
         Self {
@@ -47,73 +47,62 @@ impl InputWorker {
             status_q,
             interrupt,
             mem,
-            backend_wrapper: backend,
+            backend,
             stop_fd,
         }
     }
 
-    pub fn run(self) -> JoinHandle<()> {
+    pub fn run(self) -> JoinHandle<Box<dyn InputEventsImpl>> {
         thread::Builder::new()
             .name("input worker".into())
             .spawn(|| self.work())
             .unwrap()
     }
 
-    fn work(mut self) {
-        debug!("input worker: starting");
+    fn work(mut self) -> Box<dyn InputEventsImpl> {
+        self.work_events();
+        self.backend
+    }
 
-        // Create the events instance in this thread
-        let mut events_instance = match self.backend_wrapper.create_instance() {
-            Ok(instance) => instance,
-            Err(e) => {
-                error!("Failed to create events instance: {:?}", e);
-                return;
-            }
-        };
+    fn work_events(&mut self) {
+        debug!("input worker: starting");
 
         const EVENTQ: u64 = 1;
         const STATUSQ: u64 = 2;
         const EVENTQ_USER: u64 = 3;
         const QUIT: u64 = 4;
         // Set up epoll to wait for events
-        let mut epoll = Epoll::new().expect("Failed to create epoll");
+        let mut epoll = match Epoll::new() {
+            Ok(epoll) => epoll,
+            Err(e) => {
+                error!("Failed to create input epoll: {e}");
+                return;
+            }
+        };
 
-        let ready_fd = match events_instance.get_read_notify_fd() {
-            Ok(fd) => fd,
+        let ready_fd = match self.backend.get_read_notify_fd() {
+            Ok(fd) => fd.as_raw_fd(),
             Err(e) => {
                 error!("Failed to get ready fd: {:?}", e);
                 return;
             }
         };
 
-        epoll
-            .ctl(
+        for (fd, token) in [
+            (ready_fd, EVENTQ_USER),
+            (self.event_q.event.as_raw_fd(), EVENTQ),
+            (self.status_q.event.as_raw_fd(), STATUSQ),
+            (self.stop_fd.as_raw_fd(), QUIT),
+        ] {
+            if let Err(e) = epoll.ctl(
                 ControlOperation::Add,
-                ready_fd.as_raw_fd(),
-                &EpollEvent::new(EventSet::IN, EVENTQ_USER),
-            )
-            .expect("Failed to add ready fd to epoll");
-        epoll
-            .ctl(
-                ControlOperation::Add,
-                self.event_q.event.as_raw_fd(),
-                &EpollEvent::new(EventSet::IN, EVENTQ),
-            )
-            .expect("Failed to add ready fd to epoll");
-        epoll
-            .ctl(
-                ControlOperation::Add,
-                self.status_q.event.as_raw_fd(),
-                &EpollEvent::new(EventSet::IN, STATUSQ),
-            )
-            .expect("Failed to add ready fd to epoll");
-        epoll
-            .ctl(
-                ControlOperation::Add,
-                self.stop_fd.as_raw_fd(),
-                &EpollEvent::new(EventSet::IN, QUIT),
-            )
-            .expect("Failed to add stop fd to epoll");
+                fd,
+                &EpollEvent::new(EventSet::IN, token),
+            ) {
+                error!("Failed to add input fd to epoll: {e}");
+                return;
+            }
+        }
 
         let mut events = vec![EpollEvent::default(); 16];
 
@@ -132,12 +121,12 @@ impl InputWorker {
                 match event.data() {
                     EVENTQ_USER => {
                         trace!("EVENTQ_USER");
-                        needs_interrupt |= self.process_event_queue(&mut events_instance);
+                        needs_interrupt |= self.process_event_queue();
                     }
                     EVENTQ => {
                         self.event_q.event.read().unwrap();
                         trace!("EVENTQ");
-                        needs_interrupt |= self.process_event_queue(&mut events_instance);
+                        needs_interrupt |= self.process_event_queue();
                     }
                     STATUSQ => {
                         self.status_q.event.read().unwrap();
@@ -162,20 +151,16 @@ impl InputWorker {
     }
 
     /// Fills a virtqueue with events from the source. Returns the number of bytes written.
-    fn fill_event_virtqueue(
-        &mut self,
-        events_instance: &mut InputEventProviderInstance,
-        writer: &mut Writer,
-    ) -> Result<(usize, bool), ()> {
+    fn fill_event_virtqueue(&mut self, writer: &mut Writer) -> Result<(usize, bool), ()> {
         let avail_bytes = writer.available_bytes();
         let mut eof = false;
         while writer.bytes_written() + size_of::<VirtioInputEvent>() <= avail_bytes {
-            match events_instance.next_event() {
+            match self.backend.next_event() {
                 Ok(Some(event)) => {
                     let virtio_event = VirtioInputEvent {
                         type_: event.type_,
                         code: event.code,
-                        value: event.value as i32,
+                        value: event.value,
                     };
                     debug!("Writing: {virtio_event:?}");
                     writer
@@ -197,7 +182,7 @@ impl InputWorker {
         Ok((writer.bytes_written(), eof))
     }
 
-    fn process_event_queue(&mut self, events_instance: &mut InputEventProviderInstance) -> bool {
+    fn process_event_queue(&mut self) -> bool {
         let mut needs_interrupt = false;
         let mem = self.mem.clone();
 
@@ -210,9 +195,7 @@ impl InputWorker {
                 }
             };
 
-            let (bytes_written, eof) = self
-                .fill_event_virtqueue(events_instance, &mut writer)
-                .unwrap();
+            let (bytes_written, eof) = self.fill_event_virtqueue(&mut writer).unwrap();
 
             if bytes_written != 0 {
                 self.event_q

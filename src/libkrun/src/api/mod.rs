@@ -58,6 +58,13 @@ pub use vmm_builder::{Vmm, VmmBuilder, VmmHandle, check_nested_virt};
 pub use devices::virtio::net::device::VirtioNetBackend;
 pub use devices::virtio::port_io;
 
+#[cfg(feature = "input")]
+#[cfg_attr(feature = "ffi", ffier::reexport)]
+pub use krun_input::{
+    InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent, InputEventType, InputEventsImpl,
+    InputQueryConfig,
+};
+
 #[cfg(feature = "ffi")]
 ffier::library_definition!("krun", library_tag = 1,
     primitives_prefix = "krun",
@@ -102,10 +109,10 @@ ffier::library_definition!("krun", library_tag = 1,
     #[cfg(feature = "gpu")]
     crate::api::device_builders::AttachDevice for crate::api::device_builders::GpuDevice,
     #[cfg(feature = "input")]
-    crate::api::device_builders::InputDevice<'_> = 24,
+    crate::api::device_builders::InputDevice = 24,
     #[cfg(feature = "input")]
     crate::api::device_builders::AttachDevice
-        for crate::api::device_builders::InputDevice<'_>,
+        for crate::api::device_builders::InputDevice,
     #[cfg(all(feature = "vhost-user", target_os = "linux"))]
     crate::api::device_builders::AttachDevice for crate::api::device_builders::VhostUserDevice,
     #[cfg(not(feature = "tee"))]
@@ -113,6 +120,22 @@ ffier::library_definition!("krun", library_tag = 1,
     #[cfg(not(feature = "tee"))]
     crate::api::device_builders::AttachDevice for crate::api::device_builders::RngDevice,
     crate::api::device_builders::AttachDevice for crate::api::device_builders::VsockDevice,
+    #[cfg(feature = "input")]
+    crate::api::InputBackendError = 25,
+    #[cfg(feature = "input")]
+    Error for crate::api::InputBackendError,
+    #[cfg(feature = "input")]
+    trait crate::api::InputQueryConfig = 26,
+    #[cfg(feature = "input")]
+    trait crate::api::InputEventsImpl = 27,
+    #[cfg(feature = "input")]
+    value crate::api::InputEvent,
+    #[cfg(feature = "input")]
+    value crate::api::InputDeviceIds,
+    #[cfg(feature = "input")]
+    value crate::api::InputAbsInfo,
+    #[cfg(feature = "input")]
+    enum crate::api::InputEventType,
     trait crate::api::device_builders::AttachDevice = 28,
     trait ffier_builtins::PushStr = 12,
     trait ffier_builtins::Error = 13,

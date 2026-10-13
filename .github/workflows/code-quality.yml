@@ -133,6 +133,9 @@ jobs:
       - name: Regenerate init-blob bindings
         run: make gen-init-blob-bindings
 
+      - name: Test generated input callbacks
+        run: cargo test --locked -p krun-via-cdylib-weak --test input_backend -- --ignored
+
       - name: Verify libkrun bindings are up to date
         run: |
           git diff --exit-code bindings/libkrun-via-cdylib-weak/ffier-krun.json include/libkrun.h \

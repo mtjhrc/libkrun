@@ -7,7 +7,6 @@ edition = "2024"
 gtk_display = { path = "../krun_gtk_display" }
 krun = { package = "krun-via-cdylib-weak", path = "../../bindings/libkrun-via-cdylib-weak" }
 krun-init = { package = "krun-init-blob-via-cdylib", path = "../../bindings/init-blob-via-cdylib" }
-krun_input = { path = "../../src/input", package = "krun-input" }
 anyhow = "1.0.98"
 clap = "4.5.39"
 clap_derive = "4.5.32"

@@ -11,6 +11,7 @@
 #endif
 
 typedef void* KrunVmmError;
+typedef void* KrunInputBackendError;
 typedef void* KrunMmioDeviceManager;
 typedef void* KrunFsDevice;
 typedef void* KrunConsoleDevice;
@@ -32,13 +33,15 @@ typedef void* KrunDisplayBackend;
 typedef void* KrunGpuDevice;
 typedef void* KrunInputDevice;
 typedef void* KrunAttachDevice; /* KrunFsDevice | KrunConsoleDevice | KrunBlockDevice | KrunNetDevice | KrunGpuDevice | KrunInputDevice | KrunVhostUserDevice | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice */
-typedef void* KrunError; /* KrunVmmError | KrunVtableError */
+typedef void* KrunError; /* KrunInputBackendError | KrunVmmError | KrunVtableError */
+typedef void* KrunInputEventsImpl; /* KrunVtableInputEventsImpl */
+typedef void* KrunInputQueryConfig; /* KrunVtableInputQueryConfig */
 typedef void* KrunPushStr; /* KrunVtablePushStr */
 
 #ifndef KRUN_PRIMITIVES_DEFINED
 #define KRUN_PRIMITIVES_DEFINED
 
-typedef void* KrunObject; /* KrunVmmError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunNitroConfig | KrunVmmBuilder | KrunVmm | KrunVmmHandle | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice | KrunDisplayInfoBuilder | KrunVhostUserDevice | KrunDisplayBackend | KrunGpuDevice | KrunInputDevice */
+typedef void* KrunObject; /* KrunVmmError | KrunInputBackendError | KrunMmioDeviceManager | KrunFsDevice | KrunConsoleDevice | KrunConsoleBuilder | KrunFsOverlay | KrunPayload | KrunNitroConfig | KrunVmmBuilder | KrunVmm | KrunVmmHandle | KrunBalloonDevice | KrunRngDevice | KrunVsockDevice | KrunBlockDevice | KrunNetDevice | KrunDisplayInfoBuilder | KrunVhostUserDevice | KrunDisplayBackend | KrunGpuDevice | KrunInputDevice */
 
 typedef uint64_t KrunResult;
 #define KRUN_RESULT_SUCCESS 0
@@ -145,6 +148,42 @@ void krun_free_object_array(KrunObjectArray a);
 typedef void (*krun_free_object_array_fn)(KrunObjectArray a);
 
 
+/* Value structs ----------------------------------------------------- */
+
+typedef struct {
+    uint16_t type_;
+    uint16_t code;
+    int32_t value;
+} KrunInputEvent;
+
+typedef struct {
+    uint16_t bustype;
+    uint16_t vendor;
+    uint16_t product;
+    uint16_t version;
+} KrunInputDeviceIds;
+
+typedef struct {
+    int32_t min;
+    int32_t max;
+    int32_t fuzz;
+    int32_t flat;
+    int32_t res;
+} KrunInputAbsInfo;
+
+
+/* InputEventType ---------------------------------------------------- */
+
+#define KRUN_INPUT_EVENT_TYPE_SYN 0
+#define KRUN_INPUT_EVENT_TYPE_KEY 1
+#define KRUN_INPUT_EVENT_TYPE_REL 2
+#define KRUN_INPUT_EVENT_TYPE_ABS 3
+#define KRUN_INPUT_EVENT_TYPE_MSC 4
+#define KRUN_INPUT_EVENT_TYPE_SW 5
+#define KRUN_INPUT_EVENT_TYPE_LED 17
+#define KRUN_INPUT_EVENT_TYPE_SND 18
+#define KRUN_INPUT_EVENT_TYPE_REP 20
+
 /* KernelFormat ------------------------------------------------------ */
 
 #define KRUN_KERNEL_FORMAT_ELF 0
@@ -213,6 +252,13 @@ typedef void (*krun_free_object_array_fn)(KrunObjectArray a);
 #define KRUN_ERROR_VMM_FEATURE_DISABLED ((uint64_t)16777217 << 32 | 7)
 #define KRUN_ERROR_VMM_BOOT_ERROR ((uint64_t)16777217 << 32 | 8)
 #define KRUN_ERROR_VMM_INTERNAL ((uint64_t)16777217 << 32 | 9)
+
+/* InputBackendError ------------------------------------------------- */
+
+#define KRUN_ERROR_INPUT_BACKEND_INTERNAL_ERROR ((uint64_t)16777241 << 32 | 1)
+#define KRUN_ERROR_INPUT_BACKEND_AGAIN ((uint64_t)16777241 << 32 | 2)
+#define KRUN_ERROR_INPUT_BACKEND_METHOD_NOT_SUPPORTED ((uint64_t)16777241 << 32 | 3)
+#define KRUN_ERROR_INPUT_BACKEND_INVALID_PARAM ((uint64_t)16777241 << 32 | 4)
 
 /* MmioDeviceManager ------------------------------------------------- */
 
@@ -683,29 +729,80 @@ typedef void (*krun_gpu_device_destroy_fn)(KrunGpuDevice handle);
  * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
  * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
  */
-/**
- * Create from opaque config/events backend vtables.
- *
- * # Safety
- *
- * `config_backend` must point to a valid `InputConfigBackend` struct of at
- * least `config_backend_size` bytes, and `event_provider_backend` must
- * point to a valid `InputEventProviderBackend` struct of at least
- * `event_provider_backend_size` bytes. Both structs are copied — the
- * caller retains ownership of the originals.
- */
-KrunInputDevice krun_input_device_new(const void* config_backend, size_t config_backend_size, const void* event_provider_backend, size_t event_provider_backend_size, KrunError* err_out);
-typedef KrunInputDevice (*krun_input_device_new_fn)(const void* config_backend, size_t config_backend_size, const void* event_provider_backend, size_t event_provider_backend_size, KrunError* err_out);
-/**
- * Create a passthrough input device from an evdev fd.
- *
- * The fd must refer to a Linux `/dev/input/eventN` device and remain open
- * for the lifetime of the returned device. The caller retains ownership.
- */
+/** Takes ownership of the configuration and event backends. */
+KrunInputDevice krun_input_device_new(KrunInputQueryConfig config_backend /* owned callback; valid until release; Send; Sync; value bounds: 'static */, KrunInputEventsImpl events_backend /* owned callback; valid until release; Send; value bounds: 'static */);
+typedef KrunInputDevice (*krun_input_device_new_fn)(KrunInputQueryConfig config_backend /* owned callback; valid until release; Send; Sync; value bounds: 'static */, KrunInputEventsImpl events_backend /* owned callback; valid until release; Send; value bounds: 'static */);
+/** Duplicates a Linux evdev descriptor and takes ownership of the duplicates. */
 KrunInputDevice krun_input_device_new_from_fd(int input_fd, KrunError* err_out);
 typedef KrunInputDevice (*krun_input_device_new_from_fd_fn)(int input_fd, KrunError* err_out);
 void krun_input_device_destroy(KrunInputDevice handle);
 typedef void (*krun_input_device_destroy_fn)(KrunInputDevice handle);
+
+/* KrunInputQueryConfigVtable ---------------------------------------- */
+
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Sync: shared access may run concurrently across threads.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
+#define KRUN_INPUT_QUERY_CONFIG_TYPE_TAG 16777242
+
+typedef struct {
+    /* Releases transferred user_data exactly once; never called for borrowed parameters. */
+    void (*drop)(void* self_data);
+    KrunResult (*query_device_name)(void* self_data, KrunBytesMut name_buf, uint8_t* result, KrunError* err_out);
+    KrunResult (*query_serial_name)(void* self_data, KrunBytesMut name_buf, uint8_t* result, KrunError* err_out);
+    KrunResult (*query_device_ids)(void* self_data, KrunInputDeviceIds* ids, KrunError* err_out);
+    KrunResult (*query_event_capabilities)(void* self_data, uint8_t event_type, KrunBytesMut bitmap_buf, uint8_t* result, KrunError* err_out);
+    KrunResult (*query_abs_info)(void* self_data, uint8_t abs_axis, KrunInputAbsInfo* abs_info, KrunError* err_out);
+    KrunResult (*query_properties)(void* self_data, KrunBytesMut properties, uint8_t* result, KrunError* err_out);
+} KrunInputQueryConfigVtable;
+
+/* InputQueryConfig (dispatch) --------------------------------------- */
+
+KrunResult krun_input_query_config_query_device_name(KrunInputQueryConfig handle, KrunBytesMut name_buf, uint8_t* result, KrunError* err_out);
+typedef KrunResult (*krun_input_query_config_query_device_name_fn)(KrunInputQueryConfig handle, KrunBytesMut name_buf, uint8_t* result, KrunError* err_out);
+KrunResult krun_input_query_config_query_serial_name(KrunInputQueryConfig handle, KrunBytesMut name_buf, uint8_t* result, KrunError* err_out);
+typedef KrunResult (*krun_input_query_config_query_serial_name_fn)(KrunInputQueryConfig handle, KrunBytesMut name_buf, uint8_t* result, KrunError* err_out);
+KrunResult krun_input_query_config_query_device_ids(KrunInputQueryConfig handle, KrunInputDeviceIds* ids, KrunError* err_out);
+typedef KrunResult (*krun_input_query_config_query_device_ids_fn)(KrunInputQueryConfig handle, KrunInputDeviceIds* ids, KrunError* err_out);
+KrunResult krun_input_query_config_query_event_capabilities(KrunInputQueryConfig handle, uint8_t event_type, KrunBytesMut bitmap_buf, uint8_t* result, KrunError* err_out);
+typedef KrunResult (*krun_input_query_config_query_event_capabilities_fn)(KrunInputQueryConfig handle, uint8_t event_type, KrunBytesMut bitmap_buf, uint8_t* result, KrunError* err_out);
+KrunResult krun_input_query_config_query_abs_info(KrunInputQueryConfig handle, uint8_t abs_axis, KrunInputAbsInfo* abs_info, KrunError* err_out);
+typedef KrunResult (*krun_input_query_config_query_abs_info_fn)(KrunInputQueryConfig handle, uint8_t abs_axis, KrunInputAbsInfo* abs_info, KrunError* err_out);
+KrunResult krun_input_query_config_query_properties(KrunInputQueryConfig handle, KrunBytesMut properties, uint8_t* result, KrunError* err_out);
+typedef KrunResult (*krun_input_query_config_query_properties_fn)(KrunInputQueryConfig handle, KrunBytesMut properties, uint8_t* result, KrunError* err_out);
+void krun_input_query_config_destroy(KrunInputQueryConfig handle);
+typedef void (*krun_input_query_config_destroy_fn)(KrunInputQueryConfig handle);
+
+/* KrunInputEventsImplVtable ----------------------------------------- */
+
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
+#define KRUN_INPUT_EVENTS_IMPL_TYPE_TAG 16777243
+
+typedef struct {
+    /* Releases transferred user_data exactly once; never called for borrowed parameters. */
+    void (*drop)(void* self_data);
+    KrunResult (*get_read_notify_fd)(void* self_data, int* result, KrunError* err_out);
+    KrunResult (*next_event)(void* self_data, bool* result_is_some, KrunInputEvent* result, KrunError* err_out);
+} KrunInputEventsImplVtable;
+
+/* InputEventsImpl (dispatch) ---------------------------------------- */
+
+/**
+ * The descriptor becomes readable when input events are available and must
+ * remain valid while the backend is owned by the device.
+ */
+KrunResult krun_input_events_impl_get_read_notify_fd(KrunInputEventsImpl handle, int* result, KrunError* err_out);
+typedef KrunResult (*krun_input_events_impl_get_read_notify_fd_fn)(KrunInputEventsImpl handle, int* result, KrunError* err_out);
+/** Returns immediately, with None when no events are available. */
+KrunResult krun_input_events_impl_next_event(KrunInputEventsImpl handle, bool* result_is_some, KrunInputEvent* result, KrunError* err_out);
+typedef KrunResult (*krun_input_events_impl_next_event_fn)(KrunInputEventsImpl handle, bool* result_is_some, KrunInputEvent* result, KrunError* err_out);
+void krun_input_events_impl_destroy(KrunInputEventsImpl handle);
+typedef void (*krun_input_events_impl_destroy_fn)(KrunInputEventsImpl handle);
 
 /* AttachDevice (dispatch) ------------------------------------------- */
 
@@ -751,6 +848,10 @@ uint64_t krun_error_result(KrunError handle);
 typedef uint64_t (*krun_error_result_fn)(KrunError handle);
 void krun_error_destroy(KrunError handle);
 typedef void (*krun_error_destroy_fn)(KrunError handle);
+uint32_t krun_input_backend_error_code(KrunInputBackendError handle);
+typedef uint32_t (*krun_input_backend_error_code_fn)(KrunInputBackendError handle);
+void krun_input_backend_error_message(KrunInputBackendError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
+typedef void (*krun_input_backend_error_message_fn)(KrunInputBackendError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
 uint32_t krun_vmm_error_code(KrunVmmError handle);
 typedef uint32_t (*krun_vmm_error_code_fn)(KrunVmmError handle);
 void krun_vmm_error_message(KrunVmmError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);

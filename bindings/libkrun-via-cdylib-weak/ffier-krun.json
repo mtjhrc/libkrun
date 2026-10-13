@@ -163,16 +163,65 @@
       },
       "type_tag": 16777239
     },
+    "InputAbsInfo": {
+      "kind": {
+        "value_struct": {
+          "c_name": "KrunInputAbsInfo"
+        }
+      }
+    },
+    "InputBackendError": {
+      "kind": {
+        "error": {
+          "c_name": "KrunInputBackendError"
+        }
+      },
+      "type_tag": 16777241
+    },
     "InputDevice": {
       "kind": {
         "handle": {
           "c_name": "KrunInputDevice"
         }
       },
-      "type_tag": 16777240,
-      "lifetime_params": [
-        "a"
-      ]
+      "type_tag": 16777240
+    },
+    "InputDeviceIds": {
+      "kind": {
+        "value_struct": {
+          "c_name": "KrunInputDeviceIds"
+        }
+      }
+    },
+    "InputEvent": {
+      "kind": {
+        "value_struct": {
+          "c_name": "KrunInputEvent"
+        }
+      }
+    },
+    "InputEventType": {
+      "kind": {
+        "enum": {
+          "alias_of": "u16"
+        }
+      }
+    },
+    "InputEventsImpl": {
+      "kind": {
+        "trait": {
+          "c_name": "KrunInputEventsImpl"
+        }
+      },
+      "type_tag": 16777243
+    },
+    "InputQueryConfig": {
+      "kind": {
+        "trait": {
+          "c_name": "KrunInputQueryConfig"
+        }
+      },
+      "type_tag": 16777242
     },
     "KernelFormat": {
       "kind": {
@@ -2420,59 +2469,37 @@
         {
           "name": "new",
           "doc": [
-            " Create from opaque config/events backend vtables.",
-            "",
-            " # Safety",
-            "",
-            " `config_backend` must point to a valid `InputConfigBackend` struct of at",
-            " least `config_backend_size` bytes, and `event_provider_backend` must",
-            " point to a valid `InputEventProviderBackend` struct of at least",
-            " `event_provider_backend_size` bytes. Both structs are copied — the",
-            " caller retains ownership of the originals."
+            " Takes ownership of the configuration and event backends."
           ],
           "receiver": "none",
           "params": [
             {
               "name": "config_backend",
-              "param_kind": "regular",
-              "type": "*const core::ffi::c_void"
+              "param_kind": "impl_trait",
+              "trait_name": "InputQueryConfig",
+              "lifetime_bounds": [
+                "static"
+              ]
             },
             {
-              "name": "config_backend_size",
-              "param_kind": "regular",
-              "type": "usize"
-            },
-            {
-              "name": "event_provider_backend",
-              "param_kind": "regular",
-              "type": "*const core::ffi::c_void"
-            },
-            {
-              "name": "event_provider_backend_size",
-              "param_kind": "regular",
-              "type": "usize"
+              "name": "events_backend",
+              "param_kind": "impl_trait",
+              "trait_name": "InputEventsImpl",
+              "lifetime_bounds": [
+                "static"
+              ]
             }
           ],
           "ret": {
-            "return_kind": "result",
-            "ok": {
-              "type": "InputDevice",
-              "type_args": [
-                "a"
-              ]
-            },
-            "err_type": "VmmError",
-            "c_convention": "handle_or_null"
+            "return_kind": "value",
+            "type": "InputDevice"
           },
           "ffi_name": "krun_input_device_new"
         },
         {
           "name": "new_from_fd",
           "doc": [
-            " Create a passthrough input device from an evdev fd.",
-            "",
-            " The fd must refer to a Linux `/dev/input/eventN` device and remain open",
-            " for the lifetime of the returned device. The caller retains ownership."
+            " Duplicates a Linux evdev descriptor and takes ownership of the duplicates."
           ],
           "receiver": "none",
           "params": [
@@ -2481,17 +2508,14 @@
               "param_kind": "regular",
               "type": "BorrowedFd",
               "type_args": [
-                "a"
+                "_"
               ]
             }
           ],
           "ret": {
             "return_kind": "result",
             "ok": {
-              "type": "InputDevice",
-              "type_args": [
-                "a"
-              ]
+              "type": "InputDevice"
             },
             "err_type": "VmmError",
             "c_convention": "handle_or_null"
@@ -2501,6 +2525,74 @@
         }
       ],
       "cfg": "feature = \"input\""
+    }
+  ],
+  "value_structs": [
+    {
+      "name": "InputEvent",
+      "c_name": "KrunInputEvent",
+      "fields": [
+        {
+          "name": "type_",
+          "type": "u16"
+        },
+        {
+          "name": "code",
+          "type": "u16"
+        },
+        {
+          "name": "value",
+          "type": "i32"
+        }
+      ]
+    },
+    {
+      "name": "InputDeviceIds",
+      "c_name": "KrunInputDeviceIds",
+      "fields": [
+        {
+          "name": "bustype",
+          "type": "u16"
+        },
+        {
+          "name": "vendor",
+          "type": "u16"
+        },
+        {
+          "name": "product",
+          "type": "u16"
+        },
+        {
+          "name": "version",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "InputAbsInfo",
+      "c_name": "KrunInputAbsInfo",
+      "fields": [
+        {
+          "name": "min",
+          "type": "i32"
+        },
+        {
+          "name": "max",
+          "type": "i32"
+        },
+        {
+          "name": "fuzz",
+          "type": "i32"
+        },
+        {
+          "name": "flat",
+          "type": "i32"
+        },
+        {
+          "name": "res",
+          "type": "i32"
+        }
+      ]
     }
   ],
   "errors": [
@@ -2581,9 +2673,97 @@
           "is_unit": false
         }
       ]
+    },
+    {
+      "name": "InputBackendError",
+      "type_tag": 16777241,
+      "variants": [
+        {
+          "name": "InternalError",
+          "c_name": "KRUN_ERROR_INPUT_BACKEND_INTERNAL_ERROR",
+          "code": 1,
+          "message": "InternalError",
+          "constructible": true,
+          "is_unit": false
+        },
+        {
+          "name": "Again",
+          "c_name": "KRUN_ERROR_INPUT_BACKEND_AGAIN",
+          "code": 2,
+          "message": "Again",
+          "constructible": true,
+          "is_unit": false
+        },
+        {
+          "name": "MethodNotSupported",
+          "c_name": "KRUN_ERROR_INPUT_BACKEND_METHOD_NOT_SUPPORTED",
+          "code": 3,
+          "message": "MethodNotSupported",
+          "constructible": true,
+          "is_unit": false
+        },
+        {
+          "name": "InvalidParam",
+          "c_name": "KRUN_ERROR_INPUT_BACKEND_INVALID_PARAM",
+          "code": 4,
+          "message": "InvalidParam",
+          "constructible": true,
+          "is_unit": false
+        }
+      ]
     }
   ],
   "enum_constants": [
+    {
+      "name": "InputEventType",
+      "variants": [
+        {
+          "name": "Syn",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_SYN",
+          "value": 0
+        },
+        {
+          "name": "Key",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_KEY",
+          "value": 1
+        },
+        {
+          "name": "Rel",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_REL",
+          "value": 2
+        },
+        {
+          "name": "Abs",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_ABS",
+          "value": 3
+        },
+        {
+          "name": "Msc",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_MSC",
+          "value": 4
+        },
+        {
+          "name": "Sw",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_SW",
+          "value": 5
+        },
+        {
+          "name": "Led",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_LED",
+          "value": 17
+        },
+        {
+          "name": "Snd",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_SND",
+          "value": 18
+        },
+        {
+          "name": "Rep",
+          "c_name": "KRUN_INPUT_EVENT_TYPE_REP",
+          "value": 20
+        }
+      ]
+    },
     {
       "name": "KernelFormat",
       "variants": [
@@ -2833,6 +3013,242 @@
   ],
   "traits": [
     {
+      "name": "InputQueryConfig",
+      "destroy_ffi_name": "krun_input_query_config_destroy",
+      "type_tag_constant": "KRUN_INPUT_QUERY_CONFIG_TYPE_TAG",
+      "vtable_struct_c_name": "KrunInputQueryConfigVtable",
+      "wrapper_c_name": "KrunVtableInputQueryConfig",
+      "vtable_struct_name": "InputQueryConfigVtable",
+      "wrapper_name": "VtableInputQueryConfig",
+      "thread_safety": {
+        "send": true,
+        "sync": true
+      },
+      "methods": [
+        {
+          "name": "query_device_name",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "name_buf",
+              "param_kind": "regular",
+              "type": "[u8]",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "u8"
+            },
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_query_config_query_device_name",
+          "trait_definition": {
+            "index": 0,
+            "has_default": false
+          }
+        },
+        {
+          "name": "query_serial_name",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "name_buf",
+              "param_kind": "regular",
+              "type": "[u8]",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "u8"
+            },
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_query_config_query_serial_name",
+          "trait_definition": {
+            "index": 1,
+            "has_default": false
+          }
+        },
+        {
+          "name": "query_device_ids",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "ids",
+              "param_kind": "regular",
+              "type": "InputDeviceIds",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_query_config_query_device_ids",
+          "trait_definition": {
+            "index": 2,
+            "has_default": false
+          }
+        },
+        {
+          "name": "query_event_capabilities",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "event_type",
+              "param_kind": "regular",
+              "type": "u8"
+            },
+            {
+              "name": "bitmap_buf",
+              "param_kind": "regular",
+              "type": "[u8]",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "u8"
+            },
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_query_config_query_event_capabilities",
+          "trait_definition": {
+            "index": 3,
+            "has_default": false
+          }
+        },
+        {
+          "name": "query_abs_info",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "abs_axis",
+              "param_kind": "regular",
+              "type": "u8"
+            },
+            {
+              "name": "abs_info",
+              "param_kind": "regular",
+              "type": "InputAbsInfo",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_query_config_query_abs_info",
+          "trait_definition": {
+            "index": 4,
+            "has_default": false
+          }
+        },
+        {
+          "name": "query_properties",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "properties",
+              "param_kind": "regular",
+              "type": "[u8]",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "u8"
+            },
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_query_config_query_properties",
+          "trait_definition": {
+            "index": 5,
+            "has_default": false
+          }
+        }
+      ],
+      "own_method_count": 6,
+      "max_vtable_slot": 5
+    },
+    {
+      "name": "InputEventsImpl",
+      "destroy_ffi_name": "krun_input_events_impl_destroy",
+      "type_tag_constant": "KRUN_INPUT_EVENTS_IMPL_TYPE_TAG",
+      "vtable_struct_c_name": "KrunInputEventsImplVtable",
+      "wrapper_c_name": "KrunVtableInputEventsImpl",
+      "vtable_struct_name": "InputEventsImplVtable",
+      "wrapper_name": "VtableInputEventsImpl",
+      "thread_safety": {
+        "send": true
+      },
+      "methods": [
+        {
+          "name": "get_read_notify_fd",
+          "doc": [
+            " The descriptor becomes readable when input events are available and must",
+            " remain valid while the backend is owned by the device."
+          ],
+          "receiver": "ref",
+          "params": [],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "BorrowedFd",
+              "type_args": [
+                "_"
+              ]
+            },
+            "err_type": "InputBackendError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_input_events_impl_get_read_notify_fd",
+          "trait_definition": {
+            "index": 0,
+            "has_default": false
+          }
+        },
+        {
+          "name": "next_event",
+          "doc": [
+            " Returns immediately, with None when no events are available."
+          ],
+          "receiver": "mut",
+          "params": [],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "InputEvent",
+              "optional": true
+            },
+            "err_type": "InputBackendError",
+            "c_convention": "optional_value_out_param"
+          },
+          "ffi_name": "krun_input_events_impl_next_event",
+          "trait_definition": {
+            "index": 1,
+            "has_default": false
+          }
+        }
+      ],
+      "own_method_count": 2,
+      "max_vtable_slot": 1
+    },
+    {
       "name": "AttachDevice",
       "destroy_ffi_name": "krun_attach_device_destroy",
       "type_tag_constant": "KRUN_ATTACH_DEVICE_TYPE_TAG",
@@ -3019,9 +3435,6 @@
       "trait_lifetime_args": [
         "a"
       ],
-      "struct_lifetime_args": [
-        "a"
-      ],
       "methods": [],
       "cfg": "feature = \"input\""
     },
@@ -3071,6 +3484,38 @@
         "a"
       ],
       "methods": []
+    },
+    {
+      "trait_name": "Error",
+      "struct_name": "InputBackendError",
+      "methods": [
+        {
+          "name": "code",
+          "receiver": "ref",
+          "params": [],
+          "ret": {
+            "return_kind": "value",
+            "type": "u32"
+          },
+          "ffi_name": "krun_input_backend_error_code"
+        },
+        {
+          "name": "message",
+          "receiver": "ref",
+          "params": [
+            {
+              "name": "writer",
+              "param_kind": "impl_trait",
+              "trait_name": "PushStr",
+              "ref_kind": "mut"
+            }
+          ],
+          "ret": {
+            "return_kind": "void"
+          },
+          "ffi_name": "krun_input_backend_error_message"
+        }
+      ]
     },
     {
       "trait_name": "Error",
