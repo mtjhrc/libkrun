@@ -581,6 +581,7 @@ dependencies = [
  "imago",
  "krun-arch",
  "krun-hvf",
+ "krun-input",
  "krun-polly",
  "krun-utils",
  "krun-whp",
@@ -596,6 +597,7 @@ dependencies = [
  "vm-fdt",
  "vm-memory",
  "windows-sys",
+ "zerocopy",
 ]
 
 [[package]]
@@ -628,6 +630,14 @@ dependencies = [
  "ffier-gen-rust-client",
  "krun-via-cdylib-weak",
  "pkg-config",
+]
+
+[[package]]
+name = "krun-input"
+version = "0.1.0"
+dependencies = [
+ "ffier",
+ "thiserror",
 ]
 
 [[package]]
@@ -726,6 +736,7 @@ dependencies = [
  "krun-cpuid",
  "krun-devices",
  "krun-hvf",
+ "krun-input",
  "krun-kernel",
  "krun-polly",
  "krun-utils",

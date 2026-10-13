@@ -5,6 +5,20 @@ The testing framework here allows you to write code to configure libkrun (using 
 The tests can be ran using `make test` (from the main libkrun directory).
 You can also run `./run.sh` inside the `test` directory. When using the `./run.sh` script you probably want specify the `PKG_CONFIG_PATH` enviroment variable, otherwise you will be testing the system wide installation of libkrun.
 
+The virtio input test checks guest evdev configuration and signed events from
+owned callback backends. Run it through the native Rust API and generated FFI
+client with:
+
+```bash
+make test INPUT=1 TEST=virtio-input
+make test INPUT=1 FFI=1 TEST=virtio-input
+```
+
+When invoking `run.sh` directly, set `KRUN_TEST_INPUT=1` to enable input in the
+native runner, and `KRUN_TEST_FFI=1` to use the generated client. The library must
+also be built with the matching features. Linux guests need virtio-input and
+evdev support in their kernel.
+
 ## Running on macOS
 
 ### Prerequisites

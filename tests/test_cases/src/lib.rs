@@ -68,6 +68,11 @@ mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
 #[cfg(any(feature = "host", target_os = "linux"))]
+mod test_virtio_input;
+#[cfg(any(feature = "host", target_os = "linux"))]
+use test_virtio_input::TestVirtioInput;
+
+#[cfg(any(feature = "host", target_os = "linux"))]
 mod test_virtiofs_root_ro;
 #[cfg(any(feature = "host", target_os = "linux"))]
 use test_virtiofs_root_ro::TestVirtiofsRootRo;
@@ -181,6 +186,8 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("net-vmnet-helper", Box::new(TestNet::new_vmnet_helper())),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
+        #[cfg(any(feature = "host", target_os = "linux"))]
+        TestCase::new("virtio-input", Box::new(TestVirtioInput)),
         #[cfg(any(feature = "host", target_os = "linux"))]
         TestCase::new("virtiofs-root-ro", Box::new(TestVirtiofsRootRo)),
         TestCase::new("augmentfs", Box::new(TestAugmentFs)),
