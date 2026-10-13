@@ -527,6 +527,10 @@ typedef void (*krun_vmm_destroy_fn)(KrunVmm handle);
 
 /* VmmHandle --------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 KrunResult krun_vmm_handle_pause(KrunVmmHandle handle, KrunError* err_out);
 typedef KrunResult (*krun_vmm_handle_pause_fn)(KrunVmmHandle handle, KrunError* err_out);
 KrunResult krun_vmm_handle_resume(KrunVmmHandle handle, KrunError* err_out);

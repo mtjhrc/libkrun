@@ -190,7 +190,7 @@ impl Clone for VmmHandle {
     }
 }
 
-#[cfg_attr(feature = "ffi", ffier::export)]
+#[cfg_attr(feature = "ffi", ffier::export(send))]
 impl VmmHandle {
     pub fn pause(&self) -> Result<(), VmmError> {
         #[cfg(target_os = "macos")]

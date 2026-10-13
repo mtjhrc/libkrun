@@ -54,18 +54,6 @@ mod host {
     use crate::common::{build_init_config, init_krun, setup_rootfs};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
 
-    // FIXME: remove once ffier marks generated handle wrappers as Send.
-    struct SendHandle(krun::VmmHandle);
-    unsafe impl Send for SendHandle {}
-    impl SendHandle {
-        fn pause(&self) -> Result<(), krun::VmmError> {
-            self.0.pause()
-        }
-        fn resume(&self) -> Result<(), krun::VmmError> {
-            self.0.resume()
-        }
-    }
-
     #[cfg(feature = "dynamic-linking")]
     fn require_symbols() -> Result<(), libloading::Error> {
         crate::common::require_vm_symbols()?;
@@ -147,10 +135,9 @@ mod host {
                 .build()
                 .map_err(|e| anyhow::anyhow!("VmmBuilder::build: {e:?}"))?;
 
-            let handle = SendHandle(
-                vmm.handle()
-                    .map_err(|e| anyhow::anyhow!("vmm.handle: {e:?}"))?,
-            );
+            let handle = vmm
+                .handle()
+                .map_err(|e| anyhow::anyhow!("vmm.handle: {e:?}"))?;
 
             let marker = test_setup.tmp_dir.join("resumed");
             std::thread::spawn(move || {

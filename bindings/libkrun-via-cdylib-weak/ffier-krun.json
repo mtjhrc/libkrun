@@ -1629,6 +1629,9 @@
       "name": "VmmHandle",
       "destroy_ffi_name": "krun_vmm_handle_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "pause",
