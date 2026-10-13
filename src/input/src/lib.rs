@@ -10,16 +10,16 @@ use thiserror::Error;
 pub enum InputBackendError {
     #[error("Backend implementation error")]
     #[ffier(code = 1)]
-    InternalError(),
+    InternalError,
     #[error("Try again later")]
     #[ffier(code = 2)]
-    Again(),
+    Again,
     #[error("Method not supported")]
     #[ffier(code = 3)]
-    MethodNotSupported(),
+    MethodNotSupported,
     #[error("Invalid parameter")]
     #[ffier(code = 4)]
-    InvalidParam(),
+    InvalidParam,
 }
 
 /// Input event types matching Linux input event types

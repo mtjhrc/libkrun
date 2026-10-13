@@ -600,12 +600,12 @@ impl<'a> FsOverlay<'a> {
     fn add_at_path(&mut self, path: &str, entry: VirtualEntry<'a>) -> Result<(), VmmError> {
         let path = path.strip_prefix('/').unwrap_or(path);
         let components: Vec<&str> = path.split('/').collect();
-        let (leaf, parents) = components.split_last().ok_or_else(VmmError::InvalidParam)?;
+        let (leaf, parents) = components.split_last().ok_or(VmmError::InvalidParam)?;
 
         if leaf.is_empty() {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
-        let leaf_name = CString::new(*leaf).map_err(|_| VmmError::InvalidParam())?;
+        let leaf_name = CString::new(*leaf).map_err(|_| VmmError::InvalidParam)?;
 
         let target = resolve_parent_dirs(&mut self.entries, parents)?;
         target.push(VirtualDirEntry {
@@ -705,7 +705,7 @@ impl<'a> FsDevice<'a> {
             .unwrap()
             .set_permission_semantics(semantics)
         {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         Ok(())
     }
@@ -724,7 +724,7 @@ impl<'a> FsDevice<'a> {
     /// Returns `InvalidParam` unless the permission semantics are `LinuxSimplifiedFixedOwner`.
     pub fn set_fixed_owner(&mut self, uid: u32, gid: u32) -> Result<(), VmmError> {
         if !self.inner.lock().unwrap().set_fixed_owner(uid, gid) {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         Ok(())
     }
@@ -738,7 +738,7 @@ impl<'a> FsDevice<'a> {
     /// A NullFs device has no host-backed file data and returns `InvalidParam`.
     pub fn set_cache_policy(&mut self, policy: CachePolicy) -> Result<(), VmmError> {
         if !self.inner.lock().unwrap().set_cache_policy(policy) {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         Ok(())
     }
@@ -790,7 +790,7 @@ impl<'a> AttachDevice<'a> for FsDevice<'a> {
         {
             let mut fs = self.inner.lock().unwrap();
             if fs.lacks_fixed_owner() {
-                return Err(VmmError::InvalidParam());
+                return Err(VmmError::InvalidParam);
             }
             // Wire exit code from VMM into the fs device
             fs.set_exit_code(ctx.exit_code().clone());
@@ -911,7 +911,7 @@ impl<'a> ConsoleBuilder<'a> {
             .map(|fd| {
                 port_io::input_to_raw_fd_dup(fd.as_raw_fd()).map_err(|e| {
                     log::error!("dup input fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })
             })
             .transpose()?;
@@ -919,7 +919,7 @@ impl<'a> ConsoleBuilder<'a> {
             .map(|fd| {
                 port_io::output_to_raw_fd_dup(fd.as_raw_fd()).map_err(|e| {
                     log::error!("dup output fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })
             })
             .transpose()?;
@@ -983,7 +983,7 @@ impl<'a> ConsoleBuilder<'a> {
                 let raw_fd = fd.as_raw_fd();
                 Some(port_io::input_to_raw_fd_dup(raw_fd).map_err(|e| {
                     log::error!("dup input fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })?)
             } else {
                 None
@@ -997,7 +997,7 @@ impl<'a> ConsoleBuilder<'a> {
                 let raw_fd = fd.as_raw_fd();
                 Some(port_io::output_to_raw_fd_dup(raw_fd).map_err(|e| {
                     log::error!("dup output fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })?)
             } else {
                 Some(port_io::output_to_log_as_err())
@@ -1018,7 +1018,7 @@ impl<'a> ConsoleBuilder<'a> {
                 self.tty_fds.push(static_fd);
                 Some(port_io::term_fd(raw_fd).map_err(|e| {
                     log::error!("term fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })?)
             } else {
                 Some(port_io::term_fixed_size(0, 0))
@@ -1069,7 +1069,7 @@ impl<'a> ConsoleBuilder<'a> {
             .map(|fd| {
                 port_io::input_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
                     log::error!("dup input fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })
             })
             .transpose()?;
@@ -1077,7 +1077,7 @@ impl<'a> ConsoleBuilder<'a> {
             .map(|fd| {
                 port_io::output_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
                     log::error!("dup output fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })
             })
             .transpose()?;
@@ -1114,7 +1114,7 @@ impl<'a> ConsoleBuilder<'a> {
                 Some(
                     port_io::input_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
                         log::error!("dup input fd: {e}");
-                        VmmError::BadFd()
+                        VmmError::BadFd
                     })?,
                 )
             } else {
@@ -1129,7 +1129,7 @@ impl<'a> ConsoleBuilder<'a> {
                 Some(
                     port_io::output_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
                         log::error!("dup output fd: {e}");
-                        VmmError::BadFd()
+                        VmmError::BadFd
                     })?,
                 )
             } else {
@@ -1143,7 +1143,7 @@ impl<'a> ConsoleBuilder<'a> {
             if let Some(tfd) = term_handle {
                 Some(port_io::term_handle(tfd.as_raw_handle()).map_err(|e| {
                     log::error!("term fd: {e}");
-                    VmmError::BadFd()
+                    VmmError::BadFd
                 })?)
             } else {
                 Some(port_io::term_fixed_size(0, 0))
@@ -1224,11 +1224,11 @@ impl<'a> ConsoleBuilder<'a> {
 
         let input = Some(port_io::input_to_raw_fd_dup(raw_fd).map_err(|e| {
             log::error!("dup input fd: {e}");
-            VmmError::BadFd()
+            VmmError::BadFd
         })?);
         let output = Some(port_io::output_to_raw_fd_dup(raw_fd).map_err(|e| {
             log::error!("dup output fd: {e}");
-            VmmError::BadFd()
+            VmmError::BadFd
         })?);
 
         let is_term = tty_fd.is_terminal();
@@ -1236,7 +1236,7 @@ impl<'a> ConsoleBuilder<'a> {
         {
             Some(port_io::term_fd(raw_fd).map_err(|e| {
                 log::error!("term fd: {e}");
-                VmmError::BadFd()
+                VmmError::BadFd
             })?)
         } else {
             None
@@ -1271,11 +1271,11 @@ impl<'a> ConsoleBuilder<'a> {
 
         let input = Some(port_io::input_to_handle_dup(handle).map_err(|e| {
             log::error!("dup input fd: {e}");
-            VmmError::BadFd()
+            VmmError::BadFd
         })?);
         let output = Some(port_io::output_to_handle_dup(handle).map_err(|e| {
             log::error!("dup output fd: {e}");
-            VmmError::BadFd()
+            VmmError::BadFd
         })?);
 
         let is_term = tty_fd.is_terminal();
@@ -1283,7 +1283,7 @@ impl<'a> ConsoleBuilder<'a> {
         {
             Some(port_io::term_handle(handle).map_err(|e| {
                 log::error!("term fd: {e}");
-                VmmError::BadFd()
+                VmmError::BadFd
             })?)
         } else {
             None
@@ -1507,9 +1507,9 @@ impl VsockDevice {
     // TODO: accept proper typed params once ffier supports something like
     // an array of by-value FFI-transparent structs (or tuples?)
     pub fn add_port_forward(&mut self, mapping: &str) -> Result<(), VmmError> {
-        let (guest, host) = mapping.split_once(':').ok_or(VmmError::InvalidParam())?;
-        let g = guest.parse::<u16>().map_err(|_| VmmError::InvalidParam())?;
-        let h = host.parse::<u16>().map_err(|_| VmmError::InvalidParam())?;
+        let (guest, host) = mapping.split_once(':').ok_or(VmmError::InvalidParam)?;
+        let g = guest.parse::<u16>().map_err(|_| VmmError::InvalidParam)?;
+        let h = host.parse::<u16>().map_err(|_| VmmError::InvalidParam)?;
         self.host_port_map.insert(g, h);
         Ok(())
     }
@@ -1768,7 +1768,7 @@ impl NetDevice {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (id, tap_name, mac, features);
-            Err(VmmError::FeatureDisabled())
+            Err(VmmError::FeatureDisabled)
         }
     }
 }
@@ -1822,7 +1822,7 @@ impl NetDevice {
         mac: &[u8],
         features: u32,
     ) -> Result<Self, VmmError> {
-        let mac: [u8; 6] = mac.try_into().map_err(|_| VmmError::InvalidParam())?;
+        let mac: [u8; 6] = mac.try_into().map_err(|_| VmmError::InvalidParam)?;
         let net = devices::virtio::Net::new(id.to_string(), backend, mac, features)
             .map_err(|e| VmmError::Internal(format!("net: {e:?}")))?;
         Ok(Self {
@@ -1927,12 +1927,12 @@ impl DisplayBackend {
         vtable_size: usize,
     ) -> Result<Self, VmmError> {
         if vtable_size < std::mem::size_of::<krun_display::DisplayBackend>() {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         let backend: krun_display::DisplayBackend =
             unsafe { std::ptr::read_unaligned(vtable as *const krun_display::DisplayBackend) };
         if !backend.verify() {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         Ok(Self {
             inner: backend,
@@ -2185,15 +2185,15 @@ fn resolve_parent_dirs<'a, 'b>(
     let mut current = entries;
     for component in parents {
         if component.is_empty() {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         let dir = current
             .iter_mut()
             .find(|e| e.name.as_c_str().to_bytes() == component.as_bytes())
-            .ok_or_else(VmmError::InvalidParam)?;
+            .ok_or(VmmError::InvalidParam)?;
         match &mut dir.entry.content {
             VirtualEntryContent::Dir { children } => current = children,
-            _ => return Err(VmmError::InvalidParam()),
+            _ => return Err(VmmError::InvalidParam),
         }
     }
     Ok(current)

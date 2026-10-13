@@ -3194,8 +3194,7 @@
           "code": 1,
           "message": "InvalidParam",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3218,8 +3217,7 @@
           "code": 3,
           "message": "OutOfRange",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3228,8 +3226,7 @@
           "code": 4,
           "message": "FileNotFound",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3238,8 +3235,7 @@
           "code": 5,
           "message": "ResourceAlloc",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3248,8 +3244,7 @@
           "code": 6,
           "message": "BadFd",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3258,8 +3253,7 @@
           "code": 7,
           "message": "FeatureDisabled",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3301,8 +3295,7 @@
           "code": 1,
           "message": "InternalError",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3311,8 +3304,7 @@
           "code": 2,
           "message": "Again",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3321,8 +3313,7 @@
           "code": 3,
           "message": "MethodNotSupported",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         },
         {
@@ -3331,8 +3322,7 @@
           "code": 4,
           "message": "InvalidParam",
           "data": {
-            "kind": "tuple",
-            "fields": []
+            "kind": "fieldless"
           }
         }
       ]

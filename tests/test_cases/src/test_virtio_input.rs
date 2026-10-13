@@ -107,7 +107,7 @@ mod host {
             info: &mut InputAbsInfo,
         ) -> Result<(), InputBackendError> {
             if axis != 0 {
-                return Err(InputBackendError::InvalidParam());
+                return Err(InputBackendError::InvalidParam);
             }
             *info = InputAbsInfo {
                 min: -2048,
@@ -142,7 +142,7 @@ mod host {
                     value: i32::from_ne_bytes(bytes[4..].try_into().unwrap()),
                 })),
                 Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
-                _ => Err(InputBackendError::InternalError()),
+                _ => Err(InputBackendError::InternalError),
             }
         }
     }

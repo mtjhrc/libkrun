@@ -25,7 +25,7 @@ impl InputQueryConfig for PassthroughInputBackend {
             Ok(len) => Ok(len as u8),
             Err(e) => {
                 error!("Failed to get device serial (eviocguniq): {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }
@@ -35,7 +35,7 @@ impl InputQueryConfig for PassthroughInputBackend {
             Ok(len) => Ok(len as u8),
             Err(e) => {
                 error!("Failed to get device name (eviocgname): {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }
@@ -45,7 +45,7 @@ impl InputQueryConfig for PassthroughInputBackend {
             Ok(_) => Ok(()),
             Err(e) => {
                 error!("Failed to get device information ids (eviocgid): {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }
@@ -66,7 +66,7 @@ impl InputQueryConfig for PassthroughInputBackend {
             }
             Err(e) => {
                 error!("Failed to get device event capabilities (eviocgbit): {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }
@@ -90,7 +90,7 @@ impl InputQueryConfig for PassthroughInputBackend {
             }
             Err(e) => {
                 error!("Failed to get device abs_info (eviocgabs): {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }
@@ -100,7 +100,7 @@ impl InputQueryConfig for PassthroughInputBackend {
             Ok(len) => Ok(len as u8),
             Err(e) => {
                 error!("Failed to query device properties (eviocgprop): {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }
@@ -131,12 +131,12 @@ impl InputEventsImpl for PassthroughInputBackend {
             }
             Ok(_bytes_read) => {
                 error!("Partial read from /dev/input was unexpected, not implemented!");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
             Err(Errno::EAGAIN) => Ok(None),
             Err(e) => {
                 error!("Failed to read event from input device: {e}");
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             }
         }
     }

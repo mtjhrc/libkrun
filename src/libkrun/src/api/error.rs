@@ -4,7 +4,7 @@
 pub enum VmmError {
     #[error("invalid parameter")]
     #[cfg_attr(feature = "ffi", ffier(code = 1))]
-    InvalidParam(),
+    InvalidParam,
 
     #[error("missing required configuration: {0}")]
     #[cfg_attr(feature = "ffi", ffier(code = 2, opaque))]
@@ -12,23 +12,23 @@ pub enum VmmError {
 
     #[error("value out of range")]
     #[cfg_attr(feature = "ffi", ffier(code = 3))]
-    OutOfRange(),
+    OutOfRange,
 
     #[error("file not found")]
     #[cfg_attr(feature = "ffi", ffier(code = 4))]
-    FileNotFound(),
+    FileNotFound,
 
     #[error("resource allocation failed")]
     #[cfg_attr(feature = "ffi", ffier(code = 5))]
-    ResourceAlloc(),
+    ResourceAlloc,
 
     #[error("bad file descriptor")]
     #[cfg_attr(feature = "ffi", ffier(code = 6))]
-    BadFd(),
+    BadFd,
 
     #[error("feature not enabled in this build")]
     #[cfg_attr(feature = "ffi", ffier(code = 7))]
-    FeatureDisabled(),
+    FeatureDisabled,
 
     #[error("boot error: {0}")]
     #[cfg_attr(feature = "ffi", ffier(code = 8, opaque))]

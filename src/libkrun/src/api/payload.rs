@@ -39,7 +39,7 @@ impl Payload {
     pub fn load_krunfw() -> Result<Self, VmmError> {
         let lib = KRUNFW.as_ref().ok_or_else(|| {
             log::error!("could not load {KRUNFW_NAME}");
-            VmmError::FileNotFound()
+            VmmError::FileNotFound
         })?;
 
         let bundle = load_kernel_bundle(lib)?;
@@ -57,7 +57,7 @@ impl Payload {
         {
             let lib = KRUNFW.as_ref().ok_or_else(|| {
                 log::error!("could not load {KRUNFW_NAME}");
-                VmmError::FileNotFound()
+                VmmError::FileNotFound
             })?;
 
             let bundle = load_kernel_bundle(lib)?;
@@ -93,7 +93,7 @@ impl Payload {
         {
             let _ = tee_config_path;
             let _ = firmware_path;
-            Err(VmmError::FeatureDisabled())
+            Err(VmmError::FeatureDisabled)
         }
     }
 
@@ -110,7 +110,7 @@ impl Payload {
             let size = std::fs::metadata(&path)
                 .map_err(|e| {
                     log::error!("can't read initramfs metadata {path:?}: {e:?}");
-                    VmmError::FileNotFound()
+                    VmmError::FileNotFound
                 })?
                 .len();
             (Some(path), size)
