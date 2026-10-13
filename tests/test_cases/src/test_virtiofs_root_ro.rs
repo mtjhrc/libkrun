@@ -17,6 +17,7 @@ mod host {
     use super::*;
 
     use std::fs;
+    use std::io;
 
     use crate::common::{build_and_run, build_init_config, setup_rootfs};
     use crate::{Test, TestSetup};
@@ -30,6 +31,9 @@ mod host {
             fs::create_dir(root_dir.join(EMPTY_DIR))?;
             fs::write(root_dir.join(TEST_FILE), TEST_CONTENT)?;
 
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let stderr = io::stderr();
             let init_config = build_init_config(&test_setup.test_case, &[]);
             let mut rootfs = krun::FsDevice::new_read_only("/dev/root", root_dir.to_str().unwrap())
                 .map_err(|e| anyhow::anyhow!("FsDevice::new_read_only: {e:?}"))?;
@@ -42,7 +46,7 @@ mod host {
                 .map_err(|e| anyhow::anyhow!("Config::apply: {e}"))?;
             rootfs.set_overlay(overlay);
 
-            build_and_run(1, 512, rootfs, payload)
+            build_and_run(1, 512, rootfs, payload, &stdin, &stdout, &stderr)
         }
     }
 }

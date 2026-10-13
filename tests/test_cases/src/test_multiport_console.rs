@@ -8,7 +8,7 @@ mod host {
     #[cfg(feature = "dynamic-linking")]
     use krun::DeviceManager;
 
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{self, BufRead, BufReader, Write};
     use std::os::fd::AsFd;
     use std::os::unix::net::UnixStream;
     use std::thread;
@@ -47,6 +47,10 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let root_dir = setup_rootfs(&test_setup)?;
             let init_config = build_init_config(&test_setup.test_case, &[]);
+            let stdout = io::stdout();
+            let (guest_alpha, host_alpha) = UnixStream::pair()?;
+            let (guest_beta, host_beta) = UnixStream::pair()?;
+            let (guest_gamma, host_gamma) = UnixStream::pair()?;
 
             let mut rootfs = krun::FsDevice::new("/dev/root", root_dir.to_str().unwrap())
                 .map_err(|e| anyhow::anyhow!("FsDevice::new: {e:?}"))?;
@@ -59,7 +63,6 @@ mod host {
             rootfs.set_overlay(overlay);
 
             // Default console with stdout only (for "OK" output)
-            let stdout = std::io::stdout();
             let mut default_console = krun::ConsoleDevice::builder();
             default_console
                 .add_default_console(None, Some(stdout.as_fd()), None)
@@ -69,9 +72,6 @@ mod host {
                 .map_err(|e| anyhow::anyhow!("build default console: {e:?}"))?;
 
             // Second console with test ports
-            let (guest_alpha, host_alpha) = UnixStream::pair()?;
-            let (guest_beta, host_beta) = UnixStream::pair()?;
-            let (guest_gamma, host_gamma) = UnixStream::pair()?;
             let mut test_console = krun::ConsoleDevice::builder();
             add_ping_pong_port(
                 &mut test_console,

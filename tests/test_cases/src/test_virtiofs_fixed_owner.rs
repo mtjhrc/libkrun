@@ -14,6 +14,7 @@ mod host {
     use super::*;
 
     use std::fs;
+    use std::io;
 
     use crate::common::{build_and_run, build_init_config, setup_rootfs};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
@@ -41,6 +42,9 @@ mod host {
                 "set_fixed_owner must fail outside LinuxSimplifiedFixedOwner"
             );
 
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let stderr = io::stderr();
             let init_config = build_init_config(&test_setup.test_case, &[]);
             let mut rootfs = krun::FsDevice::new("/dev/root", root_path)
                 .map_err(|e| anyhow::anyhow!("FsDevice::new: {e:?}"))?;
@@ -59,7 +63,7 @@ mod host {
                 .map_err(|e| anyhow::anyhow!("Config::apply: {e}"))?;
             rootfs.set_overlay(overlay);
 
-            build_and_run(1, 512, rootfs, payload)
+            build_and_run(1, 512, rootfs, payload, &stdin, &stdout, &stderr)
         }
 
         fn check(self: Box<Self>, stdout: Vec<u8>, test_setup: TestSetup) -> TestOutcome {
