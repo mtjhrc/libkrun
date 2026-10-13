@@ -17,6 +17,8 @@ fn make_test_payload() -> Vec<u8> {
 mod host {
     use super::*;
 
+    use std::io;
+
     use crate::common::{build_and_run, build_init_config, init_krun};
     use crate::{ShouldRun, Test, TestSetup};
 
@@ -42,6 +44,9 @@ mod host {
             let marker: &[u8] = b"virtual-file-marker-content-12345";
             let nested_content: &[u8] = b"deep-nested-content";
 
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let stderr = io::stderr();
             let mut rootfs = krun::FsDevice::new_null("/dev/root")
                 .map_err(|e| anyhow::anyhow!("FsDevice::new_null: {e:?}"))?;
 
@@ -84,7 +89,7 @@ mod host {
 
             rootfs.set_overlay(overlay);
 
-            build_and_run(1, 512, rootfs, payload)
+            build_and_run(1, 512, rootfs, payload, &stdin, &stdout, &stderr)
         }
     }
 }

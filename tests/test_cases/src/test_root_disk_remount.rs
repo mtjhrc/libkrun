@@ -13,6 +13,7 @@ pub struct TestRootDiskRemount;
 mod host {
     use super::*;
 
+    use std::io;
     use std::os::fd::AsFd;
     use std::process::Command;
 
@@ -83,6 +84,9 @@ mod host {
                 .set_root_disk_remount("/dev/vda", Some("ext4"), None)
                 .build();
 
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let stderr = io::stderr();
             let mut rootfs = krun::FsDevice::new_null("/dev/root")
                 .map_err(|e| anyhow::anyhow!("FsDevice::new_null: {e:?}"))?;
             let mut payload =
@@ -101,9 +105,6 @@ mod host {
             let block = krun::BlockDevice::new("vda", &disk_path, krun::DiskFormat::Raw)
                 .map_err(|e| anyhow::anyhow!("BlockDevice: {e:?}"))?;
 
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
             let mut console_builder = krun::ConsoleDevice::builder();
             console_builder
                 .add_default_console(

@@ -107,6 +107,9 @@ mod host {
 
             let root_dir = setup_rootfs(&test_setup)?;
             let init_config = build_init_config(&test_setup.test_case, &[]);
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
 
             let mut rootfs = krun::FsDevice::new("/dev/root", root_dir.to_str().unwrap())
                 .map_err(|e| anyhow::anyhow!("FsDevice::new: {e:?}"))?;
@@ -118,9 +121,6 @@ mod host {
                 .map_err(|e| anyhow::anyhow!("Config::apply: {e}"))?;
             rootfs.set_overlay(overlay);
 
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
             let mut console_builder = krun::ConsoleDevice::builder();
             console_builder
                 .add_default_console(

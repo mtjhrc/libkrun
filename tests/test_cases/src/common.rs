@@ -1,6 +1,7 @@
 //! Common utilities used by multiple tests.
 
 use std::fs::{self, create_dir};
+use std::io::{self, Stderr, Stdin, Stdout};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
@@ -140,9 +141,9 @@ pub fn setup_and_run_with_env(
     guest_env: &[&str],
 ) -> anyhow::Result<()> {
     init_krun()?;
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let stderr = io::stderr();
     let init_config = init_config_builder(&test_setup, guest_env).build();
     let (devices, payload) =
         setup_standard_devices(&test_setup, &init_config, &stdin, &stdout, &stderr)?;
@@ -175,9 +176,9 @@ pub fn init_config_builder(test_setup: &TestSetup, guest_env: &[&str]) -> krun_i
 pub fn setup_standard_devices<'a>(
     test_setup: &'a TestSetup,
     init_config: &'a krun_init::Config,
-    stdin: &'a std::io::Stdin,
-    stdout: &'a std::io::Stdout,
-    stderr: &'a std::io::Stderr,
+    stdin: &'a Stdin,
+    stdout: &'a Stdout,
+    stderr: &'a Stderr,
 ) -> anyhow::Result<(krun::MmioDeviceManager<'a>, krun::Payload)> {
     setup_standard_devices_from(test_setup, init_config, stdin, stdout, stderr)
 }
@@ -187,9 +188,9 @@ pub fn setup_standard_devices<'a>(
 pub fn setup_standard_devices_from<'a>(
     test_setup: &'a TestSetup,
     init_config: &'a krun_init::Config,
-    stdin: &'a std::io::Stdin,
-    stdout: &'a std::io::Stdout,
-    stderr: &'a std::io::Stderr,
+    stdin: &'a Stdin,
+    stdout: &'a Stdout,
+    stderr: &'a Stderr,
 ) -> anyhow::Result<(krun::MmioDeviceManager<'a>, krun::Payload)> {
     let root_dir = setup_rootfs(test_setup)?;
 
@@ -231,10 +232,10 @@ pub fn build_and_run<'a>(
     ram_mib: u32,
     rootfs: krun::FsDevice<'a>,
     payload: krun::Payload,
+    stdin: &'a Stdin,
+    stdout: &'a Stdout,
+    stderr: &'a Stderr,
 ) -> anyhow::Result<()> {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
     let mut console_builder = krun::ConsoleDevice::builder();
     console_builder
         .add_default_console(
