@@ -253,8 +253,10 @@ impl From<ResolvedShmRegion> for VirtioShmRegion {
 /// The [`attach`](AttachDevice::attach) method receives an [`AttachContext`]
 /// with all VMM capabilities. Adding new methods to `AttachContext` is a
 /// non-breaking change, so the trait signature never needs to change.
-pub trait AttachDevice<'a>: Send + 'a {
+#[cfg_attr(feature = "ffi", ffier::export(no_vtable))]
+pub trait AttachDevice<'a>: Send {
     /// Declare requirements before guest memory is created.
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn requirements(&self) -> DeviceRequirements {
         DeviceRequirements::default()
     }
@@ -264,6 +266,7 @@ pub trait AttachDevice<'a>: Send + 'a {
     /// The device should:
     /// 1. Perform any device-specific setup using `ctx` methods
     /// 2. Call [`ctx.register()`](AttachContext::register) to register on the transport bus
+    #[cfg_attr(feature = "ffi", ffier(skip))]
     fn attach(self: Box<Self>, ctx: &mut AttachContext) -> Result<(), VmmError>;
 }
 
@@ -316,7 +319,7 @@ impl<'a> MmioDeviceManager<'a> {
     /// Devices are attached in the order they are added. The device must
     /// implement [`AttachDevice`] — all built-in device types
     /// (`FsDevice`, `ConsoleDevice`, etc.) implement this trait.
-    pub fn add(&mut self, device: impl AttachDevice<'a>) -> &mut Self {
+    pub fn add(&mut self, device: impl AttachDevice<'a> + 'a) -> &mut Self {
         self.devices.push(Box::new(device));
         self
     }
@@ -458,7 +461,7 @@ pub struct FsDevice<'a> {
 
 #[cfg_attr(
     feature = "ffi",
-    ffier::export(cfg = "not(any(feature = \"tee\", feature = \"aws-nitro\"))")
+    ffier::export(send, cfg = "not(any(feature = \"tee\", feature = \"aws-nitro\"))")
 )]
 #[cfg_attr(
     not(feature = "ffi"),
@@ -618,7 +621,7 @@ pub struct ConsoleBuilder<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export)]
+#[cfg_attr(feature = "ffi", ffier::export(send))]
 impl<'a> ConsoleDevice<'a> {
     /// Create a new console builder.
     pub fn builder() -> ConsoleBuilder<'a> {
@@ -1108,7 +1111,7 @@ pub struct BalloonDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Balloon>>,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(feature = \"tee\")"))]
+#[cfg_attr(feature = "ffi", ffier::export(send, cfg = "not(feature = \"tee\")"))]
 #[cfg_attr(not(feature = "ffi"), cfg(not(feature = "tee")))]
 impl BalloonDevice {
     pub fn new() -> Result<Self, VmmError> {
@@ -1136,7 +1139,7 @@ pub struct RngDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Rng>>,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(feature = \"tee\")"))]
+#[cfg_attr(feature = "ffi", ffier::export(send, cfg = "not(feature = \"tee\")"))]
 #[cfg_attr(not(feature = "ffi"), cfg(not(feature = "tee")))]
 impl RngDevice {
     pub fn new() -> Result<Self, VmmError> {
@@ -1176,7 +1179,7 @@ pub struct VsockDevice {
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export)]
+#[cfg_attr(feature = "ffi", ffier::export(send))]
 impl VsockDevice {
     /// Create a new vsock device.
     ///
@@ -1255,7 +1258,7 @@ pub struct BlockDevice {
     sync_mode: SyncMode,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"blk\""))]
+#[cfg_attr(feature = "ffi", ffier::export(send, cfg = "feature = \"blk\""))]
 #[cfg_attr(not(feature = "ffi"), cfg(feature = "blk"))]
 impl BlockDevice {
     /// Create a new block device.
@@ -1335,7 +1338,7 @@ pub struct NetDevice {
     pub(crate) inner: Arc<Mutex<devices::virtio::Net>>,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"net\""))]
+#[cfg_attr(feature = "ffi", ffier::export(send, cfg = "feature = \"net\""))]
 #[cfg_attr(not(feature = "ffi"), cfg(feature = "net"))]
 #[cfg(not(target_os = "windows"))]
 impl NetDevice {
@@ -1629,7 +1632,7 @@ pub struct GpuDevice {
     shm_size: usize,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"gpu\""))]
+#[cfg_attr(feature = "ffi", ffier::export(send, cfg = "feature = \"gpu\""))]
 #[cfg_attr(not(feature = "ffi"), cfg(feature = "gpu"))]
 impl GpuDevice {
     const DEFAULT_SHM_SIZE: usize = 1 << 33;
@@ -1702,7 +1705,7 @@ pub struct VhostUserDevice {
 
 #[cfg_attr(
     feature = "ffi",
-    ffier::export(cfg = "all(feature = \"vhost-user\", target_os = \"linux\")")
+    ffier::export(send, cfg = "all(feature = \"vhost-user\", target_os = \"linux\")")
 )]
 #[cfg_attr(
     not(feature = "ffi"),
@@ -1794,7 +1797,7 @@ pub struct InputDevice<'a> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"input\""))]
+#[cfg_attr(feature = "ffi", ffier::export(send, cfg = "feature = \"input\""))]
 #[cfg_attr(not(feature = "ffi"), cfg(feature = "input"))]
 impl<'a> InputDevice<'a> {
     /// Create from opaque config/events backend vtables.

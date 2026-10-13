@@ -346,7 +346,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "ffier"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=5629e94ab63ff2f3a3e9d605b77af79467dbf402#5629e94ab63ff2f3a3e9d605b77af79467dbf402"
 dependencies = [
  "ffier-builtins",
  "ffier-impl",
@@ -356,7 +356,7 @@ dependencies = [
 [[package]]
 name = "ffier-builtins"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=5629e94ab63ff2f3a3e9d605b77af79467dbf402#5629e94ab63ff2f3a3e9d605b77af79467dbf402"
 dependencies = [
  "ffier-impl",
  "ffier-rt",
@@ -365,7 +365,7 @@ dependencies = [
 [[package]]
 name = "ffier-gen-rust-client"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=5629e94ab63ff2f3a3e9d605b77af79467dbf402#5629e94ab63ff2f3a3e9d605b77af79467dbf402"
 dependencies = [
  "ffier-schema",
  "serde_json",
@@ -374,7 +374,7 @@ dependencies = [
 [[package]]
 name = "ffier-impl"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=5629e94ab63ff2f3a3e9d605b77af79467dbf402#5629e94ab63ff2f3a3e9d605b77af79467dbf402"
 dependencies = [
  "ffier-schema",
  "proc-macro2",
@@ -386,12 +386,12 @@ dependencies = [
 [[package]]
 name = "ffier-rt"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=5629e94ab63ff2f3a3e9d605b77af79467dbf402#5629e94ab63ff2f3a3e9d605b77af79467dbf402"
 
 [[package]]
 name = "ffier-schema"
 version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+source = "git+https://github.com/mtjhrc/ffier.git?rev=5629e94ab63ff2f3a3e9d605b77af79467dbf402#5629e94ab63ff2f3a3e9d605b77af79467dbf402"
 dependencies = [
  "serde",
  "serde_json",

@@ -15,6 +15,7 @@
           "c_name": "KrunAttachDevice"
         }
       },
+      "type_tag": 16777244,
       "lifetime_params": [
         "a"
       ]
@@ -464,6 +465,9 @@
               "trait_name": "AttachDevice",
               "type_args": [
                 "a"
+              ],
+              "lifetime_bounds": [
+                "a"
               ]
             }
           ],
@@ -479,6 +483,9 @@
       "name": "FsDevice",
       "destroy_ffi_name": "krun_fs_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -635,6 +642,9 @@
       "name": "ConsoleDevice",
       "destroy_ffi_name": "krun_console_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "builder",
@@ -1622,6 +1632,9 @@
       "name": "BalloonDevice",
       "destroy_ffi_name": "krun_balloon_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -1644,6 +1657,9 @@
       "name": "RngDevice",
       "destroy_ffi_name": "krun_rng_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -1666,6 +1682,9 @@
       "name": "VsockDevice",
       "destroy_ffi_name": "krun_vsock_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -1754,6 +1773,9 @@
       "name": "BlockDevice",
       "destroy_ffi_name": "krun_block_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -1857,6 +1879,9 @@
       "name": "NetDevice",
       "destroy_ffi_name": "krun_net_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new_unixgram_path",
@@ -2188,6 +2213,9 @@
       "name": "VhostUserDevice",
       "destroy_ffi_name": "krun_vhost_user_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -2337,6 +2365,9 @@
       "name": "GpuDevice",
       "destroy_ffi_name": "krun_gpu_device_destroy",
       "is_builder_type": true,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -2382,6 +2413,9 @@
       "name": "InputDevice",
       "destroy_ffi_name": "krun_input_device_destroy",
       "is_builder_type": false,
+      "thread_safety": {
+        "send": true
+      },
       "methods": [
         {
           "name": "new",
@@ -2472,60 +2506,79 @@
   "errors": [
     {
       "name": "VmmError",
+      "type_tag": 16777217,
       "variants": [
         {
           "name": "InvalidParam",
           "c_name": "KRUN_ERROR_VMM_INVALID_PARAM",
           "code": 1,
-          "message": "InvalidParam"
+          "message": "InvalidParam",
+          "constructible": true,
+          "is_unit": false
         },
         {
           "name": "MissingConfig",
           "c_name": "KRUN_ERROR_VMM_MISSING_CONFIG",
           "code": 2,
-          "message": "MissingConfig(...)"
+          "message": "MissingConfig(...)",
+          "constructible": false,
+          "is_unit": false
         },
         {
           "name": "OutOfRange",
           "c_name": "KRUN_ERROR_VMM_OUT_OF_RANGE",
           "code": 3,
-          "message": "OutOfRange"
+          "message": "OutOfRange",
+          "constructible": true,
+          "is_unit": false
         },
         {
           "name": "FileNotFound",
           "c_name": "KRUN_ERROR_VMM_FILE_NOT_FOUND",
           "code": 4,
-          "message": "FileNotFound"
+          "message": "FileNotFound",
+          "constructible": true,
+          "is_unit": false
         },
         {
           "name": "ResourceAlloc",
           "c_name": "KRUN_ERROR_VMM_RESOURCE_ALLOC",
           "code": 5,
-          "message": "ResourceAlloc"
+          "message": "ResourceAlloc",
+          "constructible": true,
+          "is_unit": false
         },
         {
           "name": "BadFd",
           "c_name": "KRUN_ERROR_VMM_BAD_FD",
           "code": 6,
-          "message": "BadFd"
+          "message": "BadFd",
+          "constructible": true,
+          "is_unit": false
         },
         {
           "name": "FeatureDisabled",
           "c_name": "KRUN_ERROR_VMM_FEATURE_DISABLED",
           "code": 7,
-          "message": "FeatureDisabled"
+          "message": "FeatureDisabled",
+          "constructible": true,
+          "is_unit": false
         },
         {
           "name": "BootError",
           "c_name": "KRUN_ERROR_VMM_BOOT_ERROR",
           "code": 8,
-          "message": "BootError(...)"
+          "message": "BootError(...)",
+          "constructible": false,
+          "is_unit": false
         },
         {
           "name": "Internal",
           "c_name": "KRUN_ERROR_VMM_INTERNAL",
           "code": 9,
-          "message": "Internal(...)"
+          "message": "Internal(...)",
+          "constructible": false,
+          "is_unit": false
         }
       ]
     }
@@ -2780,6 +2833,22 @@
   ],
   "traits": [
     {
+      "name": "AttachDevice",
+      "destroy_ffi_name": "krun_attach_device_destroy",
+      "type_tag_constant": "KRUN_ATTACH_DEVICE_TYPE_TAG",
+      "vtable_struct_c_name": "KrunAttachDeviceVtable",
+      "wrapper_c_name": "KrunVtableAttachDevice",
+      "vtable_struct_name": "AttachDeviceVtable",
+      "wrapper_name": "VtableAttachDevice",
+      "thread_safety": {
+        "send": true
+      },
+      "methods": [],
+      "own_method_count": 0,
+      "max_vtable_slot": 0,
+      "no_vtable": true
+    },
+    {
       "name": "PushStr",
       "destroy_ffi_name": "krun_push_str_destroy",
       "type_tag_constant": "KRUN_PUSH_STR_TYPE_TAG",
@@ -2843,7 +2912,8 @@
             {
               "name": "writer",
               "param_kind": "impl_trait",
-              "trait_name": "PushStr"
+              "trait_name": "PushStr",
+              "ref_kind": "mut"
             }
           ],
           "ret": {
@@ -3023,7 +3093,8 @@
             {
               "name": "writer",
               "param_kind": "impl_trait",
-              "trait_name": "PushStr"
+              "trait_name": "PushStr",
+              "ref_kind": "mut"
             }
           ],
           "ret": {

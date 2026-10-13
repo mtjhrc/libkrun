@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 
 typedef void* KrunInitConfigError;
 typedef void* KrunInitApplyError;
@@ -34,6 +37,21 @@ typedef struct {
 /**
  * Stack-allocated temporary handle for passing vtable-based objects.
  * Only valid for the duration of the call — the callee borrows, not owns.
+ * Use only for borrowed callback parameters. Never pass it to an owned parameter.
+ * Borrowed callbacks cannot be retained, destroyed, or used after the call.
+ * Owned callbacks require a heap handle with ffier's owned layout and transfer ownership.
+ * Allocation must be compatible with Rust's allocator; never transfer a stack handle.
+ * The caller must not use or destroy a transferred handle. The callee destroys
+ * it exactly once when released, calling the vtable drop callback once if present.
+ * Keep vtable and user_data valid until that destruction, not merely call return.
+ * A + 'static API requires callback data with no expiring borrows. Other lifetime
+ * bounds require release before borrowed data expires. C must enforce these bounds.
+ * Thread guarantees depend on the exported trait, not this raw handle layout.
+ * Send permits owned/mutable callback transfer and destruction on another thread.
+ * Sync permits concurrent shared callbacks. Mutable access always requires exclusivity.
+ * Vtable storage, user_data, callback functions, and drop must uphold those guarantees.
+ * Vtable storage remains valid and immutable throughout callback use.
+ * Shared borrowed callbacks may transfer with Sync; Send alone is insufficient.
  */
 typedef struct {
     uint32_t type_tag;
@@ -182,6 +200,7 @@ typedef void (*krun_init_builder_destroy_fn)(KrunInitBuilder handle);
 #define KRUN_INIT_PUSH_STR_TYPE_TAG 33554433
 
 typedef struct {
+    /* Releases transferred user_data exactly once; never called for borrowed parameters. */
     void (*drop)(void* self_data);
     bool (*push)(void* self_data, KrunStr s);
 } KrunInitPushStrVtable;
@@ -198,9 +217,10 @@ typedef void (*krun_init_push_str_destroy_fn)(KrunInitPushStr handle);
 #define KRUN_INIT_ERROR_TYPE_TAG 33554434
 
 typedef struct {
+    /* Releases transferred user_data exactly once; never called for borrowed parameters. */
     void (*drop)(void* self_data);
     uint32_t (*code)(void* self_data);
-    void (*message)(void* self_data, KrunInitPushStr writer);
+    void (*message)(void* self_data, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
     uint64_t (*result)(void* self_data);
 } KrunInitErrorVtable;
 
@@ -208,20 +228,38 @@ typedef struct {
 
 uint32_t krun_init_error_code(KrunInitError handle);
 typedef uint32_t (*krun_init_error_code_fn)(KrunInitError handle);
-void krun_init_error_message(KrunInitError handle, KrunInitPushStr writer);
-typedef void (*krun_init_error_message_fn)(KrunInitError handle, KrunInitPushStr writer);
+void krun_init_error_message(KrunInitError handle, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
+typedef void (*krun_init_error_message_fn)(KrunInitError handle, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
 uint64_t krun_init_error_result(KrunInitError handle);
 typedef uint64_t (*krun_init_error_result_fn)(KrunInitError handle);
 void krun_init_error_destroy(KrunInitError handle);
 typedef void (*krun_init_error_destroy_fn)(KrunInitError handle);
 uint32_t krun_init_config_error_code(KrunInitConfigError handle);
 typedef uint32_t (*krun_init_config_error_code_fn)(KrunInitConfigError handle);
-void krun_init_config_error_message(KrunInitConfigError handle, KrunInitPushStr writer);
-typedef void (*krun_init_config_error_message_fn)(KrunInitConfigError handle, KrunInitPushStr writer);
+void krun_init_config_error_message(KrunInitConfigError handle, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
+typedef void (*krun_init_config_error_message_fn)(KrunInitConfigError handle, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
 uint32_t krun_init_apply_error_code(KrunInitApplyError handle);
 typedef uint32_t (*krun_init_apply_error_code_fn)(KrunInitApplyError handle);
-void krun_init_apply_error_message(KrunInitApplyError handle, KrunInitPushStr writer);
-typedef void (*krun_init_apply_error_message_fn)(KrunInitApplyError handle, KrunInitPushStr writer);
+void krun_init_apply_error_message(KrunInitApplyError handle, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
+typedef void (*krun_init_apply_error_message_fn)(KrunInitApplyError handle, KrunInitPushStr writer /* mutable borrowed callback; call-scoped */);
+/* Create an owned fieldless error; returns NULL for payload variants or unknown codes.
+ * Destroy once with error_destroy or transfer ownership to a callback caller. */
+void* krun_init_error_new(KrunResult r);
+typedef void* (*krun_init_error_new_fn)(KrunResult r);
+/* Construct an owned error. Handle fields transfer ownership; strings are copied. */
+void* krun_init_config_error_invalid_json_new(KrunStr field_0);
+typedef void* (*krun_init_config_error_invalid_json_new_fn)(KrunStr field_0);
+/* Construct an owned error. Handle fields transfer ownership; strings are copied. */
+void* krun_init_apply_error_symbol_not_found_new(KrunStr field_0);
+typedef void* (*krun_init_apply_error_symbol_not_found_new_fn)(KrunStr field_0);
+/* Borrow an indexed payload field into an aligned buffer. Invalid indices leave it untouched.
+ * The data must not outlive the error. Handle fields return borrowed shells: destroy each shell
+ * before destroying the error, without consuming or mutating the field. */
+void krun_init_error_field(const void* handle, size_t index, void* out_buf, size_t buf_size);
+typedef void (*krun_init_error_field_fn)(const void* handle, size_t index, void* out_buf, size_t buf_size);
+/* Equivalent to error_field(handle, 0, out_buf, buf_size). */
+void krun_init_error_payload(const void* handle, void* out_buf, size_t buf_size);
+typedef void (*krun_init_error_payload_fn)(const void* handle, void* out_buf, size_t buf_size);
 KrunStr krun_init_result_name(KrunResult r);
 typedef KrunStr (*krun_init_result_name_fn)(KrunResult r);
 const char* krun_init_result_name_cstr(KrunResult r);

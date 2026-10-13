@@ -29,3 +29,8 @@ resolver = "2"
 [profile.release]
 #panic = "abort"
 lto = true
+
+[workspace.dependencies]
+ffier = { git = "https://github.com/mtjhrc/ffier.git", rev = "5629e94ab63ff2f3a3e9d605b77af79467dbf402" }
+ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", rev = "5629e94ab63ff2f3a3e9d605b77af79467dbf402" }
+ffier-gen-rust-client = { git = "https://github.com/mtjhrc/ffier.git", rev = "5629e94ab63ff2f3a3e9d605b77af79467dbf402" }

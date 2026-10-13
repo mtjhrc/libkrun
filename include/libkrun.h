@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 
 typedef void* KrunVmmError;
 typedef void* KrunMmioDeviceManager;
@@ -51,6 +54,16 @@ typedef struct {
     size_t len;
 } KrunBytes;
 
+/* Writable initialized bytes; len must not exceed Rust's isize::MAX.
+ * For nonempty buffers, data must be non-null and valid for reads and writes.
+ * Keep the buffer valid and exclusively accessible for the call and for every
+ * active Rust borrow, including any borrow returned or retained by the API.
+ * A zero-length buffer may have a null data pointer. */
+typedef struct {
+    uint8_t* data;
+    size_t len;
+} KrunBytesMut;
+
 #define KRUN_STR(s) ((KrunStr){ .data = (s), .len = (s) ? strlen(s) : 0 })
 #if defined(__GNUC__)
 #define KRUN_BYTES(arr) ({ \
@@ -67,6 +80,21 @@ typedef struct {
 /**
  * Stack-allocated temporary handle for passing vtable-based objects.
  * Only valid for the duration of the call — the callee borrows, not owns.
+ * Use only for borrowed callback parameters. Never pass it to an owned parameter.
+ * Borrowed callbacks cannot be retained, destroyed, or used after the call.
+ * Owned callbacks require a heap handle with ffier's owned layout and transfer ownership.
+ * Allocation must be compatible with Rust's allocator; never transfer a stack handle.
+ * The caller must not use or destroy a transferred handle. The callee destroys
+ * it exactly once when released, calling the vtable drop callback once if present.
+ * Keep vtable and user_data valid until that destruction, not merely call return.
+ * A + 'static API requires callback data with no expiring borrows. Other lifetime
+ * bounds require release before borrowed data expires. C must enforce these bounds.
+ * Thread guarantees depend on the exported trait, not this raw handle layout.
+ * Send permits owned/mutable callback transfer and destruction on another thread.
+ * Sync permits concurrent shared callbacks. Mutable access always requires exclusivity.
+ * Vtable storage, user_data, callback functions, and drop must uphold those guarantees.
+ * Vtable storage remains valid and immutable throughout callback use.
+ * Shared borrowed callbacks may transfer with Sync; Send alone is insufficient.
  */
 typedef struct {
     uint32_t type_tag;
@@ -198,13 +226,17 @@ typedef KrunMmioDeviceManager (*krun_mmio_device_manager_new_fn)();
  * implement [`AttachDevice`] — all built-in device types
  * (`FsDevice`, `ConsoleDevice`, etc.) implement this trait.
  */
-void krun_mmio_device_manager_add(KrunMmioDeviceManager handle, KrunAttachDevice device);
-typedef void (*krun_mmio_device_manager_add_fn)(KrunMmioDeviceManager handle, KrunAttachDevice device);
+void krun_mmio_device_manager_add(KrunMmioDeviceManager handle, KrunAttachDevice device /* owned callback; valid until release; Send; trait arguments: 'a; value bounds: 'a */);
+typedef void (*krun_mmio_device_manager_add_fn)(KrunMmioDeviceManager handle, KrunAttachDevice device /* owned callback; valid until release; Send; trait arguments: 'a; value bounds: 'a */);
 void krun_mmio_device_manager_destroy(KrunMmioDeviceManager handle);
 typedef void (*krun_mmio_device_manager_destroy_fn)(KrunMmioDeviceManager handle);
 
 /* FsDevice ---------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /**
  * Create a new virtiofs device sharing a host directory.
  *
@@ -249,6 +281,10 @@ typedef void (*krun_fs_device_destroy_fn)(KrunFsDevice handle);
 
 /* ConsoleDevice ----------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /** Create a new console builder. */
 KrunConsoleBuilder krun_console_device_builder();
 typedef KrunConsoleBuilder (*krun_console_device_builder_fn)();
@@ -465,6 +501,10 @@ typedef void (*krun_vmm_handle_destroy_fn)(KrunVmmHandle handle);
 
 /* BalloonDevice ----------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 KrunBalloonDevice krun_balloon_device_new(KrunError* err_out);
 typedef KrunBalloonDevice (*krun_balloon_device_new_fn)(KrunError* err_out);
 void krun_balloon_device_destroy(KrunBalloonDevice handle);
@@ -472,6 +512,10 @@ typedef void (*krun_balloon_device_destroy_fn)(KrunBalloonDevice handle);
 
 /* RngDevice --------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 KrunRngDevice krun_rng_device_new(KrunError* err_out);
 typedef KrunRngDevice (*krun_rng_device_new_fn)(KrunError* err_out);
 void krun_rng_device_destroy(KrunRngDevice handle);
@@ -479,6 +523,10 @@ typedef void (*krun_rng_device_destroy_fn)(KrunRngDevice handle);
 
 /* VsockDevice ------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /**
  * Create a new vsock device.
  *
@@ -497,6 +545,10 @@ typedef void (*krun_vsock_device_destroy_fn)(KrunVsockDevice handle);
 
 /* BlockDevice ------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /**
  * Create a new block device.
  *
@@ -524,6 +576,10 @@ typedef void (*krun_block_device_destroy_fn)(KrunBlockDevice handle);
 
 /* NetDevice --------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /** Create a net device backed by a Unix datagram socket path. */
 KrunNetDevice krun_net_device_new_unixgram_path(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, uint32_t flags, KrunError* err_out);
 typedef KrunNetDevice (*krun_net_device_new_unixgram_path_fn)(KrunStr id, KrunStr path, KrunBytes mac, uint32_t features, uint32_t flags, KrunError* err_out);
@@ -566,6 +622,10 @@ typedef void (*krun_display_info_builder_destroy_fn)(KrunDisplayInfoBuilder hand
 
 /* VhostUserDevice --------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /**
  * Create a new vhost-user device.
  *
@@ -606,6 +666,10 @@ typedef void (*krun_display_backend_destroy_fn)(KrunDisplayBackend handle);
 
 /* GpuDevice --------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 KrunGpuDevice krun_gpu_device_new(uint32_t virgl_flags, KrunDisplayBackend backend);
 typedef KrunGpuDevice (*krun_gpu_device_new_fn)(uint32_t virgl_flags, KrunDisplayBackend backend);
 void krun_gpu_device_shm_size(KrunGpuDevice* handle, size_t size);
@@ -615,6 +679,10 @@ typedef void (*krun_gpu_device_destroy_fn)(KrunGpuDevice handle);
 
 /* InputDevice ------------------------------------------------------- */
 
+/* Thread-safety contract:
+ * Send: ownership and mutable borrows may transfer between threads; destruction may run there.
+ * Mutable access and destruction require exclusive access. Lifetime bounds still apply.
+ */
 /**
  * Create from opaque config/events backend vtables.
  *
@@ -639,11 +707,17 @@ typedef KrunInputDevice (*krun_input_device_new_from_fd_fn)(int input_fd, KrunEr
 void krun_input_device_destroy(KrunInputDevice handle);
 typedef void (*krun_input_device_destroy_fn)(KrunInputDevice handle);
 
+/* AttachDevice (dispatch) ------------------------------------------- */
+
+void krun_attach_device_destroy(KrunAttachDevice handle);
+typedef void (*krun_attach_device_destroy_fn)(KrunAttachDevice handle);
+
 /* KrunPushStrVtable ------------------------------------------------- */
 
 #define KRUN_PUSH_STR_TYPE_TAG 16777228
 
 typedef struct {
+    /* Releases transferred user_data exactly once; never called for borrowed parameters. */
     void (*drop)(void* self_data);
     bool (*push)(void* self_data, KrunStr s);
 } KrunPushStrVtable;
@@ -660,9 +734,10 @@ typedef void (*krun_push_str_destroy_fn)(KrunPushStr handle);
 #define KRUN_ERROR_TYPE_TAG 16777229
 
 typedef struct {
+    /* Releases transferred user_data exactly once; never called for borrowed parameters. */
     void (*drop)(void* self_data);
     uint32_t (*code)(void* self_data);
-    void (*message)(void* self_data, KrunPushStr writer);
+    void (*message)(void* self_data, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
     uint64_t (*result)(void* self_data);
 } KrunErrorVtable;
 
@@ -670,16 +745,16 @@ typedef struct {
 
 uint32_t krun_error_code(KrunError handle);
 typedef uint32_t (*krun_error_code_fn)(KrunError handle);
-void krun_error_message(KrunError handle, KrunPushStr writer);
-typedef void (*krun_error_message_fn)(KrunError handle, KrunPushStr writer);
+void krun_error_message(KrunError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
+typedef void (*krun_error_message_fn)(KrunError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
 uint64_t krun_error_result(KrunError handle);
 typedef uint64_t (*krun_error_result_fn)(KrunError handle);
 void krun_error_destroy(KrunError handle);
 typedef void (*krun_error_destroy_fn)(KrunError handle);
 uint32_t krun_vmm_error_code(KrunVmmError handle);
 typedef uint32_t (*krun_vmm_error_code_fn)(KrunVmmError handle);
-void krun_vmm_error_message(KrunVmmError handle, KrunPushStr writer);
-typedef void (*krun_vmm_error_message_fn)(KrunVmmError handle, KrunPushStr writer);
+void krun_vmm_error_message(KrunVmmError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
+typedef void (*krun_vmm_error_message_fn)(KrunVmmError handle, KrunPushStr writer /* mutable borrowed callback; call-scoped */);
 
 /* Free functions ---------------------------------------------------- */
 
@@ -687,6 +762,18 @@ KrunResult krun_init_log(int target, uint32_t level, uint32_t style, uint32_t op
 typedef KrunResult (*krun_init_log_fn)(int target, uint32_t level, uint32_t style, uint32_t options, KrunError* err_out);
 bool krun_check_nested_virt(void);
 typedef bool (*krun_check_nested_virt_fn)(void);
+/* Create an owned fieldless error; returns NULL for payload variants or unknown codes.
+ * Destroy once with error_destroy or transfer ownership to a callback caller. */
+void* krun_error_new(KrunResult r);
+typedef void* (*krun_error_new_fn)(KrunResult r);
+/* Borrow an indexed payload field into an aligned buffer. Invalid indices leave it untouched.
+ * The data must not outlive the error. Handle fields return borrowed shells: destroy each shell
+ * before destroying the error, without consuming or mutating the field. */
+void krun_error_field(const void* handle, size_t index, void* out_buf, size_t buf_size);
+typedef void (*krun_error_field_fn)(const void* handle, size_t index, void* out_buf, size_t buf_size);
+/* Equivalent to error_field(handle, 0, out_buf, buf_size). */
+void krun_error_payload(const void* handle, void* out_buf, size_t buf_size);
+typedef void (*krun_error_payload_fn)(const void* handle, void* out_buf, size_t buf_size);
 KrunStr krun_result_name(KrunResult r);
 typedef KrunStr (*krun_result_name_fn)(KrunResult r);
 const char* krun_result_name_cstr(KrunResult r);

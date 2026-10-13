@@ -10,8 +10,6 @@ use std::borrow::Cow;
 
 use crate::init_schema::{ConfigSchema, Mount};
 use crate::oci_schema::OciSchema;
-#[cfg(feature = "ffi")]
-use crate::{FfiBorrow, FfiType};
 
 #[cfg(feature = "direct")]
 pub type VmmError = krun::VmmError;
