@@ -2606,7 +2606,7 @@
           "code": 1,
           "message": "InvalidParam",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "MissingConfig",
@@ -2622,7 +2622,7 @@
           "code": 3,
           "message": "OutOfRange",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "FileNotFound",
@@ -2630,7 +2630,7 @@
           "code": 4,
           "message": "FileNotFound",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "ResourceAlloc",
@@ -2638,7 +2638,7 @@
           "code": 5,
           "message": "ResourceAlloc",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "BadFd",
@@ -2646,7 +2646,7 @@
           "code": 6,
           "message": "BadFd",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "FeatureDisabled",
@@ -2654,7 +2654,7 @@
           "code": 7,
           "message": "FeatureDisabled",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "BootError",
@@ -2684,7 +2684,7 @@
           "code": 1,
           "message": "InternalError",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "Again",
@@ -2692,7 +2692,7 @@
           "code": 2,
           "message": "Again",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "MethodNotSupported",
@@ -2700,7 +2700,7 @@
           "code": 3,
           "message": "MethodNotSupported",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         },
         {
           "name": "InvalidParam",
@@ -2708,7 +2708,7 @@
           "code": 4,
           "message": "InvalidParam",
           "constructible": true,
-          "is_unit": false
+          "is_unit": true
         }
       ]
     }

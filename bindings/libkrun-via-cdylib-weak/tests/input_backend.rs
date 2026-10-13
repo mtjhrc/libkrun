@@ -78,7 +78,7 @@ impl InputEventsImpl for Events {
                 value: -123_456,
             })),
             1 => Ok(None),
-            _ => Err(InputBackendError::InternalError()),
+            _ => Err(InputBackendError::InternalError),
         }
     }
 }
@@ -200,7 +200,7 @@ fn generated_callbacks_cross_the_native_input_abi() {
     );
     assert!(matches!(
         unsafe { InputBackendError::from_ffi(status, error) },
-        InputBackendError::InternalError()
+        InputBackendError::InternalError
     ));
     assert_eq!(config_drops.load(Ordering::SeqCst), 0);
     assert_eq!(events_drops.load(Ordering::SeqCst), 0);

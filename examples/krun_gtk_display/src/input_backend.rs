@@ -59,7 +59,7 @@ impl InputEventsImpl for GtkInputEventProvider {
             Ok(Some(event)) => Ok(Some(event)),
             Ok(None) => Ok(None),
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
-            Err(_) => Err(InputBackendError::InternalError()),
+            Err(_) => Err(InputBackendError::InternalError),
         }
     }
 }
@@ -128,7 +128,7 @@ impl InputQueryConfig for GtkInputConfig {
         ]
         .into_iter()
         .find(|candidate| *candidate as u8 == event_type)
-        .ok_or_else(InputBackendError::InvalidParam)?;
+        .ok_or(InputBackendError::InvalidParam)?;
 
         match (self, event_type) {
             (Self::Keyboard, InputEventType::Syn) => {

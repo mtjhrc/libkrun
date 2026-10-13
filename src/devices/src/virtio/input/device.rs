@@ -304,7 +304,7 @@ mod tests {
         }
 
         fn query_serial_name(&self, _name_buf: &mut [u8]) -> Result<u8, InputBackendError> {
-            Err(InputBackendError::MethodNotSupported())
+            Err(InputBackendError::MethodNotSupported)
         }
 
         fn query_device_ids(&self, ids: &mut InputDeviceIds) -> Result<(), InputBackendError> {
@@ -332,7 +332,7 @@ mod tests {
             abs_info: &mut InputAbsInfo,
         ) -> Result<(), InputBackendError> {
             if !matches!(abs_axis, 0 | 7) {
-                return Err(InputBackendError::InvalidParam());
+                return Err(InputBackendError::InvalidParam);
             }
             *abs_info = InputAbsInfo {
                 min: -100,
@@ -361,7 +361,7 @@ mod tests {
         fn get_read_notify_fd(&self) -> Result<BorrowedFd<'_>, InputBackendError> {
             self.ready.send(()).unwrap();
             if self.fail_ready.swap(false, Ordering::SeqCst) {
-                Err(InputBackendError::InternalError())
+                Err(InputBackendError::InternalError)
             } else {
                 Ok(unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) })
             }

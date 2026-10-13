@@ -45,7 +45,7 @@ impl<'a> VmmBuilder<'a> {
 
     pub fn vcpus(mut self, count: u8) -> Result<Self, VmmError> {
         if count == 0 {
-            return Err(VmmError::OutOfRange());
+            return Err(VmmError::OutOfRange);
         }
         self.vcpus = Some(count);
         Ok(self)
@@ -53,7 +53,7 @@ impl<'a> VmmBuilder<'a> {
 
     pub fn ram_mib(mut self, mib: u32) -> Result<Self, VmmError> {
         if mib == 0 {
-            return Err(VmmError::OutOfRange());
+            return Err(VmmError::OutOfRange);
         }
         self.ram_mib = Some(mib);
         Ok(self)
@@ -104,7 +104,7 @@ impl<'a> VmmBuilder<'a> {
 
     pub fn split_irqchip(mut self, enabled: bool) -> Result<Self, VmmError> {
         if enabled && !cfg!(target_arch = "x86_64") {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         self.split_irqchip = enabled;
         Ok(self)
@@ -117,7 +117,7 @@ impl<'a> VmmBuilder<'a> {
     /// in the ACPI DSDT and the RSDP is published in boot parameters.
     pub fn acpi(mut self, enabled: bool) -> Result<Self, VmmError> {
         if enabled && !cfg!(target_arch = "x86_64") {
-            return Err(VmmError::InvalidParam());
+            return Err(VmmError::InvalidParam);
         }
         self.acpi = enabled;
         Ok(self)
@@ -200,7 +200,7 @@ impl VmmHandle {
                 .map_err(|e| VmmError::Internal(format!("pause: {e}")))
         }
         #[cfg(not(target_os = "macos"))]
-        Err(VmmError::FeatureDisabled())
+        Err(VmmError::FeatureDisabled)
     }
 
     pub fn resume(&self) -> Result<(), VmmError> {
@@ -211,7 +211,7 @@ impl VmmHandle {
                 .map_err(|e| VmmError::Internal(format!("resume: {e}")))
         }
         #[cfg(not(target_os = "macos"))]
-        Err(VmmError::FeatureDisabled())
+        Err(VmmError::FeatureDisabled)
     }
 
     /// Signal the guest to perform an orderly ACPI shutdown.
@@ -225,14 +225,14 @@ impl VmmHandle {
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         {
             let Some(shutdown_efd) = &self.shutdown_efd else {
-                return Err(VmmError::FeatureDisabled());
+                return Err(VmmError::FeatureDisabled);
             };
             shutdown_efd
                 .write(1)
                 .map_err(|e| VmmError::Internal(format!("shutdown: {e}")))
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-        Err(VmmError::FeatureDisabled())
+        Err(VmmError::FeatureDisabled)
     }
 }
 
@@ -259,7 +259,7 @@ impl<'a> Vmm<'a> {
                     .map(|efd| efd.try_clone().expect("dup shutdown_efd")),
             }),
             #[cfg(feature = "aws-nitro")]
-            VmmInner::Nitro(_) => Err(VmmError::FeatureDisabled()),
+            VmmInner::Nitro(_) => Err(VmmError::FeatureDisabled),
         }
     }
 
@@ -350,7 +350,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
         })
         .map_err(|e| {
             log::error!("vm config: {e:?}");
-            VmmError::InvalidParam()
+            VmmError::InvalidParam
         })?;
 
     match payload.kind {
@@ -377,7 +377,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
             if let Some(qboot_bundle) = qboot_bundle {
                 vm_resources.set_qboot_bundle(qboot_bundle).map_err(|e| {
                     log::error!("qboot bundle: {e}");
-                    VmmError::InvalidParam()
+                    VmmError::InvalidParam
                 })?;
             }
             #[cfg(feature = "tdx")]
@@ -392,7 +392,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
             vm_resources.set_initrd_bundle(initrd_bundle);
             vm_resources.set_tee_config(tee_config_path).map_err(|e| {
                 log::error!("tee config: {e:?}");
-                VmmError::InvalidParam()
+                VmmError::InvalidParam
             })?;
         }
         #[cfg(feature = "aws-nitro")]
@@ -424,7 +424,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     let shutdown_efd = if builder_cfg.shutdown_support {
-        Some(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(|_| VmmError::ResourceAlloc())?)
+        Some(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(|_| VmmError::ResourceAlloc)?)
     } else {
         None
     };
