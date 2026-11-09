@@ -71,7 +71,9 @@ pub use vmm_builder::{Vmm, VmmBuilder, VmmHandle, check_nested_virt};
 pub use devices::virtio::net::device::VirtioNetBackend;
 pub use devices::virtio::port_io;
 
-#[cfg(feature = "input")]
+// Compiled whenever the FFI bridge is built, because the callback vocabulary
+// is part of the exported C ABI; `input` additionally builds the device.
+#[cfg(any(feature = "input", feature = "ffi"))]
 pub use krun_input::{
     InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent, InputEventType, InputEventsImpl,
     InputQueryConfig,
@@ -144,21 +146,16 @@ ffier::library_definition!("krun", library_tag = 1,
     #[cfg(not(feature = "tee"))]
     crate::api::device_builders::AttachDevice for crate::api::device_builders::RngDevice,
     crate::api::device_builders::AttachDevice for crate::api::device_builders::VsockDevice,
-    #[cfg(feature = "input")]
+    // The input callback vocabulary is part of the C ABI whenever the bridge
+    // is built, independent of whether the input device itself is compiled in.
+    // `InputDevice` below keeps its own `input` gate.
     krun_input::InputBackendError = 29,
-    #[cfg(feature = "input")]
     Error for krun_input::InputBackendError,
-    #[cfg(feature = "input")]
     trait krun_input::InputQueryConfig = 30,
-    #[cfg(feature = "input")]
     trait krun_input::InputEventsImpl = 31,
-    #[cfg(feature = "input")]
     value krun_input::InputEvent,
-    #[cfg(feature = "input")]
     value krun_input::InputDeviceIds,
-    #[cfg(feature = "input")]
     value krun_input::InputAbsInfo,
-    #[cfg(feature = "input")]
     enum krun_input::InputEventType,
     trait crate::api::device_builders::AttachDevice = 28,
     trait ffier_builtins::PushStr = 12,
