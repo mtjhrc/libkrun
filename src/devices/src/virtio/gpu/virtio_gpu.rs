@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::env;
+#[cfg(target_os = "linux")]
+use std::ffi::OsString;
 use std::io::IoSliceMut;
 #[cfg(target_os = "linux")]
-use std::os::unix::io::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd};
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +16,8 @@ use super::protocol::{
     GpuResponse, GpuResponsePlaneInfo, VIRTIO_GPU_BLOB_FLAG_CREATE_GUEST_HANDLE,
     VIRTIO_GPU_BLOB_MEM_HOST3D, VIRTIO_GPU_MAX_SCANOUTS, VirtioGpuResult,
 };
+#[cfg(target_os = "linux")]
+use crate::virtio::CrossDomainChannel;
 #[cfg(target_os = "macos")]
 use crossbeam_channel::{Sender, unbounded};
 use krun_display::{
@@ -27,16 +33,15 @@ use rutabaga_gfx::RUTABAGA_HANDLE_TYPE_MEM_DMABUF;
 use rutabaga_gfx::RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_FD;
 #[cfg(all(feature = "virgl_resource_map2", target_os = "linux"))]
 use rutabaga_gfx::RUTABAGA_HANDLE_TYPE_MEM_SHM;
-use rutabaga_gfx::{
-    RUTABAGA_CAPSET_VENUS, RUTABAGA_MAP_CACHE_MASK, RUTABAGA_PATH_TYPE_WAYLAND, ResourceCreate3D,
-    ResourceCreateBlob, Rutabaga, RutabagaBuilder, RutabagaComponentType, RutabagaDescriptor,
-    RutabagaFence, RutabagaFenceHandler, RutabagaIovec, RutabagaPath, RutabagaResult, Transfer3D,
-    VirtioFsLookup,
-};
 #[cfg(target_os = "linux")]
 use rutabaga_gfx::{
-    RUTABAGA_MAP_ACCESS_MASK, RUTABAGA_MAP_ACCESS_READ, RUTABAGA_MAP_ACCESS_RW,
-    RUTABAGA_MAP_ACCESS_WRITE, RUTABAGA_PATH_TYPE_PIPEWIRE, RUTABAGA_PATH_TYPE_X11,
+    RUTABAGA_CAPSET_CROSS_DOMAIN, RUTABAGA_MAP_ACCESS_MASK, RUTABAGA_MAP_ACCESS_READ,
+    RUTABAGA_MAP_ACCESS_RW, RUTABAGA_MAP_ACCESS_WRITE, RUTABAGA_PATH_TYPE_GPU, RutabagaPath,
+};
+use rutabaga_gfx::{
+    RUTABAGA_CAPSET_VENUS, RUTABAGA_MAP_CACHE_MASK, ResourceCreate3D, ResourceCreateBlob, Rutabaga,
+    RutabagaBuilder, RutabagaComponentType, RutabagaDescriptor, RutabagaFence,
+    RutabagaFenceHandler, RutabagaIovec, RutabagaResult, Transfer3D, VirtioFsLookup,
 };
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
@@ -48,13 +53,15 @@ use crate::virtio::fs::ExportTable;
 use crate::virtio::gpu::protocol::VIRTIO_GPU_FLAG_INFO_RING_IDX;
 use crate::virtio::{InterruptTransport, VirtioShmRegion};
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct GpuBackendConfig {
     pub(crate) capset_mask: u64,
     use_egl: bool,
     use_gles: bool,
     use_surfaceless: bool,
     use_render_server: bool,
+    #[cfg(target_os = "linux")]
+    paths: Vec<RutabagaPath>,
 }
 
 impl GpuBackendConfig {
@@ -79,6 +86,103 @@ impl GpuBackendConfig {
 
     pub fn set_render_server(&mut self, enable: bool) {
         self.use_render_server = enable;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_cross_domain_channel_path(
+        &mut self,
+        channel: CrossDomainChannel,
+        path: Option<PathBuf>,
+    ) -> Result<()> {
+        let path = path.filter(|path| !path.as_os_str().is_empty());
+        if path.is_some() && !self.cross_domain_enabled() {
+            return Err(GpuError::CrossDomainRequired);
+        }
+        self.set_rutabaga_path(channel as u32, path);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_cross_domain_channel_path_from_env(
+        &mut self,
+        channel: CrossDomainChannel,
+    ) -> Result<()> {
+        if !self.cross_domain_enabled() {
+            return Err(GpuError::CrossDomainRequired);
+        }
+        let path = discover_cross_domain_channel_path(channel)
+            .ok_or(GpuError::CrossDomainPathUnavailable)?;
+        self.set_cross_domain_channel_path(channel, Some(path))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_drm_render_node(&mut self, path: Option<PathBuf>) -> Result<()> {
+        let path = path.filter(|path| !path.as_os_str().is_empty());
+        // Rutabaga advertises all configured paths as guest channels with CrossDomain enabled.
+        if path.is_some() && self.cross_domain_enabled() {
+            return Err(GpuError::DrmRenderNodeWithCrossDomain);
+        }
+        self.set_rutabaga_path(RUTABAGA_PATH_TYPE_GPU, path);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cross_domain_enabled(&self) -> bool {
+        self.capset_mask & (1 << RUTABAGA_CAPSET_CROSS_DOMAIN) != 0
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_rutabaga_path(&mut self, path_type: u32, path: Option<PathBuf>) {
+        self.paths.retain(|entry| entry.path_type != path_type);
+        if let Some(path) = path {
+            self.paths.push(RutabagaPath { path, path_type });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rutabaga_paths(&self) -> Option<Vec<RutabagaPath>> {
+        (!self.paths.is_empty()).then(|| self.paths.clone())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn discover_cross_domain_channel_path(channel: CrossDomainChannel) -> Option<PathBuf> {
+    let get_var = |variable: &str| env::var_os(variable).filter(|value| !value.is_empty());
+    let socket_name = |variable, fallback: &str| {
+        PathBuf::from(get_var(variable).unwrap_or_else(|| OsString::from(fallback)))
+    };
+    let (socket, runtime_variables): (PathBuf, &[&str]) = match channel {
+        CrossDomainChannel::Wayland => (
+            socket_name("WAYLAND_DISPLAY", "wayland-0"),
+            &["XDG_RUNTIME_DIR"],
+        ),
+        CrossDomainChannel::X11 => {
+            let display = get_var("DISPLAY")?;
+            let local = display.to_str()?.strip_prefix(':')?;
+            let (display, screen) = local.split_once('.').unwrap_or((local, "0"));
+            if !display.bytes().all(|byte| byte.is_ascii_digit())
+                || !screen.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return None;
+            }
+            let display = display.parse::<u32>().ok()?;
+            screen.parse::<u32>().ok()?;
+            return Some(PathBuf::from(format!("/tmp/.X11-unix/X{display}")));
+        }
+        CrossDomainChannel::PipeWire => (
+            socket_name("PIPEWIRE_REMOTE", "pipewire-0"),
+            &["PIPEWIRE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "USERPROFILE"],
+        ),
+        CrossDomainChannel::DbusSession | CrossDomainChannel::DbusSystem => return None,
+    };
+
+    if socket.is_absolute() {
+        Some(socket)
+    } else {
+        let runtime_dir = runtime_variables
+            .iter()
+            .find_map(|variable| get_var(variable))?;
+        Some(PathBuf::from(runtime_dir).join(socket))
     }
 }
 
@@ -288,46 +392,6 @@ impl VirtioGpu {
         config: &GpuBackendConfig,
         export_table: Option<ExportTable>,
     ) -> Option<Rutabaga> {
-        let xdg_runtime_dir = match env::var("XDG_RUNTIME_DIR") {
-            Ok(dir) => dir,
-            Err(_) => "/run/user/1000".to_string(),
-        };
-        let wayland_display = match env::var("WAYLAND_DISPLAY") {
-            Ok(display) => display,
-            Err(_) => "wayland-0".to_string(),
-        };
-        let path = PathBuf::from(format!("{xdg_runtime_dir}/{wayland_display}"));
-
-        #[allow(unused_mut)]
-        let mut rutabaga_paths: Vec<RutabagaPath> = vec![RutabagaPath {
-            path,
-            path_type: RUTABAGA_PATH_TYPE_WAYLAND,
-        }];
-
-        #[cfg(target_os = "linux")]
-        if let Ok(x_display) = env::var("DISPLAY")
-            && let Some(x_display) = x_display.strip_prefix(":")
-        {
-            let x_path = PathBuf::from(format!("/tmp/.X11-unix/X{x_display}"));
-            rutabaga_paths.push(RutabagaPath {
-                path: x_path,
-                path_type: RUTABAGA_PATH_TYPE_X11,
-            });
-        }
-        #[cfg(target_os = "linux")]
-        if let Ok(pw_sock_dir) = env::var("PIPEWIRE_RUNTIME_DIR")
-            .or_else(|_| env::var("XDG_RUNTIME_DIR"))
-            .or_else(|_| env::var("USERPROFILE"))
-        {
-            let name = env::var("PIPEWIRE_REMOTE").unwrap_or_else(|_| "pipewire-0".to_string());
-            let mut pw_path = PathBuf::from(pw_sock_dir);
-            pw_path.push(name);
-            rutabaga_paths.push(RutabagaPath {
-                path: pw_path,
-                path_type: RUTABAGA_PATH_TYPE_PIPEWIRE,
-            });
-        }
-
         let fence =
             Self::create_fence_handler(mem, queue_ctl.clone(), fence_state.clone(), interrupt);
 
@@ -339,8 +403,12 @@ impl VirtioGpu {
             .set_use_egl(config.use_egl)
             .set_use_gles(config.use_gles)
             .set_use_surfaceless(config.use_surfaceless)
-            .set_use_render_server(config.use_render_server || venus)
-            .set_rutabaga_paths(Some(rutabaga_paths));
+            .set_use_render_server(config.use_render_server || venus);
+
+        #[cfg(target_os = "linux")]
+        {
+            builder = builder.set_rutabaga_paths(config.rutabaga_paths());
+        }
 
         if let Some(export_table) = export_table {
             let lookup: Arc<dyn VirtioFsLookup> = Arc::new(ExportTableLookup::new(export_table));
@@ -370,7 +438,7 @@ impl VirtioGpu {
         mem: GuestMemoryMmap,
         queue_ctl: Arc<Mutex<VirtQueue>>,
         interrupt: InterruptTransport,
-        config: GpuBackendConfig,
+        config: &GpuBackendConfig,
         #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
         export_table: Option<ExportTable>,
         displays: Box<[DisplayInfo]>,
@@ -383,7 +451,7 @@ impl VirtioGpu {
             queue_ctl.clone(),
             interrupt.clone(),
             fence_state.clone(),
-            &config,
+            config,
             export_table.clone(),
         ) {
             Some(rutabaga) => rutabaga,
@@ -1114,6 +1182,87 @@ fn checked_blob_map_addr(base: u64, offset: u64, size: u64, shm_size: u64) -> Op
 #[cfg(test)]
 mod test {
     use crate::virtio::gpu::protocol::VIRTIO_GPU_MAX_SCANOUTS;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rutabaga_paths_follow_capset_selection() {
+        use super::{CrossDomainChannel, GpuBackendConfig, GpuError};
+        use rutabaga_gfx::{
+            RUTABAGA_CAPSET_CROSS_DOMAIN, RUTABAGA_PATH_TYPE_GPU, RUTABAGA_PATH_TYPE_WAYLAND,
+        };
+        use std::path::PathBuf;
+
+        let mut config = GpuBackendConfig::default();
+        let wayland = CrossDomainChannel::Wayland;
+        assert!(matches!(
+            config.set_cross_domain_channel_path(wayland, Some("/run/wayland-0".into())),
+            Err(GpuError::CrossDomainRequired)
+        ));
+        assert!(matches!(
+            config.set_cross_domain_channel_path_from_env(CrossDomainChannel::DbusSystem),
+            Err(GpuError::CrossDomainRequired)
+        ));
+        config.set_cross_domain_channel_path(wayland, None).unwrap();
+        assert!(config.rutabaga_paths().is_none());
+
+        let render_node = PathBuf::from("/dev/dri/renderD128");
+        config
+            .set_drm_render_node(Some(render_node.clone()))
+            .unwrap();
+        let paths = config.rutabaga_paths().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path_type, RUTABAGA_PATH_TYPE_GPU);
+        assert_eq!(paths[0].path, render_node);
+        config.set_drm_render_node(None).unwrap();
+        assert!(config.rutabaga_paths().is_none());
+
+        let mut config = GpuBackendConfig::new(1 << RUTABAGA_CAPSET_CROSS_DOMAIN);
+        let wayland_socket = PathBuf::from("/run/wayland-1");
+        config
+            .set_cross_domain_channel_path(wayland, Some("/run/wayland-0".into()))
+            .unwrap();
+        config
+            .set_cross_domain_channel_path(wayland, Some(wayland_socket.clone()))
+            .unwrap();
+        assert!(matches!(
+            config.set_drm_render_node(Some(render_node)),
+            Err(GpuError::DrmRenderNodeWithCrossDomain)
+        ));
+        config.set_drm_render_node(None).unwrap();
+
+        let paths = config.rutabaga_paths().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path_type, RUTABAGA_PATH_TYPE_WAYLAND);
+        assert_eq!(paths[0].path, wayland_socket);
+
+        config
+            .set_cross_domain_channel_path(wayland, Some(PathBuf::new()))
+            .unwrap();
+        assert!(config.rutabaga_paths().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsupported_discovery_keeps_configured_path() {
+        use super::{CrossDomainChannel, GpuBackendConfig, GpuError};
+        use rutabaga_gfx::{RUTABAGA_CAPSET_CROSS_DOMAIN, RUTABAGA_PATH_TYPE_DBUS_SYSTEM};
+        use std::path::PathBuf;
+
+        let mut config = GpuBackendConfig::new(1 << RUTABAGA_CAPSET_CROSS_DOMAIN);
+        let channel = CrossDomainChannel::DbusSystem;
+        let socket = PathBuf::from("/run/dbus/system_bus_socket");
+        config
+            .set_cross_domain_channel_path(channel, Some(socket.clone()))
+            .unwrap();
+        assert!(matches!(
+            config.set_cross_domain_channel_path_from_env(channel),
+            Err(GpuError::CrossDomainPathUnavailable)
+        ));
+        let paths = config.rutabaga_paths().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path_type, RUTABAGA_PATH_TYPE_DBUS_SYSTEM);
+        assert_eq!(paths[0].path, socket);
+    }
 
     #[test]
     fn checked_blob_map_addr_rejects_out_of_range_and_wrapping_offsets() {

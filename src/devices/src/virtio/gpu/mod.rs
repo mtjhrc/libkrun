@@ -56,6 +56,12 @@ pub enum GpuError {
     WriteDescriptor(std::io::Error),
     /// Error reading Guest Memory,
     GuestMemory,
+    #[cfg(target_os = "linux")]
+    CrossDomainRequired,
+    #[cfg(target_os = "linux")]
+    CrossDomainPathUnavailable,
+    #[cfg(target_os = "linux")]
+    DrmRenderNodeWithCrossDomain,
 }
 
 type Result<T> = std::result::Result<T, GpuError>;

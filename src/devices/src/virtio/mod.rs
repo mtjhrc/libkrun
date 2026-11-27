@@ -63,6 +63,22 @@ pub use self::rtc::*;
 pub use self::vhost_user::VhostUserDevice;
 pub use self::vsock::*;
 
+/// Host socket channels supported by the cross-domain capset.
+#[cfg_attr(
+    feature = "ffi",
+    ffier::export(cfg = "all(feature = \"gpu\", target_os = \"linux\")")
+)]
+#[cfg_attr(not(feature = "ffi"), cfg(all(feature = "gpu", target_os = "linux")))]
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrossDomainChannel {
+    Wayland = 0x01,
+    PipeWire = 0x10,
+    X11 = 0x11,
+    DbusSession = 0x12,
+    DbusSystem = 0x13,
+}
+
 /// When the driver initializes the device, it lets the device know about the
 /// completed stages using the Device Status Field.
 ///

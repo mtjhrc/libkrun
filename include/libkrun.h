@@ -182,6 +182,16 @@ typedef struct {
 #define KRUN_SYNC_MODE_NONE 0
 #define KRUN_SYNC_MODE_RELAXED 1
 #define KRUN_SYNC_MODE_FULL 2
+#if (defined(__linux__) && !defined(__ANDROID__))
+
+/* CrossDomainChannel ------------------------------------------------ */
+
+#define KRUN_CROSS_DOMAIN_CHANNEL_WAYLAND 1
+#define KRUN_CROSS_DOMAIN_CHANNEL_PIPE_WIRE 16
+#define KRUN_CROSS_DOMAIN_CHANNEL_X11 17
+#define KRUN_CROSS_DOMAIN_CHANNEL_DBUS_SESSION 18
+#define KRUN_CROSS_DOMAIN_CHANNEL_DBUS_SYSTEM 19
+#endif
 
 /* FreePageReportingMode --------------------------------------------- */
 
@@ -971,6 +981,30 @@ void krun_gpu_device_render_server(KrunGpuDevice* handle, bool enable);
 typedef void (*krun_gpu_device_render_server_fn)(KrunGpuDevice* handle, bool enable);
 void krun_gpu_device_shm_size(KrunGpuDevice* handle, size_t size);
 typedef void (*krun_gpu_device_shm_size_fn)(KrunGpuDevice* handle, size_t size);
+#if (defined(__linux__) && !defined(__ANDROID__))
+/**
+ * Set or clear one host socket path. Setting a path requires `CROSS_DOMAIN`.
+ * Pass `None` (`KRUN_STR(NULL)` in C) to clear the path.
+ */
+KrunResult krun_gpu_device_set_cross_domain_channel_path(KrunGpuDevice handle, uint32_t channel, KrunStr path, KrunError* err_out);
+typedef KrunResult (*krun_gpu_device_set_cross_domain_channel_path_fn)(KrunGpuDevice handle, uint32_t channel, KrunStr path, KrunError* err_out);
+#endif
+#if (defined(__linux__) && !defined(__ANDROID__))
+/**
+ * Discover one Wayland, X11, or PipeWire socket from the host environment.
+ * Setting a path requires `CROSS_DOMAIN`.
+ */
+KrunResult krun_gpu_device_set_cross_domain_channel_path_from_env(KrunGpuDevice handle, uint32_t channel, KrunError* err_out);
+typedef KrunResult (*krun_gpu_device_set_cross_domain_channel_path_from_env_fn)(KrunGpuDevice handle, uint32_t channel, KrunError* err_out);
+#endif
+#if (defined(__linux__) && !defined(__ANDROID__))
+/**
+ * Set or clear the DRM render node for virglrenderer EGL.
+ * Setting a path requires a capset mask without `CROSS_DOMAIN`.
+ */
+KrunResult krun_gpu_device_set_drm_render_node(KrunGpuDevice handle, KrunStr path, KrunError* err_out);
+typedef KrunResult (*krun_gpu_device_set_drm_render_node_fn)(KrunGpuDevice handle, KrunStr path, KrunError* err_out);
+#endif
 void krun_gpu_device_destroy(KrunGpuDevice handle);
 typedef void (*krun_gpu_device_destroy_fn)(KrunGpuDevice handle);
 

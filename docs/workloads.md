@@ -79,6 +79,26 @@ The Linux kernel does not support mixed page sizes within a single kernel instan
 - **Filesystem**: Host filesystem shared into the guest via `FsDevice` (virtiofs).
 - **Consumers**: [`muvm`](https://github.com/AsahiLinux/muvm).
 
+On Linux, include `CROSS_DOMAIN` in the GPU capset mask to enable host socket forwarding.
+Host channels start unset. Call `GpuDevice::set_cross_domain_channel_path(channel, Some(path))`
+with a `CrossDomainChannel` and a UTF-8 socket path. Pass `None` to clear a channel.
+
+Call `GpuDevice::set_cross_domain_channel_path_from_env(channel)` to discover one host socket.
+
+- **Wayland** uses an absolute `WAYLAND_DISPLAY` or resolves a relative name under
+  `XDG_RUNTIME_DIR`. The default name is `wayland-0`.
+- **X11** maps local `DISPLAY` values such as `:0` and `:0.1` to `/tmp/.X11-unix/X0`.
+- **PipeWire** uses an absolute `PIPEWIRE_REMOTE` or resolves a relative name under the first
+  available directory from `PIPEWIRE_RUNTIME_DIR`, `XDG_RUNTIME_DIR`, and `USERPROFILE`.
+  The default name is `pipewire-0`.
+
+Discovery returns an error when required environment settings are missing. Set D-Bus socket
+paths explicitly.
+
+Use `GpuDevice::set_drm_render_node(Some(path))` to select a DRM render node. This requires
+`CROSS_DOMAIN` to be disabled because Rutabaga shares its path list with cross-domain.
+Pass `None` to clear the render node.
+
 ---
 
 ## Headless GPU Acceleration
