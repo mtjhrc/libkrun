@@ -976,9 +976,35 @@ void krun_gpu_device_use_gles(KrunGpuDevice* handle, bool enable);
 typedef void (*krun_gpu_device_use_gles_fn)(KrunGpuDevice* handle, bool enable);
 void krun_gpu_device_use_surfaceless(KrunGpuDevice* handle, bool enable);
 typedef void (*krun_gpu_device_use_surfaceless_fn)(KrunGpuDevice* handle, bool enable);
+/** Request external blob allocation from the renderer. */
+void krun_gpu_device_use_external_blob(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_use_external_blob_fn)(KrunGpuDevice* handle, bool enable);
+/** Use system blobs with gfxstream. */
+void krun_gpu_device_use_system_blob(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_use_system_blob_fn)(KrunGpuDevice* handle, bool enable);
+/** Allow sharing cross-domain ring blobs. */
+void krun_gpu_device_use_shareable_ring_blob(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_use_shareable_ring_blob_fn)(KrunGpuDevice* handle, bool enable);
+/** Override gfxstream's initial surface size in pixels. */
+void krun_gpu_device_set_display_size(KrunGpuDevice handle, uint32_t width, uint32_t height);
+typedef void (*krun_gpu_device_set_display_size_fn)(KrunGpuDevice handle, uint32_t width, uint32_t height);
+/** Set or clear the feature string passed to gfxstream. */
+KrunResult krun_gpu_device_set_renderer_features(KrunGpuDevice handle, KrunStr features, KrunError* err_out);
+typedef KrunResult (*krun_gpu_device_set_renderer_features_fn)(KrunGpuDevice handle, KrunStr features, KrunError* err_out);
+/** Route gfxstream's diagnostic messages through libkrun logging. */
+void krun_gpu_device_set_log_renderer_messages(KrunGpuDevice handle, bool enable);
+typedef void (*krun_gpu_device_set_log_renderer_messages_fn)(KrunGpuDevice handle, bool enable);
 /** Use the virglrenderer render server. Venus always enables it. */
 void krun_gpu_device_render_server(KrunGpuDevice* handle, bool enable);
 typedef void (*krun_gpu_device_render_server_fn)(KrunGpuDevice* handle, bool enable);
+#if !(defined(_WIN32))
+/**
+ * Take ownership of a virglrenderer server descriptor and enable the server.
+ * Pass `None` to clear the descriptor.
+ */
+void krun_gpu_device_set_render_server_fd(KrunGpuDevice handle, int fd);
+typedef void (*krun_gpu_device_set_render_server_fd_fn)(KrunGpuDevice handle, int fd);
+#endif
 void krun_gpu_device_shm_size(KrunGpuDevice* handle, size_t size);
 typedef void (*krun_gpu_device_shm_size_fn)(KrunGpuDevice* handle, size_t size);
 #if (defined(__linux__) && !defined(__ANDROID__))

@@ -38,7 +38,8 @@ pub struct Gpu {
     pub(crate) acked_features: u64,
     pub(crate) device_state: DeviceState,
     shm_region: Option<VirtioShmRegion>,
-    backend_config: GpuBackendConfig,
+    num_capsets: u32,
+    backend_config: Option<GpuBackendConfig>,
     #[cfg(target_os = "macos")]
     map_sender: Sender<WorkerMessage>,
     export_table: Option<ExportTable>,
@@ -59,7 +60,8 @@ impl Gpu {
             acked_features: 0,
             device_state: DeviceState::Inactive,
             shm_region: None,
-            backend_config,
+            num_capsets: backend_config.capset_mask.count_ones(),
+            backend_config: Some(backend_config),
             #[cfg(target_os = "macos")]
             map_sender,
             export_table: None,
@@ -174,7 +176,7 @@ impl VirtioDevice for Gpu {
             events_read: 0,
             events_clear: 0,
             num_scanouts: self.displays.len() as u32,
-            num_capsets: self.backend_config.capset_mask.count_ones(),
+            num_capsets: self.num_capsets,
             blob_alignment: self.blob_alignment,
         };
 
@@ -218,20 +220,24 @@ impl VirtioDevice for Gpu {
             None => panic!("virtio_gpu: missing SHM region"),
         };
 
+        let backend_config = self
+            .backend_config
+            .take()
+            .ok_or(ActivateError::BadActivate)?;
+
         // cursor queue not used by worker
         let worker = Worker::new(
             control_q,
             mem.clone(),
             interrupt.clone(),
             shm_region,
-            self.backend_config.clone(),
             #[cfg(target_os = "macos")]
             self.map_sender.clone(),
             self.export_table.take(),
             self.displays.clone(),
             self.display_backend,
         );
-        worker.run();
+        worker.run(backend_config);
 
         self.device_state = DeviceState::Activated(mem, interrupt);
 
