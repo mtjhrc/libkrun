@@ -102,6 +102,13 @@
         }
       ]
     },
+    "CrossDomainChannel": {
+      "kind": {
+        "enum": {
+          "alias_of": "u32"
+        }
+      }
+    },
     "DeviceManager": {
       "kind": {
         "trait": {
@@ -3403,6 +3410,93 @@
             "type": "Self"
           },
           "ffi_name": "krun_gpu_device_shm_size"
+        },
+        {
+          "name": "set_cross_domain_channel_path",
+          "doc": [
+            " Set or clear one host socket path. Setting a path requires `CROSS_DOMAIN`.",
+            " Pass `None` (`KRUN_STR(NULL)` in C) to clear the path."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "channel",
+              "param_kind": "regular",
+              "type": "CrossDomainChannel"
+            },
+            {
+              "name": "path",
+              "param_kind": "regular",
+              "type": "str",
+              "ref_kind": "shared",
+              "optional": true
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_gpu_device_set_cross_domain_channel_path",
+          "cfg": {
+            "kind": "target_os",
+            "value": "linux"
+          }
+        },
+        {
+          "name": "set_cross_domain_channel_path_from_env",
+          "doc": [
+            " Discover one Wayland, X11, or PipeWire socket from the host environment.",
+            " Setting a path requires `CROSS_DOMAIN`."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "channel",
+              "param_kind": "regular",
+              "type": "CrossDomainChannel"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_gpu_device_set_cross_domain_channel_path_from_env",
+          "cfg": {
+            "kind": "target_os",
+            "value": "linux"
+          }
+        },
+        {
+          "name": "set_drm_render_node",
+          "doc": [
+            " Set or clear the DRM render node for virglrenderer EGL.",
+            " Setting a path requires a capset mask without `CROSS_DOMAIN`."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "path",
+              "param_kind": "regular",
+              "type": "str",
+              "ref_kind": "shared",
+              "optional": true
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_gpu_device_set_drm_render_node",
+          "cfg": {
+            "kind": "target_os",
+            "value": "linux"
+          }
         }
       ],
       "cfg": {
@@ -3710,6 +3804,49 @@
           "value": 2
         }
       ]
+    },
+    {
+      "name": "CrossDomainChannel",
+      "variants": [
+        {
+          "name": "Wayland",
+          "c_name": "KRUN_CROSS_DOMAIN_CHANNEL_WAYLAND",
+          "value": 1
+        },
+        {
+          "name": "PipeWire",
+          "c_name": "KRUN_CROSS_DOMAIN_CHANNEL_PIPE_WIRE",
+          "value": 16
+        },
+        {
+          "name": "X11",
+          "c_name": "KRUN_CROSS_DOMAIN_CHANNEL_X11",
+          "value": 17
+        },
+        {
+          "name": "DbusSession",
+          "c_name": "KRUN_CROSS_DOMAIN_CHANNEL_DBUS_SESSION",
+          "value": 18
+        },
+        {
+          "name": "DbusSystem",
+          "c_name": "KRUN_CROSS_DOMAIN_CHANNEL_DBUS_SYSTEM",
+          "value": 19
+        }
+      ],
+      "cfg": {
+        "kind": "all",
+        "value": [
+          {
+            "kind": "feature",
+            "value": "gpu"
+          },
+          {
+            "kind": "target_os",
+            "value": "linux"
+          }
+        ]
+      }
     },
     {
       "name": "FreePageReportingMode",

@@ -224,7 +224,7 @@ impl VirtioDevice for Gpu {
             mem.clone(),
             interrupt.clone(),
             shm_region,
-            self.backend_config,
+            self.backend_config.clone(),
             #[cfg(target_os = "macos")]
             self.map_sender.clone(),
             self.export_table.take(),

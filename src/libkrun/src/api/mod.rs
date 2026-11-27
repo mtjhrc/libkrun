@@ -62,6 +62,8 @@ pub use device_builders::{
 pub use device_builders::{ConsoleBuilder, ConsoleDevice, TermSize};
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
 pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+pub use devices::virtio::CrossDomainChannel;
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::balloon::FreePageReportingMode;
 #[cfg(feature = "blk")]
@@ -152,6 +154,8 @@ ffier::library_definition!("krun", library_tag = 1,
     enum devices::virtio::block::DiskFormat,
     #[cfg(feature = "blk")]
     enum devices::virtio::block::SyncMode,
+    #[cfg(all(feature = "gpu", target_os = "linux"))]
+    enum devices::virtio::CrossDomainChannel,
     #[cfg(not(feature = "tee"))]
     enum devices::virtio::balloon::FreePageReportingMode,
     enum crate::api::logging::LogLevel,

@@ -92,7 +92,7 @@ impl Worker {
             self.mem.clone(),
             self.control_queue.clone(),
             self.interrupt.clone(),
-            self.backend_config,
+            &self.backend_config,
             #[cfg(target_os = "macos")]
             self.map_sender.clone(),
             self.export_table.take(),

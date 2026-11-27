@@ -30,6 +30,8 @@ use crate::vmm::device_manager::shm::ShmManager;
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
 use devices::display::{DisplayInfo, DisplayInfoEdid, PhysicalSize};
 use devices::legacy::IrqChip;
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+use devices::virtio::CrossDomainChannel;
 #[cfg(not(feature = "tee"))]
 use devices::virtio::balloon::FreePageReportingMode;
 #[cfg(feature = "blk")]
@@ -40,6 +42,8 @@ use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualE
 pub use devices::virtio::fs::{CachePolicy, PermissionSemantics};
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::GpuBackendConfig;
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+use devices::virtio::gpu::GpuError;
 use devices::virtio::{PortDescription, VirtioDevice, VirtioShmRegion, VmmExitObserver, port_io};
 #[cfg(feature = "input")]
 use krun_input;
@@ -2101,6 +2105,7 @@ export_bitflags! {
             const VIRGL        = 0x006;
             /// Venus for Vulkan acceleration. Enables the render server.
             const VENUS        = 0x010;
+            /// Cross-domain resource sharing and configured host channels.
             const CROSS_DOMAIN = 0x020;
             /// DRM native contexts.
             const DRM          = 0x040;
@@ -2114,7 +2119,9 @@ export_bitflags! {
         /// Guest capsets for a gfxstream GPU.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct GfxstreamCapsets: u64 {
+            /// Gfxstream Vulkan acceleration.
             const VULKAN       = 0x008;
+            /// Cross-domain resource sharing and configured host channels.
             const CROSS_DOMAIN = 0x020;
             const GLES         = 0x100;
             const COMPOSER     = 0x200;
@@ -2195,6 +2202,46 @@ impl GpuDevice {
     pub fn shm_size(mut self, size: usize) -> Self {
         self.shm_size = size;
         self
+    }
+
+    // TODO: Replace &str with &Path in both path setters in a follow-up ffier upgrade PR.
+    /// Set or clear one host socket path. Setting a path requires `CROSS_DOMAIN`.
+    /// Pass `None` (`KRUN_STR(NULL)` in C) to clear the path.
+    #[cfg(target_os = "linux")]
+    pub fn set_cross_domain_channel_path(
+        &mut self,
+        channel: CrossDomainChannel,
+        path: Option<&str>,
+    ) -> Result<(), VmmError> {
+        self.backend_config
+            .set_cross_domain_channel_path(channel, path.map(PathBuf::from))
+            .map_err(|_| VmmError::InvalidParam())
+    }
+
+    /// Discover one Wayland, X11, or PipeWire socket from the host environment.
+    /// Setting a path requires `CROSS_DOMAIN`.
+    #[cfg(target_os = "linux")]
+    pub fn set_cross_domain_channel_path_from_env(
+        &mut self,
+        channel: CrossDomainChannel,
+    ) -> Result<(), VmmError> {
+        self.backend_config
+            .set_cross_domain_channel_path_from_env(channel)
+            .map_err(|error| match error {
+                GpuError::CrossDomainPathUnavailable => {
+                    VmmError::MissingConfig(format!("{channel:?} host socket path"))
+                }
+                _ => VmmError::InvalidParam(),
+            })
+    }
+
+    /// Set or clear the DRM render node for virglrenderer EGL.
+    /// Setting a path requires a capset mask without `CROSS_DOMAIN`.
+    #[cfg(target_os = "linux")]
+    pub fn set_drm_render_node(&mut self, path: Option<&str>) -> Result<(), VmmError> {
+        self.backend_config
+            .set_drm_render_node(path.map(PathBuf::from))
+            .map_err(|_| VmmError::InvalidParam())
     }
 }
 
