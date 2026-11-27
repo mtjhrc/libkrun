@@ -83,7 +83,7 @@ The Linux kernel does not support mixed page sizes within a single kernel instan
 
 ## Headless GPU Acceleration
 
-For workloads that need GPU compute without any display output (off-screen rendering, EGL surfaceless, machine learning), attach a `GpuDevice` with `DisplayBackend::new_noop()`. The backend exposes no scanouts and rejects all display operations, so the guest can only use the GPU for off-screen rendering.
+For workloads that need GPU compute without display output (off-screen rendering, EGL surfaceless, machine learning), attach a `GpuDevice` with its default no-op display backend. The backend exposes no scanouts and rejects display operations. Use `GpuDevice::set_display_backend()` to supply a display backend with scanouts.
 
 - **Example**: `examples/chroot_vm.c` (`--gpu` flag).
 

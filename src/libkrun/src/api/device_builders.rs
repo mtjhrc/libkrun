@@ -38,6 +38,8 @@ use devices::virtio::block::{DiskFormat, SyncMode};
 use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualEntryContent};
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use devices::virtio::fs::{CachePolicy, PermissionSemantics};
+#[cfg(feature = "gpu")]
+use devices::virtio::gpu::GpuBackendConfig;
 use devices::virtio::{PortDescription, VirtioDevice, VirtioShmRegion, VmmExitObserver, port_io};
 #[cfg(feature = "input")]
 use krun_input;
@@ -2092,23 +2094,29 @@ impl DisplayBackend {
 export_bitflags! {
     #[cfg(feature = "gpu")]
     bitflags::bitflags! {
+        /// Guest capsets for a virtio GPU.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub struct VirglRendererFlags: u32 {
-            const USE_EGL            = 0x001;
-            const THREAD_SYNC        = 0x002;
-            const USE_SURFACELESS    = 0x008;
-            const VENUS              = 0x040;
-            const NO_VIRGL           = 0x080;
-            const USE_ASYNC_FENCE_CB = 0x100;
-            const RENDER_SERVER      = 0x200;
+        pub struct GpuCapset: u64 {
+            /// Both VirGL and VirGL2 for OpenGL acceleration.
+            const VIRGL              = 0x006;
+            /// Gfxstream Vulkan acceleration.
+            const GFXSTREAM_VULKAN   = 0x008;
+            /// Venus for Vulkan acceleration. Enables the render server.
+            const VENUS              = 0x010;
+            /// Cross-domain resource sharing and configured host channels.
+            const CROSS_DOMAIN       = 0x020;
+            /// DRM native contexts.
+            const DRM                = 0x040;
+            const GFXSTREAM_GLES     = 0x100;
+            const GFXSTREAM_COMPOSER = 0x200;
         }
     }
 }
 
-/// A virtio GPU device with virgl 3D acceleration.
+/// A virtio GPU device.
 #[cfg(feature = "gpu")]
 pub struct GpuDevice {
-    virgl_flags: u32,
+    backend_config: GpuBackendConfig,
     backend: DisplayBackend,
     shm_size: usize,
 }
@@ -2118,12 +2126,66 @@ pub struct GpuDevice {
 impl GpuDevice {
     const DEFAULT_SHM_SIZE: usize = 1 << 33;
 
-    pub fn new(virgl_flags: VirglRendererFlags, backend: DisplayBackend) -> Self {
-        Self {
-            virgl_flags: virgl_flags.bits(),
-            backend,
-            shm_size: Self::DEFAULT_SHM_SIZE,
+    /// Create a GPU device with the requested guest capsets and a no-op display backend.
+    ///
+    /// An empty mask selects Rutabaga's CPU-backed 2D backend.
+    /// `CROSS_DOMAIN` can be used alone or with either renderer.
+    /// Unknown bits, an incomplete `VIRGL` pair, or capsets from both renderers
+    /// return `InvalidParam`.
+    /// Gfxstream capsets require `gpu-gfxstream` and otherwise return `FeatureDisabled`.
+    pub fn new(capsets: GpuCapset) -> Result<Self, VmmError> {
+        let virglrenderer = GpuCapset::VIRGL | GpuCapset::VENUS | GpuCapset::DRM;
+        let gfxstream =
+            GpuCapset::GFXSTREAM_VULKAN | GpuCapset::GFXSTREAM_GLES | GpuCapset::GFXSTREAM_COMPOSER;
+        let has_gfxstream = capsets.intersects(gfxstream);
+        // Raw FFI masks can specify only one bit of the combined VIRGL flag.
+        let partial_virgl =
+            capsets.intersects(GpuCapset::VIRGL) && !capsets.contains(GpuCapset::VIRGL);
+        if !GpuCapset::all().contains(capsets)
+            || partial_virgl
+            || (has_gfxstream && capsets.intersects(virglrenderer))
+        {
+            return Err(VmmError::InvalidParam());
         }
+        if has_gfxstream && !cfg!(feature = "gpu-gfxstream") {
+            return Err(VmmError::FeatureDisabled());
+        }
+
+        let mut backend_config = GpuBackendConfig::new(capsets.bits());
+        backend_config.set_use_egl(has_gfxstream);
+        Ok(Self {
+            backend_config,
+            backend: DisplayBackend::new_noop(),
+            shm_size: Self::DEFAULT_SHM_SIZE,
+        })
+    }
+
+    /// Replace the display backend and its scanouts.
+    pub fn set_display_backend(&mut self, backend: DisplayBackend) {
+        self.backend = backend;
+    }
+
+    pub fn use_egl(mut self, enable: bool) -> Self {
+        self.backend_config.set_use_egl(enable);
+        self
+    }
+
+    /// Use GLES for virglrenderer's host context.
+    /// For gfxstream, the GLES capset controls GLES support.
+    pub fn use_gles(mut self, enable: bool) -> Self {
+        self.backend_config.set_use_gles(enable);
+        self
+    }
+
+    pub fn use_surfaceless(mut self, enable: bool) -> Self {
+        self.backend_config.set_use_surfaceless(enable);
+        self
+    }
+
+    /// Use the virglrenderer render server. Venus always enables it.
+    pub fn render_server(mut self, enable: bool) -> Self {
+        self.backend_config.set_render_server(enable);
+        self
     }
 
     pub fn shm_size(mut self, size: usize) -> Self {
@@ -2148,7 +2210,7 @@ impl<'a> AttachDevice<'a> for GpuDevice {
         let displays: Box<[DisplayInfo]> = self.backend.displays.into_boxed_slice();
 
         let gpu = devices::virtio::Gpu::new(
-            self.virgl_flags,
+            self.backend_config,
             displays,
             self.backend.inner,
             #[cfg(target_os = "macos")]

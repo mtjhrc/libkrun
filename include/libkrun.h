@@ -229,20 +229,20 @@ typedef struct {
 #define KRUN_TSI_FLAGS_HIJACK_UNIX 2
 #define KRUN_TSI_FLAGS_FAIL_ON_TCP_PUBLICATION_ERROR 4
 
-/* VirglRendererFlags ------------------------------------------------ */
-
-#define KRUN_VIRGL_RENDERER_FLAGS_USE_EGL 1
-#define KRUN_VIRGL_RENDERER_FLAGS_THREAD_SYNC 2
-#define KRUN_VIRGL_RENDERER_FLAGS_USE_SURFACELESS 8
-#define KRUN_VIRGL_RENDERER_FLAGS_VENUS 64
-#define KRUN_VIRGL_RENDERER_FLAGS_NO_VIRGL 128
-#define KRUN_VIRGL_RENDERER_FLAGS_USE_ASYNC_FENCE_CB 256
-#define KRUN_VIRGL_RENDERER_FLAGS_RENDER_SERVER 512
-
 /* NetFlags ---------------------------------------------------------- */
 
 #define KRUN_NET_FLAGS_VFKIT 1
 #define KRUN_NET_FLAGS_VNET_HDR 2
+
+/* GpuCapset --------------------------------------------------------- */
+
+#define KRUN_GPU_CAPSET_VIRGL 6
+#define KRUN_GPU_CAPSET_GFXSTREAM_VULKAN 8
+#define KRUN_GPU_CAPSET_VENUS 16
+#define KRUN_GPU_CAPSET_CROSS_DOMAIN 32
+#define KRUN_GPU_CAPSET_DRM 64
+#define KRUN_GPU_CAPSET_GFXSTREAM_GLES 256
+#define KRUN_GPU_CAPSET_GFXSTREAM_COMPOSER 512
 
 /* VmmError ---------------------------------------------------------- */
 
@@ -942,8 +942,33 @@ typedef void (*krun_display_backend_destroy_fn)(KrunDisplayBackend handle);
 
 /* GpuDevice --------------------------------------------------------- */
 
-KrunGpuDevice krun_gpu_device_new(uint32_t virgl_flags, KrunDisplayBackend backend);
-typedef KrunGpuDevice (*krun_gpu_device_new_fn)(uint32_t virgl_flags, KrunDisplayBackend backend);
+/**
+ * Create a GPU device with the requested guest capsets and a no-op display backend.
+ *
+ * An empty mask selects Rutabaga's CPU-backed 2D backend.
+ * `CROSS_DOMAIN` can be used alone or with either renderer.
+ * Unknown bits, an incomplete `VIRGL` pair, or capsets from both renderers
+ * return `InvalidParam`.
+ * Gfxstream capsets require `gpu-gfxstream` and otherwise return `FeatureDisabled`.
+ */
+KrunGpuDevice krun_gpu_device_new(uint64_t capsets, KrunError* err_out);
+typedef KrunGpuDevice (*krun_gpu_device_new_fn)(uint64_t capsets, KrunError* err_out);
+/** Replace the display backend and its scanouts. */
+void krun_gpu_device_set_display_backend(KrunGpuDevice handle, KrunDisplayBackend backend);
+typedef void (*krun_gpu_device_set_display_backend_fn)(KrunGpuDevice handle, KrunDisplayBackend backend);
+void krun_gpu_device_use_egl(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_use_egl_fn)(KrunGpuDevice* handle, bool enable);
+/**
+ * Use GLES for virglrenderer's host context.
+ * For gfxstream, the GLES capset controls GLES support.
+ */
+void krun_gpu_device_use_gles(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_use_gles_fn)(KrunGpuDevice* handle, bool enable);
+void krun_gpu_device_use_surfaceless(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_use_surfaceless_fn)(KrunGpuDevice* handle, bool enable);
+/** Use the virglrenderer render server. Venus always enables it. */
+void krun_gpu_device_render_server(KrunGpuDevice* handle, bool enable);
+typedef void (*krun_gpu_device_render_server_fn)(KrunGpuDevice* handle, bool enable);
 void krun_gpu_device_shm_size(KrunGpuDevice* handle, size_t size);
 typedef void (*krun_gpu_device_shm_size_fn)(KrunGpuDevice* handle, size_t size);
 void krun_gpu_device_destroy(KrunGpuDevice handle);
