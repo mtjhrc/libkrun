@@ -19,7 +19,7 @@ use std::sync::LazyLock;
 use std::thread;
 
 use anyhow::Context;
-use krun::{DeviceManager, VirglRendererFlags};
+use krun::{DeviceManager, VirglRendererCapsets};
 
 #[derive(Debug, Copy, Clone)]
 pub enum PhysicalSize {
@@ -225,14 +225,11 @@ fn krun_thread(
         vhost_gpu.set_display_backend(display_backend);
         devices.add(vhost_gpu);
     } else {
-        let gpu = krun::GpuDevice::new(
-            VirglRendererFlags::USE_EGL
-                | VirglRendererFlags::VENUS
-                | VirglRendererFlags::RENDER_SERVER
-                | VirglRendererFlags::THREAD_SYNC
-                | VirglRendererFlags::USE_ASYNC_FENCE_CB,
-            display_backend,
-        );
+        let mut gpu = krun::GpuDevice::virglrenderer(
+            VirglRendererCapsets::VIRGL | VirglRendererCapsets::VENUS,
+        )
+        .use_egl(true);
+        gpu.set_display_backend(display_backend);
         devices.add(gpu);
     }
     #[cfg(not(target_os = "linux"))]
@@ -240,14 +237,11 @@ fn krun_thread(
         if args.vhost_user_gpu.is_some() {
             anyhow::bail!("vhost-user-gpu is only supported on Linux");
         }
-        let gpu = krun::GpuDevice::new(
-            VirglRendererFlags::USE_EGL
-                | VirglRendererFlags::VENUS
-                | VirglRendererFlags::RENDER_SERVER
-                | VirglRendererFlags::THREAD_SYNC
-                | VirglRendererFlags::USE_ASYNC_FENCE_CB,
-            display_backend,
-        );
+        let mut gpu = krun::GpuDevice::virglrenderer(
+            VirglRendererCapsets::VIRGL | VirglRendererCapsets::VENUS,
+        )
+        .use_egl(true);
+        gpu.set_display_backend(display_backend);
         devices.add(gpu);
     }
 

@@ -215,6 +215,13 @@
         }
       ]
     },
+    "GfxstreamCapsets": {
+      "kind": {
+        "bitflags": {
+          "alias_of": "u64"
+        }
+      }
+    },
     "GpuDevice": {
       "kind": {
         "handle": {
@@ -417,10 +424,10 @@
       },
       "type_tag": 16777236
     },
-    "VirglRendererFlags": {
+    "VirglRendererCapsets": {
       "kind": {
         "bitflags": {
-          "alias_of": "u32"
+          "alias_of": "u64"
         }
       }
     },
@@ -3247,14 +3254,58 @@
       },
       "methods": [
         {
-          "name": "new",
+          "name": "virglrenderer",
+          "doc": [
+            " Creates a GPU device backed by virglrenderer.",
+            " Uses a no-op display backend by default.",
+            " An empty mask selects 2D rendering."
+          ],
           "receiver": "none",
           "params": [
             {
-              "name": "virgl_flags",
+              "name": "capsets",
               "param_kind": "regular",
-              "type": "VirglRendererFlags"
-            },
+              "type": "VirglRendererCapsets"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "GpuDevice"
+          },
+          "ffi_name": "krun_gpu_device_virglrenderer"
+        },
+        {
+          "name": "gfxstream",
+          "doc": [
+            " Creates a GPU device backed by gfxstream.",
+            " Uses a no-op display backend by default.",
+            " An empty mask selects 2D rendering."
+          ],
+          "receiver": "none",
+          "params": [
+            {
+              "name": "capsets",
+              "param_kind": "regular",
+              "type": "GfxstreamCapsets"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "GpuDevice"
+          },
+          "ffi_name": "krun_gpu_device_gfxstream",
+          "cfg": {
+            "kind": "feature",
+            "value": "gfxstream"
+          }
+        },
+        {
+          "name": "set_display_backend",
+          "doc": [
+            " Replace the display backend and its scanouts."
+          ],
+          "receiver": "mut",
+          "params": [
             {
               "name": "backend",
               "param_kind": "regular",
@@ -3262,10 +3313,80 @@
             }
           ],
           "ret": {
-            "return_kind": "value",
-            "type": "GpuDevice"
+            "return_kind": "void"
           },
-          "ffi_name": "krun_gpu_device_new"
+          "ffi_name": "krun_gpu_device_set_display_backend"
+        },
+        {
+          "name": "use_egl",
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_use_egl"
+        },
+        {
+          "name": "use_gles",
+          "doc": [
+            " Use GLES for virglrenderer's host context.",
+            " For gfxstream, the GLES capset controls GLES support."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_use_gles"
+        },
+        {
+          "name": "use_surfaceless",
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_use_surfaceless"
+        },
+        {
+          "name": "render_server",
+          "doc": [
+            " Use the virglrenderer render server. Venus always enables it."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_render_server"
         },
         {
           "name": "shm_size",
@@ -3765,50 +3886,6 @@
       ]
     },
     {
-      "name": "VirglRendererFlags",
-      "variants": [
-        {
-          "name": "USE_EGL",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_USE_EGL",
-          "value": 1
-        },
-        {
-          "name": "THREAD_SYNC",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_THREAD_SYNC",
-          "value": 2
-        },
-        {
-          "name": "USE_SURFACELESS",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_USE_SURFACELESS",
-          "value": 8
-        },
-        {
-          "name": "VENUS",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_VENUS",
-          "value": 64
-        },
-        {
-          "name": "NO_VIRGL",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_NO_VIRGL",
-          "value": 128
-        },
-        {
-          "name": "USE_ASYNC_FENCE_CB",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_USE_ASYNC_FENCE_CB",
-          "value": 256
-        },
-        {
-          "name": "RENDER_SERVER",
-          "c_name": "KRUN_VIRGL_RENDERER_FLAGS_RENDER_SERVER",
-          "value": 512
-        }
-      ],
-      "cfg": {
-        "kind": "feature",
-        "value": "gpu"
-      }
-    },
-    {
       "name": "NetFlags",
       "variants": [
         {
@@ -3825,6 +3902,64 @@
       "cfg": {
         "kind": "feature",
         "value": "net"
+      }
+    },
+    {
+      "name": "VirglRendererCapsets",
+      "variants": [
+        {
+          "name": "VIRGL",
+          "c_name": "KRUN_VIRGL_RENDERER_CAPSETS_VIRGL",
+          "value": 6
+        },
+        {
+          "name": "VENUS",
+          "c_name": "KRUN_VIRGL_RENDERER_CAPSETS_VENUS",
+          "value": 16
+        },
+        {
+          "name": "CROSS_DOMAIN",
+          "c_name": "KRUN_VIRGL_RENDERER_CAPSETS_CROSS_DOMAIN",
+          "value": 32
+        },
+        {
+          "name": "DRM",
+          "c_name": "KRUN_VIRGL_RENDERER_CAPSETS_DRM",
+          "value": 64
+        }
+      ],
+      "cfg": {
+        "kind": "feature",
+        "value": "gpu"
+      }
+    },
+    {
+      "name": "GfxstreamCapsets",
+      "variants": [
+        {
+          "name": "VULKAN",
+          "c_name": "KRUN_GFXSTREAM_CAPSETS_VULKAN",
+          "value": 8
+        },
+        {
+          "name": "CROSS_DOMAIN",
+          "c_name": "KRUN_GFXSTREAM_CAPSETS_CROSS_DOMAIN",
+          "value": 32
+        },
+        {
+          "name": "GLES",
+          "c_name": "KRUN_GFXSTREAM_CAPSETS_GLES",
+          "value": 256
+        },
+        {
+          "name": "COMPOSER",
+          "c_name": "KRUN_GFXSTREAM_CAPSETS_COMPOSER",
+          "value": 512
+        }
+      ],
+      "cfg": {
+        "kind": "feature",
+        "value": "gfxstream"
       }
     }
   ],

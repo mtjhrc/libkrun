@@ -30,6 +30,10 @@ pub use device_builders::CachePolicy;
 pub use device_builders::FsDevice;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use device_builders::FsOverlay;
+#[cfg(feature = "gfxstream")]
+pub use device_builders::GfxstreamCapsets;
+#[cfg(feature = "gpu")]
+pub use device_builders::GpuDevice;
 #[cfg(feature = "input")]
 pub use device_builders::InputDevice;
 #[cfg(feature = "net")]
@@ -49,6 +53,8 @@ pub use device_builders::RngDevice;
 pub use device_builders::RtcDevice;
 #[cfg(all(feature = "vhost-user", target_os = "linux"))]
 pub use device_builders::VhostUserDevice;
+#[cfg(feature = "gpu")]
+pub use device_builders::VirglRendererCapsets;
 pub use device_builders::{
     AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
     ResolvedShmRegion, TsiFlags, VsockDevice,
@@ -56,8 +62,6 @@ pub use device_builders::{
 pub use device_builders::{ConsoleBuilder, ConsoleDevice, TermSize};
 #[cfg(any(feature = "gpu", feature = "vhost-user"))]
 pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
-#[cfg(feature = "gpu")]
-pub use device_builders::{GpuDevice, VirglRendererFlags};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::balloon::FreePageReportingMode;
 #[cfg(feature = "blk")]
@@ -160,8 +164,10 @@ ffier::library_definition!("krun", library_tag = 1,
     fn crate::api::vmm_builder::check_nested_virt,
     bitflags crate::api::logging::LogOptions,
     bitflags crate::api::device_builders::TsiFlags,
-    #[cfg(feature = "gpu")]
-    bitflags crate::api::device_builders::VirglRendererFlags,
     #[cfg(feature = "net")]
     bitflags crate::api::device_builders::NetFlags,
+    #[cfg(feature = "gpu")]
+    bitflags crate::api::device_builders::VirglRendererCapsets,
+    #[cfg(feature = "gfxstream")]
+    bitflags crate::api::device_builders::GfxstreamCapsets,
 );

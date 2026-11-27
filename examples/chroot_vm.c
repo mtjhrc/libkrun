@@ -46,13 +46,6 @@
 // Net feature flags
 #define COMPAT_NET_FEATURES ((1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14))
 
-// Virgl flags for headless GPU acceleration via Venus (Vulkan): the render
-// server serves the device out-of-process and NO_VIRGL drops the OpenGL
-// (virgl) capsets, leaving Vulkan only.
-#define HEADLESS_VIRGL_FLAGS                                                      \
-    (KRUN_VIRGL_RENDERER_FLAGS_NO_VIRGL | KRUN_VIRGL_RENDERER_FLAGS_VENUS |       \
-     KRUN_VIRGL_RENDERER_FLAGS_RENDER_SERVER)
-
 enum net_mode {
     NET_MODE_PASST = 0,
     NET_MODE_TSI,
@@ -600,12 +593,8 @@ int main(int argc, char *const argv[])
 
     // Configure headless GPU acceleration if requested.
     if (cmdline.gpu) {
-        // A backend without displays: every scanout operation is rejected, so
-        // the GPU is only usable for off-screen rendering.
-        CHECK(KrunDisplayBackend backend = krun_display_backend_new_noop());
-
-        // krun_gpu_device_new takes ownership of the backend handle.
-        CHECK(KrunGpuDevice gpu = krun_gpu_device_new(HEADLESS_VIRGL_FLAGS, backend));
+        CHECK(KrunGpuDevice gpu = krun_gpu_device_virglrenderer(
+            KRUN_VIRGL_RENDERER_CAPSETS_VENUS));
         krun_device_manager_add(devices, gpu);
     }
 
