@@ -997,14 +997,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "magma-gpu"
-version = "0.1.85"
+name = "mach2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c19b363d05adbb8ca246d50b7d8dcac70003f7f429b52beebe7ce0d51cb39fd7"
+checksum = "b0d28e293f2b8c9d2b2d1c0193bd3c1cbdc0d2cf396888dc01162f7cf9d6c3f3"
+
+[[package]]
+name = "magma-gpu"
+version = "0.1.90"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "263279861a72034f0459faadecd82c532f8c9a3f4ec2bc83f90af27566e9f119"
 dependencies = [
  "cfg-if",
  "libc",
  "log",
+ "mach2",
  "remain",
  "rustix",
  "thiserror 2.0.18",
@@ -1409,9 +1416,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rutabaga_gfx"
-version = "0.1.85"
+version = "0.1.90"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52e4747a81e5e40e8f4b0d74bab0cadf675c9a470a3d75bad5989cd7c3a64fbe"
+checksum = "70cb7d48fd9a6b612304826130dfa1d777f4c31a956d42f1a4045d24c7dd172f"
 dependencies = [
  "cfg-if",
  "libc",
