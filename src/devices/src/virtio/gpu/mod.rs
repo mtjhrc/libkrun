@@ -62,6 +62,8 @@ pub enum GpuError {
     CrossDomainPathUnavailable,
     #[cfg(target_os = "linux")]
     DrmRenderNodeWithCrossDomain,
+    #[cfg(feature = "gfxstream")]
+    InvalidRendererFeatures,
 }
 
 type Result<T> = std::result::Result<T, GpuError>;

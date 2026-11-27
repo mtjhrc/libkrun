@@ -3377,6 +3377,143 @@
           "ffi_name": "krun_gpu_device_use_surfaceless"
         },
         {
+          "name": "use_external_blob",
+          "doc": [
+            " Request external blob allocation from the renderer."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_use_external_blob"
+        },
+        {
+          "name": "use_system_blob",
+          "doc": [
+            " Use system blobs with gfxstream."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_use_system_blob",
+          "cfg": {
+            "kind": "feature",
+            "value": "gfxstream"
+          }
+        },
+        {
+          "name": "use_shareable_ring_blob",
+          "doc": [
+            " Allow sharing cross-domain ring blobs."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "value",
+            "type": "Self"
+          },
+          "ffi_name": "krun_gpu_device_use_shareable_ring_blob"
+        },
+        {
+          "name": "set_display_size",
+          "doc": [
+            " Override gfxstream's initial surface size in pixels."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "width",
+              "param_kind": "regular",
+              "type": "u32"
+            },
+            {
+              "name": "height",
+              "param_kind": "regular",
+              "type": "u32"
+            }
+          ],
+          "ret": {
+            "return_kind": "void"
+          },
+          "ffi_name": "krun_gpu_device_set_display_size",
+          "cfg": {
+            "kind": "feature",
+            "value": "gfxstream"
+          }
+        },
+        {
+          "name": "set_renderer_features",
+          "doc": [
+            " Set or clear the feature string passed to gfxstream."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "features",
+              "param_kind": "regular",
+              "type": "str",
+              "ref_kind": "shared",
+              "optional": true
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_gpu_device_set_renderer_features",
+          "cfg": {
+            "kind": "feature",
+            "value": "gfxstream"
+          }
+        },
+        {
+          "name": "set_log_renderer_messages",
+          "doc": [
+            " Route gfxstream's diagnostic messages through libkrun logging."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "enable",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "void"
+          },
+          "ffi_name": "krun_gpu_device_set_log_renderer_messages",
+          "cfg": {
+            "kind": "feature",
+            "value": "gfxstream"
+          }
+        },
+        {
           "name": "render_server",
           "doc": [
             " Use the virglrenderer render server. Venus always enables it."
@@ -3394,6 +3531,33 @@
             "type": "Self"
           },
           "ffi_name": "krun_gpu_device_render_server"
+        },
+        {
+          "name": "set_render_server_fd",
+          "doc": [
+            " Take ownership of a virglrenderer server descriptor and enable the server.",
+            " Pass `None` to clear the descriptor."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "fd",
+              "param_kind": "regular",
+              "type": "OwnedFd",
+              "optional": true
+            }
+          ],
+          "ret": {
+            "return_kind": "void"
+          },
+          "ffi_name": "krun_gpu_device_set_render_server_fd",
+          "cfg": {
+            "kind": "not",
+            "value": {
+              "kind": "target_os",
+              "value": "windows"
+            }
+          }
         },
         {
           "name": "shm_size",

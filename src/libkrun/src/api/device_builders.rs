@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 use std::marker::PhantomData;
 #[cfg(feature = "blk")]
 use std::num::NonZeroUsize;
-#[cfg(all(feature = "net", not(target_os = "windows")))]
+#[cfg(all(any(feature = "net", feature = "gpu"), not(target_os = "windows")))]
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
@@ -2193,10 +2193,56 @@ impl GpuDevice {
         self
     }
 
+    /// Request external blob allocation from the renderer.
+    pub fn use_external_blob(mut self, enable: bool) -> Self {
+        self.backend_config.set_use_external_blob(enable);
+        self
+    }
+
+    /// Use system blobs with gfxstream.
+    #[cfg(feature = "gfxstream")]
+    pub fn use_system_blob(mut self, enable: bool) -> Self {
+        self.backend_config.set_use_system_blob(enable);
+        self
+    }
+
+    /// Allow sharing cross-domain ring blobs.
+    pub fn use_shareable_ring_blob(mut self, enable: bool) -> Self {
+        self.backend_config.set_use_shareable_ring_blob(enable);
+        self
+    }
+
+    /// Override gfxstream's initial surface size in pixels.
+    #[cfg(feature = "gfxstream")]
+    pub fn set_display_size(&mut self, width: u32, height: u32) {
+        self.backend_config.set_display_size(width, height);
+    }
+
+    /// Set or clear the feature string passed to gfxstream.
+    #[cfg(feature = "gfxstream")]
+    pub fn set_renderer_features(&mut self, features: Option<&str>) -> Result<(), VmmError> {
+        self.backend_config
+            .set_renderer_features(features)
+            .map_err(|_| VmmError::InvalidParam())
+    }
+
+    /// Route gfxstream's diagnostic messages through libkrun logging.
+    #[cfg(feature = "gfxstream")]
+    pub fn set_log_renderer_messages(&mut self, enable: bool) {
+        self.backend_config.set_log_renderer_messages(enable);
+    }
+
     /// Use the virglrenderer render server. Venus always enables it.
     pub fn render_server(mut self, enable: bool) -> Self {
         self.backend_config.set_render_server(enable);
         self
+    }
+
+    /// Take ownership of a virglrenderer server descriptor and enable the server.
+    /// Pass `None` to clear the descriptor.
+    #[cfg(not(target_os = "windows"))]
+    pub fn set_render_server_fd(&mut self, fd: Option<OwnedFd>) {
+        self.backend_config.set_render_server_fd(fd);
     }
 
     pub fn shm_size(mut self, size: usize) -> Self {

@@ -36,7 +36,6 @@ pub struct Worker {
     mem: GuestMemoryMmap,
     interrupt: InterruptTransport,
     shm_region: VirtioShmRegion,
-    backend_config: GpuBackendConfig,
     #[cfg(target_os = "macos")]
     map_sender: Sender<WorkerMessage>,
     export_table: Option<ExportTable>,
@@ -51,7 +50,6 @@ impl Worker {
         mem: GuestMemoryMmap,
         interrupt: InterruptTransport,
         shm_region: VirtioShmRegion,
-        backend_config: GpuBackendConfig,
         #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
         export_table: Option<ExportTable>,
         displays: Box<[DisplayInfo]>,
@@ -71,7 +69,6 @@ impl Worker {
             mem,
             interrupt,
             shm_region,
-            backend_config,
             #[cfg(target_os = "macos")]
             map_sender,
             export_table,
@@ -80,19 +77,19 @@ impl Worker {
         }
     }
 
-    pub fn run(self) {
+    pub fn run(self, backend_config: GpuBackendConfig) {
         thread::Builder::new()
             .name("gpu worker".into())
-            .spawn(|| self.work())
+            .spawn(|| self.work(backend_config))
             .unwrap();
     }
 
-    fn work(mut self) {
+    fn work(mut self, backend_config: GpuBackendConfig) {
         let mut virtio_gpu = VirtioGpu::new(
             self.mem.clone(),
             self.control_queue.clone(),
             self.interrupt.clone(),
-            &self.backend_config,
+            backend_config,
             #[cfg(target_os = "macos")]
             self.map_sender.clone(),
             self.export_table.take(),

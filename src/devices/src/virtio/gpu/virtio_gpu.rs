@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::env;
+#[cfg(feature = "gfxstream")]
+use std::ffi::CStr;
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
 use std::io::IoSliceMut;
+use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, AsRawFd};
 #[cfg(target_os = "linux")]
@@ -24,6 +27,8 @@ use krun_display::{
     DisplayBackend, DisplayBackendBasicFramebuffer, DisplayBackendInstance, Rect, ResourceFormat,
 };
 use libc::c_void;
+#[cfg(feature = "gfxstream")]
+use log::Level;
 #[cfg(any(
     all(target_os = "linux", feature = "virgl_resource_map2"),
     target_os = "macos"
@@ -43,6 +48,10 @@ use rutabaga_gfx::{
     RutabagaBuilder, RutabagaComponentType, RutabagaDescriptor, RutabagaFence,
     RutabagaFenceHandler, RutabagaIovec, RutabagaResult, Transfer3D, VirtioFsLookup,
 };
+#[cfg(feature = "gfxstream")]
+use rutabaga_gfx::{
+    RUTABAGA_DEBUG_ERROR, RUTABAGA_DEBUG_INFO, RUTABAGA_DEBUG_WARNING, RutabagaDebugHandler,
+};
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 use vm_memory::{GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
@@ -53,15 +62,26 @@ use crate::virtio::fs::ExportTable;
 use crate::virtio::gpu::protocol::VIRTIO_GPU_FLAG_INFO_RING_IDX;
 use crate::virtio::{InterruptTransport, VirtioShmRegion};
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct GpuBackendConfig {
     pub(crate) capset_mask: u64,
     use_egl: bool,
     use_gles: bool,
     use_surfaceless: bool,
     use_render_server: bool,
+    use_external_blob: bool,
+    use_shareable_ring_blob: bool,
+    render_server_fd: Option<OwnedFd>,
     #[cfg(target_os = "linux")]
     paths: Vec<RutabagaPath>,
+    #[cfg(feature = "gfxstream")]
+    use_system_blob: bool,
+    #[cfg(feature = "gfxstream")]
+    display_size: Option<(u32, u32)>,
+    #[cfg(feature = "gfxstream")]
+    renderer_features: Option<String>,
+    #[cfg(feature = "gfxstream")]
+    log_renderer_messages: bool,
 }
 
 impl GpuBackendConfig {
@@ -95,6 +115,18 @@ impl GpuBackendConfig {
 
     pub fn set_render_server(&mut self, enable: bool) {
         self.use_render_server = enable;
+    }
+
+    pub fn set_use_external_blob(&mut self, enable: bool) {
+        self.use_external_blob = enable;
+    }
+
+    pub fn set_use_shareable_ring_blob(&mut self, enable: bool) {
+        self.use_shareable_ring_blob = enable;
+    }
+
+    pub fn set_render_server_fd(&mut self, fd: Option<OwnedFd>) {
+        self.render_server_fd = fd;
     }
 
     #[cfg(target_os = "linux")]
@@ -151,6 +183,30 @@ impl GpuBackendConfig {
     #[cfg(target_os = "linux")]
     fn rutabaga_paths(&self) -> Option<Vec<RutabagaPath>> {
         (!self.paths.is_empty()).then(|| self.paths.clone())
+    }
+
+    #[cfg(feature = "gfxstream")]
+    pub fn set_use_system_blob(&mut self, enable: bool) {
+        self.use_system_blob = enable;
+    }
+
+    #[cfg(feature = "gfxstream")]
+    pub fn set_display_size(&mut self, width: u32, height: u32) {
+        self.display_size = Some((width, height));
+    }
+
+    #[cfg(feature = "gfxstream")]
+    pub fn set_renderer_features(&mut self, features: Option<&str>) -> Result<()> {
+        if features.is_some_and(|features| features.contains('\0')) {
+            return Err(GpuError::InvalidRendererFeatures);
+        }
+        self.renderer_features = features.map(str::to_owned);
+        Ok(())
+    }
+
+    #[cfg(feature = "gfxstream")]
+    pub fn set_log_renderer_messages(&mut self, enable: bool) {
+        self.log_renderer_messages = enable;
     }
 }
 
@@ -398,13 +454,15 @@ impl VirtioGpu {
         queue_ctl: Arc<Mutex<VirtQueue>>,
         interrupt: InterruptTransport,
         fence_state: Arc<Mutex<FenceState>>,
-        config: &GpuBackendConfig,
+        config: GpuBackendConfig,
         export_table: Option<ExportTable>,
     ) -> Option<Rutabaga> {
         let fence =
             Self::create_fence_handler(mem, queue_ctl.clone(), fence_state.clone(), interrupt);
 
         let venus = config.capset_mask & (1 << RUTABAGA_CAPSET_VENUS) != 0;
+        let use_render_server =
+            config.use_render_server || venus || config.render_server_fd.is_some();
         // Rutabaga selects the renderer and sets NO_VIRGL for nonempty masks.
         // Select 2D by default so an empty mask advertises zero capsets.
         let mut builder = RutabagaBuilder::new(config.capset_mask, fence)
@@ -412,11 +470,41 @@ impl VirtioGpu {
             .set_use_egl(config.use_egl)
             .set_use_gles(config.use_gles)
             .set_use_surfaceless(config.use_surfaceless)
-            .set_use_render_server(config.use_render_server || venus);
+            .set_use_external_blob(config.use_external_blob)
+            .set_use_shareable_ring_blob(config.use_shareable_ring_blob)
+            .set_use_render_server(use_render_server);
 
         #[cfg(target_os = "linux")]
         {
             builder = builder.set_rutabaga_paths(config.rutabaga_paths());
+        }
+
+        builder = builder.set_server_descriptor(config.render_server_fd.map(Into::into));
+
+        #[cfg(feature = "gfxstream")]
+        {
+            builder = builder
+                .set_use_system_blob(config.use_system_blob)
+                .set_renderer_features(config.renderer_features);
+            if let Some((width, height)) = config.display_size {
+                builder = builder.set_display_width(width).set_display_height(height);
+            }
+            if config.log_renderer_messages {
+                builder = builder.set_debug_handler(Some(RutabagaDebugHandler::new(|debug| {
+                    if debug.message.is_null() {
+                        return;
+                    }
+                    // SAFETY: gfxstream supplies a C string valid during the callback.
+                    let message = unsafe { CStr::from_ptr(debug.message) }.to_string_lossy();
+                    let level = match debug.debug_type {
+                        RUTABAGA_DEBUG_ERROR => Level::Error,
+                        RUTABAGA_DEBUG_WARNING => Level::Warn,
+                        RUTABAGA_DEBUG_INFO => Level::Info,
+                        _ => Level::Debug,
+                    };
+                    log::log!(level, "gfxstream: {message}");
+                })));
+            }
         }
 
         if let Some(export_table) = export_table {
@@ -447,7 +535,7 @@ impl VirtioGpu {
         mem: GuestMemoryMmap,
         queue_ctl: Arc<Mutex<VirtQueue>>,
         interrupt: InterruptTransport,
-        config: &GpuBackendConfig,
+        config: GpuBackendConfig,
         #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
         export_table: Option<ExportTable>,
         displays: Box<[DisplayInfo]>,
