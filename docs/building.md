@@ -32,10 +32,15 @@ TSI version from an arbitrary kernel image.
 
 - `BLK=1`: Enables virtio-block support (`BlockDevice`).
 - `NET=1`: Enables virtio-net support (`NetDevice`).
-- `GPU=1`: Enables virtio-gpu support (`GpuDevice`). Requires virglrenderer development libraries.
+- `GPU=1` enables virtio-gpu with virglrenderer. Requires virglrenderer development libraries.
+- `GPU=1 VIRGLRENDERER=0` enables virtio-gpu with Rutabaga2D and CrossDomain.
+- `GFXSTREAM=1` enables virtio-gpu with gfxstream. Combine with `GPU=1` to include both renderers.
 - `INPUT=1`: Enables virtio-input support (`InputDevice`).
 - `VHOST_USER=1`: Enables vhost-user device bridge support (`VhostUserDevice`).
 - `TIMESYNC=1`: Enables PTP time synchronization device support.
+
+Cargo uses `gpu` for the base device, `gpu-virglrenderer` for virglrenderer, and
+`gpu-gfxstream` for gfxstream. Each renderer feature enables `gpu`.
 
 ### Compiling
 

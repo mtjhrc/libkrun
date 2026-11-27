@@ -56,7 +56,11 @@ endif
 ifeq ($(NET),1)
     FEATURE_FLAGS += --features net
 endif
-ifeq ($(GPU),1)
+# GPU=1 has historically included virglrenderer.
+VIRGLRENDERER ?= $(GPU)
+ifeq ($(VIRGLRENDERER),1)
+    FEATURE_FLAGS += --features gpu-virglrenderer
+else ifeq ($(GPU),1)
     FEATURE_FLAGS += --features gpu
 endif
 ifeq ($(GFXSTREAM),1)

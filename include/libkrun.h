@@ -959,7 +959,8 @@ typedef void (*krun_display_backend_destroy_fn)(KrunDisplayBackend handle);
  * `CROSS_DOMAIN` can be used alone or with either renderer.
  * Unknown bits, an incomplete `VIRGL` pair, or capsets from both renderers
  * return `InvalidParam`.
- * Gfxstream capsets require `gpu-gfxstream` and otherwise return `FeatureDisabled`.
+ * Virglrenderer capsets require `gpu-virglrenderer`. Gfxstream capsets require
+ * `gpu-gfxstream`. Requesting a renderer missing from the build returns `FeatureDisabled`.
  */
 KrunGpuDevice krun_gpu_device_new(uint64_t capsets, KrunError* err_out);
 typedef KrunGpuDevice (*krun_gpu_device_new_fn)(uint64_t capsets, KrunError* err_out);

@@ -26,8 +26,8 @@ jobs:
       - name: Clippy (tdx)
         run: cargo clippy --locked -p libkrun --features tdx -- -D warnings
       
-      - name: Clippy (net+blk+gpu+input)
-        run: cargo clippy --locked --features net,blk,gpu,input -- -D warnings
+      - name: Clippy (net+blk+gpu-virglrenderer+input)
+        run: cargo clippy --locked --features net,blk,gpu-virglrenderer,input -- -D warnings
       
       - name: Clippy (aws-nitro+net)
         run: cargo clippy --locked -p libkrun --features aws-nitro,net -- -D warnings
@@ -47,8 +47,8 @@ jobs:
       - name: Clippy (default)
         run: cargo clippy --locked -- -D warnings
       
-      - name: Clippy (net+blk+gpu+input)
-        run: cargo clippy --locked --features net,blk,gpu,input -- -D warnings
+      - name: Clippy (net+blk+gpu-virglrenderer+input)
+        run: cargo clippy --locked --features net,blk,gpu-virglrenderer,input -- -D warnings
 
   code-quality-macos:
     name: libkrun (macOS aarch64)
@@ -62,8 +62,8 @@ jobs:
       - name: Create a fake init
         run: touch init/init
       
-      - name: Clippy (gpu)
-        run: cargo clippy --locked --features gpu -- -D warnings
+      - name: Clippy (gpu-virglrenderer)
+        run: cargo clippy --locked --features gpu-virglrenderer -- -D warnings
         env:
           KRUN_INIT_BINARY_PATH: ${{ github.workspace }}/init/init
 

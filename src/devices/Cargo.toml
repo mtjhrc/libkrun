@@ -15,6 +15,7 @@ tdx = ["blk", "tee"]
 net = []
 blk = []
 gpu = ["rutabaga_gfx", "thiserror", "zerocopy", "krun_display"]
+gpu-virglrenderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
 gpu-gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
 input = ["zerocopy", "krun_input"]
 virgl_resource_map2 = []
@@ -44,7 +45,7 @@ krun_input = { package = "krun-input", version = "0.1.0", path = "../input", fea
 arch = { package = "krun-arch", version = "=0.1.0-2.0.0-dev", path = "../arch" }
 utils = { package = "krun-utils", version = "=0.1.0-2.0.0-dev", path = "../utils" }
 polly = { package = "krun-polly", version = "=0.1.0-2.0.0-dev", path = "../polly" }
-rutabaga_gfx = { version = "0.1.90", features = ["virgl_renderer"], optional = true }
+rutabaga_gfx = { version = "0.1.90", optional = true }
 imago = { version = "0.2.6", default-features = false, features = ["sync", "vm-memory"] }
 
 [target.'cfg(unix)'.dependencies]

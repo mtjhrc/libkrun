@@ -2136,22 +2136,26 @@ impl GpuDevice {
     /// `CROSS_DOMAIN` can be used alone or with either renderer.
     /// Unknown bits, an incomplete `VIRGL` pair, or capsets from both renderers
     /// return `InvalidParam`.
-    /// Gfxstream capsets require `gpu-gfxstream` and otherwise return `FeatureDisabled`.
+    /// Virglrenderer capsets require `gpu-virglrenderer`. Gfxstream capsets require
+    /// `gpu-gfxstream`. Requesting a renderer missing from the build returns `FeatureDisabled`.
     pub fn new(capsets: GpuCapset) -> Result<Self, VmmError> {
         let virglrenderer = GpuCapset::VIRGL | GpuCapset::VENUS | GpuCapset::DRM;
         let gfxstream =
             GpuCapset::GFXSTREAM_VULKAN | GpuCapset::GFXSTREAM_GLES | GpuCapset::GFXSTREAM_COMPOSER;
+        let has_virglrenderer = capsets.intersects(virglrenderer);
         let has_gfxstream = capsets.intersects(gfxstream);
         // Raw FFI masks can specify only one bit of the combined VIRGL flag.
         let partial_virgl =
             capsets.intersects(GpuCapset::VIRGL) && !capsets.contains(GpuCapset::VIRGL);
         if !GpuCapset::all().contains(capsets)
             || partial_virgl
-            || (has_gfxstream && capsets.intersects(virglrenderer))
+            || (has_gfxstream && has_virglrenderer)
         {
             return Err(VmmError::InvalidParam());
         }
-        if has_gfxstream && !cfg!(feature = "gpu-gfxstream") {
+        if (has_virglrenderer && !cfg!(feature = "gpu-virglrenderer"))
+            || (has_gfxstream && !cfg!(feature = "gpu-gfxstream"))
+        {
             return Err(VmmError::FeatureDisabled());
         }
 
